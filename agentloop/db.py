@@ -1,0 +1,74 @@
+"""SQLite runtime state: missions, sessions, turns, inbox events, notes, advisor messages."""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import time
+from pathlib import Path
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS missions(
+  ws TEXT, id TEXT, status TEXT, orchestrator TEXT, started REAL, ended REAL,
+  meta_turns INT DEFAULT 0, worker_turns INT DEFAULT 0, tokens INT DEFAULT 0,
+  cost REAL DEFAULT 0, final_turn INT DEFAULT 0, idle_streak INT DEFAULT 0,
+  fail_streak INT DEFAULT 0, active_s REAL DEFAULT 0, outcome TEXT,
+  PRIMARY KEY(ws, id));
+CREATE TABLE IF NOT EXISTS sessions(
+  id TEXT PRIMARY KEY, ws TEXT, mission TEXT, kind TEXT, parent TEXT, role TEXT,
+  label TEXT, agent TEXT, model TEXT, effort TEXT, autocompact TEXT, vendor_id TEXT,
+  cwd TEXT, branch TEXT, status TEXT, turns INT DEFAULT 0, tokens INT DEFAULT 0,
+  cost REAL DEFAULT 0, context INT DEFAULT 0, token TEXT, gpu INT DEFAULT 0,
+  merged INT DEFAULT 0, created REAL, updated REAL);
+CREATE TABLE IF NOT EXISTS turns(
+  id INTEGER PRIMARY KEY, session TEXT, n INT, started REAL, ended REAL, status TEXT,
+  start_commit TEXT, end_commit TEXT, exit_code INT, tokens INT, cost REAL, final TEXT);
+CREATE TABLE IF NOT EXISTS inbox(
+  id INTEGER PRIMARY KEY, ws TEXT, mission TEXT, ts REAL, kind TEXT, payload TEXT,
+  deferred INT DEFAULT 0, consumed INT DEFAULT 0);
+CREATE TABLE IF NOT EXISTS notes(
+  id INTEGER PRIMARY KEY, ws TEXT, mission TEXT, ts REAL, text TEXT, author TEXT,
+  status TEXT, mode TEXT, source_session TEXT);
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY, session TEXT, ts REAL, role TEXT, text TEXT);
+"""
+
+
+class DB:
+    def __init__(self, path: Path):
+        self.conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.Lock()
+        with self.lock:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.executescript(SCHEMA)
+
+    def q(self, sql: str, *args) -> list[dict]:
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def one(self, sql: str, *args) -> dict | None:
+        rows = self.q(sql, *args)
+        return rows[0] if rows else None
+
+    def x(self, sql: str, *args) -> int:
+        with self.lock:
+            return self.conn.execute(sql, args).lastrowid
+
+    # Convenience helpers used across the engine
+    def update(self, table: str, key: dict, **fields) -> None:
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        where = " AND ".join(f"{k}=?" for k in key)
+        self.x(f"UPDATE {table} SET {sets} WHERE {where}", *fields.values(), *key.values())
+
+    def session(self, sid: str) -> dict | None:
+        return self.one("SELECT * FROM sessions WHERE id=?", sid)
+
+    def mission(self, ws: str, mid: str) -> dict | None:
+        return self.one("SELECT * FROM missions WHERE ws=? AND id=?", ws, mid)
+
+    def push_inbox(self, ws: str, mid: str, kind: str, payload: dict, deferred: bool = False) -> int:
+        return self.x("INSERT INTO inbox(ws, mission, ts, kind, payload, deferred) VALUES(?,?,?,?,?,?)",
+                      ws, mid, time.time(), kind, json.dumps(payload), int(deferred))

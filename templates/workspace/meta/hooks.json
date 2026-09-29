@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|apply_patch",
+        "hooks": [{"type": "command", "command": "{{PY}} -m agentloop.guard", "timeout": 30}]
+      }
+    ]
+  }
+}

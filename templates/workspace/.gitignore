@@ -1,0 +1,6 @@
+repo/
+wt/
+data/
+.loop/
+missions/*/runs/*/artifacts/
+meta/tmp/

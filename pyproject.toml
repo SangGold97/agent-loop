@@ -1,0 +1,23 @@
+[project]
+name = "agentloop"
+version = "0.1.0"
+description = "Human-on-the-loop platform: meta-agents orchestrate Claude Code / Codex workers until a Definition of Done is met."
+requires-python = ">=3.10"
+dependencies = ["fastapi", "uvicorn[standard]", "pyyaml", "psutil"]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[project.scripts]
+agentloop = "agentloop.__main__:main"
+loop = "agentloop.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agentloop*"]
+
+[tool.setuptools.package-data]
+agentloop = ["web/*"]

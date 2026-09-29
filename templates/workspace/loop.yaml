@@ -1,0 +1,43 @@
+# Workspace defaults. Missions copy `defaults` at creation and may override them in mission.yaml.
+limits:
+  max_orchestrators: 3        # orchestrator sessions running at once (all missions of this workspace)
+  max_workers_total: 6        # worker sessions running at once (all missions of this workspace)
+
+defaults:
+  meta:                       # orchestrator of a mission
+    agent: claude             # claude | codex
+    model: opus
+    effort: high              # claude: low|medium|high|xhigh|max ; codex: minimal|low|medium|high|xhigh
+    autocompact: null         # tokens before auto-compaction (null = CLI default)
+    rotate_at_tokens: null    # start a fresh orchestrator session when context exceeds this
+  advisor:                    # prompt-by-prompt chat sessions bound to a mission
+    agent: claude
+    model: opus
+    effort: medium
+    autocompact: null
+  roles:                      # worker roles the orchestrator can spawn
+    coder:    {agent: claude, model: opus, effort: high, autocompact: null}
+    research: {agent: codex, model: gpt-6-astra, effort: high, autocompact: null}
+    reviewer: {agent: codex, model: gpt-6-astra, effort: high, autocompact: null}
+  budget:
+    max_concurrent_workers: 3
+    max_worker_turns: 40      # spawn + send, over the whole mission
+    max_meta_turns: 80
+    max_hours: 12
+    max_tokens: null
+  base_branch: null           # null = the repo's current branch
+  push: manual                # manual | branch (push loop/<mission>/integration on accept; never main)
+
+digest:                       # what a finished worker turn sends back to the orchestrator
+  max_output_words: 500
+  max_diff_lines: 80
+
+infra:
+  min_free_ram_gb: 2          # refuse to start workers below this
+  worker_memory_max_gb: 8     # hard cap per worker (systemd scope)
+  gpu_slots: 1
+
+turn_timeout_min: 180
+
+guard:
+  deny_patterns: []           # extra regexes; matching shell commands are blocked for all agents

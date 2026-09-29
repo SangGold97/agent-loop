@@ -1,0 +1,24 @@
+# Workspace map (agent-loop)
+
+This workspace is run by agent-loop. The workspace root is `$LOOP_WS`; paths below are relative to it.
+
+| Path | Purpose | Written by |
+|---|---|---|
+| `loop.yaml` | Workspace defaults: agents, models, budgets, limits | human |
+| `meta/` | Meta-agent harness: `AGENTS.md`, `skills/`, `memory/`, `docs/` | human; meta may improve memory/docs/skills |
+| `worker/` | Worker harness: `AGENTS.md`, `skills/`, `memory/`, `docs/`, `claude-plugin/` | human; meta may improve memory/docs/skills |
+| `*/hooks.json` | Guard hooks (Claude Code and Codex share the format) | human only |
+| `missions/<id>/spec.md`, `dod.md`, `mission.yaml` | Goal, Definition of Done, mission config | human only |
+| `missions/<id>/plan.md` | Current strategy and checklist | orchestrator |
+| `missions/<id>/journal.md` | Append-only decision log | orchestrator |
+| `missions/<id>/notes.md` | Human guidance for the orchestrator | platform (from the human) |
+| `missions/<id>/report.md` | Completion report | platform (from `loop done`) |
+| `missions/<id>/runs/<sid>/` | Per-worker evidence: `t<n>.prompt.md`, `t<n>.out.md`, `t<n>.diff`, `artifacts/` | platform, worker |
+| `repo/` | The project's git repository | workers (through worktrees); only the human merges `main` |
+| `wt/<sid>/` | One git worktree per worker, branch `loop/<mission>/<label>-<sid>` | worker |
+| `wt/_int-<mission>/` | Integration branch `loop/<mission>/integration` | platform (`loop merge`) |
+| `data/` | Large shared data (datasets, checkpoints) | human, workers that fetch data |
+| `.loop/` | Runtime logs and state | platform |
+
+Memory: `meta/memory/` holds cross-mission lessons for meta-agents, `worker/memory/` for workers.
+Keep one short file per lesson and list it in that folder's `README.md`.
