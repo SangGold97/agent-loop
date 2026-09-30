@@ -1,4 +1,4 @@
-"""SQLite runtime state: missions, sessions, turns, inbox events, notes, advisor messages."""
+"""SQLite runtime state: missions, sessions, turns, inbox events, notes, meta-chat messages."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS missions(
-  ws TEXT, id TEXT, status TEXT, orchestrator TEXT, started REAL, ended REAL,
+  ws TEXT, id TEXT, status TEXT, meta_work TEXT, started REAL, ended REAL,
   meta_turns INT DEFAULT 0, worker_turns INT DEFAULT 0, tokens INT DEFAULT 0,
   cost REAL DEFAULT 0, final_turn INT DEFAULT 0, idle_streak INT DEFAULT 0,
   fail_streak INT DEFAULT 0, active_s REAL DEFAULT 0, outcome TEXT,

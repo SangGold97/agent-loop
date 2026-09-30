@@ -15,7 +15,7 @@ from pathlib import Path
 @dataclass
 class RunSpec:
     agent: str
-    kind: str                      # meta | advisor | worker
+    kind: str                      # meta (meta-work, meta-chat) | worker
     cwd: Path
     prompt: str
     model: str | None = None

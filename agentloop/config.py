@@ -13,12 +13,12 @@ TEMPLATES = PLATFORM_ROOT / "templates"
 PYTHON = sys.executable
 
 DEFAULTS: dict = {
-    "limits": {"max_orchestrators": 3, "max_workers_total": 6},
+    "limits": {"max_running_missions": 3, "max_workers_total": 6},
     "defaults": {
-        "meta": {"agent": "claude", "model": "opus", "effort": "high",
-                 "autocompact": None, "rotate_at_tokens": None},
-        "advisor": {"agent": "claude", "model": "opus", "effort": "medium",
-                    "autocompact": None},
+        "meta_work": {"agent": "claude", "model": "opus", "effort": "high",
+                      "autocompact": None, "rotate_at_tokens": None},
+        "meta_chat": {"agent": "claude", "model": "opus", "effort": "medium",
+                      "autocompact": None},
         "roles": {
             "coder": {"agent": "claude", "model": "opus", "effort": "high", "autocompact": None},
             "research": {"agent": "codex", "model": "gpt-6-astra", "effort": "high",
@@ -38,7 +38,7 @@ DEFAULTS: dict = {
 }
 
 # Mission-level keys that override workspace defaults; "roles" is replaced, not merged
-MISSION_KEYS = ("meta", "advisor", "roles", "budget", "base_branch", "push")
+MISSION_KEYS = ("meta_work", "meta_chat", "roles", "budget", "base_branch", "push")
 
 
 def home() -> Path:

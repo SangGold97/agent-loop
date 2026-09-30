@@ -77,7 +77,7 @@ def guard_env(tmp_path: Path, role: str) -> dict:
 def test_guard_rules(tmp_path):
     for d in ("wt/w-1", "missions/m1/runs/w-1", "repo", "meta"):
         (tmp_path / d).mkdir(parents=True, exist_ok=True)
-    w, m = guard_env(tmp_path, "worker"), guard_env(tmp_path, "meta")
+    w, m = guard_env(tmp_path, "worker"), guard_env(tmp_path, "meta-work")
     ev = lambda tool, **inp: {"tool_name": tool, "tool_input": inp, "cwd": str(tmp_path / "wt/w-1")}
     assert guard.check(ev("Bash", command="git push origin main"), w)
     assert guard.check(ev("Bash", command="aws s3 ls --profile prod"), w)
@@ -99,7 +99,7 @@ def test_guard_rules(tmp_path):
 
 def test_guard_ignores_prompt_text(tmp_path):
     (tmp_path / "wt/w-1").mkdir(parents=True)
-    m = guard_env(tmp_path, "meta")
+    m = guard_env(tmp_path, "meta-work")
     ev = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path)}
     spawn = "loop spawn --role coder <<'EOF'\nImplement X, git commit your work, never git push.\nRead $LOOP_MISSION_DIR/dod.md > notes\nEOF"
     assert guard.check(ev(spawn), m) is None

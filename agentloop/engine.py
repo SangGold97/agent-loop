@@ -1,4 +1,4 @@
-"""Mission engine: event-driven orchestrator turns, workers, advisors, notes, budgets, review."""
+"""Mission engine: event-driven meta-work turns, workers, meta-chats, notes, budgets, review."""
 from __future__ import annotations
 
 import asyncio
@@ -23,7 +23,7 @@ from .runner import Runner, child_env, unit_prefix
 
 log = logging.getLogger("agentloop")
 VERIFY_TIMEOUT_S = 900
-PREFIX = {"orchestrator": "o", "worker": "w", "advisor": "a"}
+PREFIX = {"meta-work": "mw", "worker": "w", "meta-chat": "mc"}
 
 
 class AgentError(Exception):
@@ -245,12 +245,12 @@ class Engine:
     def mode_text(self, sess: dict) -> str:
         ws, mid = sess["ws"], sess["mission"]
         p, mdir = self.wsp(ws), self.mdir(ws, mid)
-        if sess["kind"] == "orchestrator":
-            return (f"MODE: ORCHESTRATOR for mission {mid} in workspace {ws}. Mission dir: {mdir}. "
-                    f"Workspace root: {p}. Follow the ORCHESTRATOR section of your AGENTS.md.")
-        orch = self.mission_row(ws, mid)["orchestrator"] or "not started"
-        return (f"MODE: ADVISOR for mission {mid} in workspace {ws}. Mission dir: {mdir}. Workspace root: {p}. "
-                f"Orchestrator session: {orch}. Follow the ADVISOR section of your AGENTS.md; "
+        if sess["kind"] == "meta-work":
+            return (f"MODE: META-WORK for mission {mid} in workspace {ws}. Mission dir: {mdir}. "
+                    f"Workspace root: {p}. Follow the META-WORK section of your AGENTS.md.")
+        orch = self.mission_row(ws, mid)["meta_work"] or "not started"
+        return (f"MODE: META-CHAT for mission {mid} in workspace {ws}. Mission dir: {mdir}. Workspace root: {p}. "
+                f"Meta-work session: {orch}. Follow the META-CHAT section of your AGENTS.md; "
                 "you cannot dispatch workers.")
 
     def build_spec(self, sess: dict, prompt: str, n: int) -> RunSpec:
@@ -258,7 +258,7 @@ class Engine:
         p, mdir = self.wsp(ws), self.mdir(ws, mid)
         cfg = mission_config(p, mid)
         worker = sess["kind"] == "worker"
-        env = {"LOOP_ROLE": "worker" if worker else ("meta" if sess["kind"] == "orchestrator" else "advisor"),
+        env = {"LOOP_ROLE": sess["kind"],
                "LOOP_WS": p, "LOOP_MISSION": mid, "LOOP_MISSION_DIR": mdir, "LOOP_SESSION": sid,
                "LOOP_GUARD_PATTERNS": json.dumps(cfg["guard"]["deny_patterns"] or [])}
         spec = RunSpec(agent=sess["agent"], kind="worker" if worker else "meta", cwd=Path(sess["cwd"]),
@@ -343,15 +343,15 @@ class Engine:
         p, m = self.wsp(ws), self.mission_row(ws, mid)
         if m["status"] in ("running", "awaiting_review", "done"):
             raise AgentError(f"mission is {m['status']}")
-        limit = workspace_config(p)["limits"]["max_orchestrators"]
+        limit = workspace_config(p)["limits"]["max_running_missions"]
         running = self.db.one("SELECT COUNT(*) c FROM missions WHERE ws=? AND status='running'", ws)["c"]
         if running >= limit:
-            raise AgentError(f"{running} missions already running in this workspace (max_orchestrators={limit})")
+            raise AgentError(f"{running} missions already running in this workspace (max_running_missions={limit})")
         mc = mission_config(p, mid)["mission"]
         gitops.ensure_integration(p, mid, mc.get("base_branch"))
-        if not m["orchestrator"]:
-            orch = self.new_session(ws, mid, "orchestrator", "meta", "orchestrator", mc["meta"], p / "meta")
-            self.set_mission(ws, mid, orchestrator=orch["id"])
+        if not m["meta_work"]:
+            orch = self.new_session(ws, mid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
+            self.set_mission(ws, mid, meta_work=orch["id"])
             self.db.push_inbox(ws, mid, "kickoff", {"text": self.kickoff_text(ws, mid)})
         else:
             self.db.push_inbox(ws, mid, "system", {"text": "[System] The human resumed the mission. "
@@ -360,15 +360,15 @@ class Engine:
                          fail_streak=0)
         self.kick(ws, mid)
 
-    async def stop_mission(self, ws: str, mid: str, status: str = "stopped", orchestrator: bool = True) -> None:
-        """Leave the running state; kill workers (and the orchestrator unless it is the caller)."""
+    async def stop_mission(self, ws: str, mid: str, status: str = "stopped", meta_work: bool = True) -> None:
+        """Leave the running state; kill workers (and the meta-work unless it is the caller)."""
         m = self.mission_row(ws, mid)
         if m["status"] == "running":
             self.set_mission(ws, mid, status=status, active_s=self.budget(ws, mid)["hours"] * 3600,
                              started=None)
         elif m["status"] != status:
             self.set_mission(ws, mid, status=status)
-        kinds = ("worker", "orchestrator") if orchestrator else ("worker",)
+        kinds = ("worker", "meta-work") if meta_work else ("worker",)
         for s in self.db.q("SELECT id, kind FROM sessions WHERE ws=? AND mission=?", ws, mid):
             if s["kind"] in kinds:
                 await self.runner.kill(s["id"], stopped=True)
@@ -401,7 +401,7 @@ class Engine:
                     self.db.x(f"UPDATE inbox SET consumed=0 WHERE id IN ({ids}) AND consumed=2")
                     log.exception("meta turn failed for %s/%s", ws, mid)
                     await self.stop_mission(ws, mid, status="paused")
-                    self.publish("alert", ws=ws, mission=mid, text=f"Orchestrator turn crashed, mission paused: {exc!r}")
+                    self.publish("alert", ws=ws, mission=mid, text=f"Meta-work turn crashed, mission paused: {exc!r}")
                     return
                 self.db.x(f"UPDATE inbox SET consumed=1 WHERE id IN ({ids}) AND consumed=2")
                 await self.after_meta_turn(ws, mid, items)
@@ -411,22 +411,22 @@ class Engine:
     async def meta_turn(self, ws: str, mid: str, items: list[dict]) -> None:
         p, m = self.wsp(ws), self.mission_row(ws, mid)
         mc = mission_config(p, mid)["mission"]
-        orch = self.db.session(m["orchestrator"])
-        rotate = to_tokens(mc["meta"].get("rotate_at_tokens"))
+        orch = self.db.session(m["meta_work"])
+        rotate = to_tokens(mc["meta_work"].get("rotate_at_tokens"))
         if rotate and orch["context"] > rotate:
-            # Fresh orchestrator session; plan.md/journal.md carry the state across
+            # Fresh meta-work session; plan.md/journal.md carry the state across
             self.db.update("sessions", {"id": orch["id"]}, status="retired")
-            orch = self.new_session(ws, mid, "orchestrator", "meta", "orchestrator", mc["meta"], p / "meta")
-            self.set_mission(ws, mid, orchestrator=orch["id"])
+            orch = self.new_session(ws, mid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
+            self.set_mission(ws, mid, meta_work=orch["id"])
             items = [{"kind": "handoff", "payload": json.dumps({"text": (
-                "[Handoff] You are a fresh orchestrator session replacing a previous one whose context grew "
+                "[Handoff] You are a fresh meta-work session replacing a previous one whose context grew "
                 "too large. Regain state from plan.md, journal.md, notes.md and `loop ls`.\n\n"
                 + self.kickoff_text(ws, mid))})}] + items
         workspace.commit_external(p)
         text = digest.envelope(items, digest.budget_line(self.budget(ws, mid)), self.infra.summary())
         res, n = await self.run_turn(orch, text)
         reverted = workspace.enforce_protected(p)
-        workspace.commit(p, f"meta({orch['id']})", f"meta({orch['id']}): {mid} turn {n}")
+        workspace.commit(p, f"meta-work({orch['id']})", f"meta-work({orch['id']}): {mid} turn {n}")
         m = self.mission_row(ws, mid)
         fields = {"meta_turns": m["meta_turns"] + 1, "tokens": m["tokens"] + res.tokens,
                   "cost": m["cost"] + res.cost}
@@ -445,7 +445,7 @@ class Engine:
             if fields["fail_streak"] >= 3:
                 self.db.update("missions", {"ws": ws, "id": mid}, **fields)
                 await self.stop_mission(ws, mid, status="paused")
-                self.publish("alert", ws=ws, mission=mid, text=f"Orchestrator failed 3 times: {res.error}")
+                self.publish("alert", ws=ws, mission=mid, text=f"Meta-work failed 3 times: {res.error}")
                 return
             await asyncio.sleep(min(60, 10 * fields["fail_streak"]))
         else:
@@ -458,7 +458,7 @@ class Engine:
             return
         if m["final_turn"] == 1 and any(i["kind"] == "budget" for i in items):
             reason = (self.exhausted(self.budget(ws, mid)) or ("limit",))[0]
-            await self.finish(ws, mid, "partial", f"Budget exhausted ({reason}); the orchestrator did not "
+            await self.finish(ws, mid, "partial", f"Budget exhausted ({reason}); the meta-work did not "
                                                   "close the mission on its final turn.", [], by="platform")
             return
         self.check_budget(ws, mid)
@@ -473,11 +473,11 @@ class Engine:
                 "`loop done` if the DoD is met, progress has stalled, or you need the human.")})
         else:
             await self.stop_mission(ws, mid, status="paused")
-            self.publish("alert", ws=ws, mission=mid, text="Orchestrator went idle; mission paused.")
+            self.publish("alert", ws=ws, mission=mid, text="Meta-work went idle; mission paused.")
 
     async def finish(self, ws: str, mid: str, status: str, report: str, verify: list[dict], by: str) -> None:
         mdir = self.mdir(ws, mid)
-        await self.stop_mission(ws, mid, status="awaiting_review", orchestrator=False)
+        await self.stop_mission(ws, mid, status="awaiting_review", meta_work=False)
         lines = [f"# Completion report\n", f"- Status: **{status}**", f"- Closed by: {by}",
                  f"- Time: {time.strftime('%Y-%m-%d %H:%M')}\n", report.strip() + "\n"]
         if verify:
@@ -571,16 +571,16 @@ class Engine:
             raise AgentError(f"no worker {sid} in this mission (see `loop ls`)")
         return w
 
-    def require_orchestrator(self, caller: dict) -> dict:
-        if caller["kind"] != "orchestrator":
-            raise AgentError("only the mission orchestrator can do this; propose a note with `loop note` instead")
+    def require_meta_work(self, caller: dict) -> dict:
+        if caller["kind"] != "meta-work":
+            raise AgentError("only the mission meta-work can do this; propose a note with `loop note` instead")
         m = self.mission_row(caller["ws"], caller["mission"])
         if m["status"] != "running":
             raise AgentError(f"mission is {m['status']}")
         return m
 
     async def spawn_worker(self, caller: dict, role: str, label: str, prompt: str, gpu: bool = False) -> str:
-        self.require_orchestrator(caller)
+        self.require_meta_work(caller)
         ws, mid = caller["ws"], caller["mission"]
         p = self.wsp(ws)
         roles = mission_config(p, mid)["mission"]["roles"]
@@ -600,7 +600,7 @@ class Engine:
                 "End your turn; you will be resumed when it reports.")
 
     async def send_worker(self, caller: dict, sid: str, prompt: str) -> str:
-        self.require_orchestrator(caller)
+        self.require_meta_work(caller)
         w = self.own_worker(caller, sid)
         if w["status"] == "running":
             raise AgentError(f"{sid} is still running; wait for its report")
@@ -624,7 +624,7 @@ class Engine:
         try:
             text, n = await self._worker_turn(sess, prompt)
         except Exception as exc:
-            # Any platform failure must still reach the orchestrator, or the mission stalls on a phantom worker
+            # Any platform failure must still reach the meta-work, or the mission stalls on a phantom worker
             log.exception("worker turn failed for %s", sid)
             cur = self.db.session(sid)
             if cur["status"] == "running":
@@ -672,7 +672,7 @@ class Engine:
         return f"Stopped {sid}; its partial work was snapshotted and a report will follow."
 
     def merge_worker(self, caller: dict, sid: str) -> str:
-        self.require_orchestrator(caller)
+        self.require_meta_work(caller)
         w = self.own_worker(caller, sid)
         if w["status"] == "running":
             raise AgentError(f"{sid} is still running")
@@ -688,7 +688,7 @@ class Engine:
                                                                   " (nothing new)")
 
     async def done(self, caller: dict, status: str, report: str) -> str:
-        self.require_orchestrator(caller)
+        self.require_meta_work(caller)
         if status not in ("success", "partial", "blocked"):
             raise AgentError("status must be success, partial or blocked")
         if not report.strip():
@@ -713,7 +713,7 @@ class Engine:
                 return "REJECTED: verify commands failed on the integration branch:\n" + "\n".join(
                     f"$ {r['cmd']} (exit {r['code']})\n{r['out']}" for r in failed) + \
                     "\nFix (merge the right work, or delegate fixes), or close with --status partial."
-        await self.finish(ws, mid, status, report, results, by=f"orchestrator {caller['id']}")
+        await self.finish(ws, mid, status, report, results, by=f"meta-work {caller['id']}")
         return f"Mission closed as {status}; the human will review report.md. End your turn now."
 
     # ---------- read views (agents + UI) ----------
@@ -761,7 +761,7 @@ class Engine:
         recent = self.db.q("SELECT kind, payload, ts FROM inbox WHERE ws=? AND mission=? ORDER BY id DESC LIMIT 8",
                            ws, mid)
         lines = [f"Mission {mid}: {m['status']}" + (f" ({m['outcome']})" if m["outcome"] else ""),
-                 f"Orchestrator: {m['orchestrator'] or '-'} · plan checklist {done}/{total}",
+                 f"Meta-work: {m['meta_work'] or '-'} · plan checklist {done}/{total}",
                  digest.budget_line(self.budget(ws, mid)), "Workers:", self.ls_text(caller), "Recent events:"]
         for r in recent:
             first = json.loads(r["payload"]).get("text", "").splitlines()[:1]
@@ -787,40 +787,40 @@ class Engine:
         with path.open() as fh:
             return [json.loads(x) for x in deque(fh, maxlen=limit)]
 
-    # ---------- advisors ----------
-    def create_advisor(self, ws: str, mid: str, overrides: dict | None = None) -> dict:
+    # ---------- meta-chats ----------
+    def create_meta_chat(self, ws: str, mid: str, overrides: dict | None = None) -> dict:
         self.mission_row(ws, mid)
         mc = mission_config(self.wsp(ws), mid)["mission"]
-        conf = {**mc["advisor"], **{k: v for k, v in (overrides or {}).items() if v}}
-        return self.new_session(ws, mid, "advisor", "advisor", "advisor", conf, self.wsp(ws) / "meta")
+        conf = {**mc["meta_chat"], **{k: v for k, v in (overrides or {}).items() if v}}
+        return self.new_session(ws, mid, "meta-chat", "meta-chat", "meta-chat", conf, self.wsp(ws) / "meta")
 
-    def advisor_send(self, sid: str, text: str) -> None:
+    def meta_chat_send(self, sid: str, text: str) -> None:
         s = self.db.session(sid)
-        if not s or s["kind"] != "advisor":
-            raise AgentError("unknown advisor session")
+        if not s or s["kind"] != "meta-chat":
+            raise AgentError("unknown meta-chat session")
         if s["status"] == "running" or self.runner.running(sid):
-            raise AgentError("the advisor is still answering")
+            raise AgentError("the meta-chat is still answering")
         if not text.strip():
             raise AgentError("empty message")
         self.db.update("sessions", {"id": sid}, status="running")  # claimed before the CLI starts
         self.db.x("INSERT INTO messages(session, ts, role, text) VALUES(?,?,?,?)", sid, time.time(), "user", text)
-        self.publish("advisor_message", session=sid, ws=s["ws"], mission=s["mission"])
-        self.spawn(self._advisor_turn(sid, text))
+        self.publish("meta_chat_message", session=sid, ws=s["ws"], mission=s["mission"])
+        self.spawn(self._meta_chat_turn(sid, text))
 
-    async def _advisor_turn(self, sid: str, text: str) -> None:
+    async def _meta_chat_turn(self, sid: str, text: str) -> None:
         s = self.db.session(sid)
         p = self.wsp(s["ws"])
         prompt = text if s["turns"] else f"{self.mode_text(s)}\n\nHuman: {text}"
         try:
             res, n = await self.run_turn(s, prompt)
             workspace.enforce_protected(p)
-            workspace.commit(p, f"advisor({sid})", f"advisor({sid}): turn {n}")
+            workspace.commit(p, f"meta-chat({sid})", f"meta-chat({sid}): turn {n}")
             answer = res.final or f"(error: {res.error})"
         except Exception as exc:  # release the session and show the failure in the chat
-            log.exception("advisor turn failed for %s", sid)
+            log.exception("meta-chat turn failed for %s", sid)
             if self.db.session(sid)["status"] == "running":
                 self.db.update("sessions", {"id": sid}, status="failed")
             answer = f"(platform error: {exc!r})"
         self.db.x("INSERT INTO messages(session, ts, role, text) VALUES(?,?,?,?)", sid, time.time(),
                   "assistant", answer)
-        self.publish("advisor_message", session=sid, ws=s["ws"], mission=s["mission"])
+        self.publish("meta_chat_message", session=sid, ws=s["ws"], mission=s["mission"])

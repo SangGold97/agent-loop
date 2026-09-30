@@ -1,4 +1,4 @@
-"""End-to-end with the scripted fake agent: workspace -> mission -> orchestrator -> worker -> merge -> done."""
+"""End-to-end with the scripted fake agent: workspace -> mission -> meta-work -> worker -> merge -> done."""
 import subprocess
 from pathlib import Path
 
@@ -10,7 +10,7 @@ FAKE_ROLE = {"agent": "fake", "model": None, "effort": None, "autocompact": None
 
 
 def mission_config():
-    return {"meta": FAKE_ROLE, "advisor": FAKE_ROLE, "roles": {"coder": FAKE_ROLE},
+    return {"meta_work": FAKE_ROLE, "meta_chat": FAKE_ROLE, "roles": {"coder": FAKE_ROLE},
             "budget": {"max_concurrent_workers": 2, "max_worker_turns": 5, "max_meta_turns": 10, "max_hours": 1,
                        "max_tokens": None}, "base_branch": None, "push": "manual"}
 
@@ -38,17 +38,17 @@ def test_full_mission(server):
     assert (run / "t1.prompt.md").exists() and "hello.py" in (run / "t1.diff").read_text()
     assert (ws / "wt" / f"_int-{mid}" / "hello.py").exists()
     authors = subprocess.run(["git", "log", "--format=%an"], cwd=ws, capture_output=True, text=True).stdout
-    assert "control-plane" in authors and "meta(" in authors
+    assert "control-plane" in authors and "meta-work(" in authors
 
     # Human edits of DoD are committed as human; agents cannot touch it
     client.put(f"/api/missions/demo/{mid}/files/dod.md", json={"text": "- hello.py exists\n"})
     assert subprocess.run(["git", "log", "-1", "--format=%an"], cwd=ws, capture_output=True,
                           text=True).stdout.strip() == "human"
 
-    # Advisor proposes a note; the human approves it
-    adv = client.post(f"/api/missions/demo/{mid}/advisors", json={}).json()["id"]
-    client.post(f"/api/advisors/{adv}/messages", json={"text": "How is it going?"})
-    msgs = wait_for(lambda: len(m := client.get(f"/api/advisors/{adv}/messages").json()["messages"]) == 2 and m)
+    # Meta-chat proposes a note; the human approves it
+    adv = client.post(f"/api/missions/demo/{mid}/meta-chats", json={}).json()["id"]
+    client.post(f"/api/meta-chats/{adv}/messages", json={"text": "How is it going?"})
+    msgs = wait_for(lambda: len(m := client.get(f"/api/meta-chats/{adv}/messages").json()["messages"]) == 2 and m)
     assert "Proposed note" in msgs[1]["text"]
     pending = [n for n in client.get(f"/api/missions/demo/{mid}").json()["notes"] if n["status"] == "pending"]
     assert pending and client.post(f"/api/notes/{pending[0]['id']}/approve", json={"mode": "queue"}).status_code == 200
@@ -105,7 +105,7 @@ def test_cross_origin_post_refused(server):
     assert r.status_code == 403
 
 
-def test_worker_platform_failure_reaches_orchestrator(server, monkeypatch):
+def test_worker_platform_failure_reaches_meta_work(server, monkeypatch):
     client, engine = server
     client.post("/api/workspaces", json={"name": "broken"})
 

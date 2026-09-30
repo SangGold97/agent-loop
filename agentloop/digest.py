@@ -1,4 +1,4 @@
-"""Compact messages for the orchestrator: inline what is small, point to files for what is large."""
+"""Compact messages for the meta-work: inline what is small, point to files for what is large."""
 from __future__ import annotations
 
 import json

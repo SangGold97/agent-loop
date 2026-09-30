@@ -1,3 +1,3 @@
 # Plan
 
-_The orchestrator writes the strategy and checklist here._
+_The meta-work writes the strategy and checklist here._

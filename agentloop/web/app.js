@@ -90,10 +90,10 @@ function configForm(conf) {
   const num = (k, v) => `<label class="f">${label(k)}<input type="number" min="0" step="any" data-b="${k}" value="${v ?? ''}" placeholder="∞"></label>`;
   return `<datalist id="models-claude">${MODELS.claude.map(m => `<option value="${m}">`).join('')}</datalist>
     <datalist id="models-codex">${MODELS.codex.map(m => `<option value="${m}">`).join('')}</datalist>
-    <fieldset><legend>Meta-agent (orchestrator)</legend>${agentFields('meta', conf.meta, { title: 'Orchestrator' })}
-      <label class="f" style="max-width:260px">Rotate session when context exceeds<input type="text" data-rotate value="${esc(conf.meta?.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)"></label>
+    <fieldset><legend>Meta-work (runs the mission)</legend>${agentFields('meta_work', conf.meta_work, { title: 'Meta-work' })}
+      <label class="f" style="max-width:260px">Rotate session when context exceeds<input type="text" data-rotate value="${esc(conf.meta_work?.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)"></label>
       <div style="height:8px"></div></fieldset>
-    <fieldset><legend>Advisor (Q&A chat)</legend>${agentFields('advisor', conf.advisor, { title: 'Advisor' })}</fieldset>
+    <fieldset><legend>Meta-chat (Q&A chat)</legend>${agentFields('meta_chat', conf.meta_chat, { title: 'Meta-chat' })}</fieldset>
     <fieldset><legend>Worker roles</legend><div data-roles>${Object.entries(conf.roles || {}).map(([k, r]) => agentFields(k, r, { editableName: true })).join('')}</div>
       <button type="button" class="btn small" data-add-role>+ Add role</button><div style="height:10px"></div></fieldset>
     <fieldset><legend>Budget</legend><div class="form-grid">
@@ -127,8 +127,8 @@ function readAgentRow(row) {
 }
 function readConfigForm(root) {
   const rows = $$('.agent-row', root);
-  const meta = readAgentRow(rows.find(r => r.dataset.key === 'meta'));
-  meta.rotate_at_tokens = $('[data-rotate]', root).value.trim() || null;
+  const metaWork = readAgentRow(rows.find(r => r.dataset.key === 'meta_work'));
+  metaWork.rotate_at_tokens = $('[data-rotate]', root).value.trim() || null;
   const roles = {};
   $$('[data-roles] .agent-row', root).forEach(r => {
     const name = $('[data-f=name]', r).value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
@@ -140,7 +140,7 @@ function readConfigForm(root) {
     const v = i.value.trim();
     budget[i.dataset.b] = v === '' ? null : (i.type === 'number' ? Number(v) : v);
   });
-  return { meta, advisor: readAgentRow(rows.find(r => r.dataset.key === 'advisor')), roles, budget,
+  return { meta_work: metaWork, meta_chat: readAgentRow(rows.find(r => r.dataset.key === 'meta_chat')), roles, budget,
     base_branch: $('[data-base]', root).value.trim() || null, push: $('[data-push]', root).value };
 }
 
@@ -262,7 +262,7 @@ async function wireHarness(ws, select) {
   if (select) open(select);
 }
 function auditTable(rows) {
-  const chip = a => { const k = a.startsWith('meta') ? 'meta' : a.startsWith('advisor') ? 'advisor' : a; return `<span class="chip ${esc(k)}">${esc(a)}</span>`; };
+  const chip = a => { const k = a.startsWith('meta-work') ? 'meta-work' : a.startsWith('meta-chat') ? 'meta-chat' : a; return `<span class="chip ${esc(k)}">${esc(a)}</span>`; };
   return rows.length ? `<table class="t"><tr><th>Commit</th><th>Actor</th><th>Message</th><th>When</th></tr>${rows.map(c =>
     `<tr><td class="mono">${esc(c.hash)}</td><td>${chip(c.author)}</td><td>${esc(c.subject)}</td><td class="muted small">${esc(c.when)}</td></tr>`).join('')}</table>`
     : '<div class="empty">No commits.</div>';
@@ -292,7 +292,7 @@ async function newMissionModal(ws) {
       <label class="f">Title<input type="text" id="nm-title" placeholder="e.g. Add OAuth login"></label>
       <div class="grid cols-2">
         <label class="f">Spec — goal, context, inputs, constraints<textarea id="nm-spec" style="min-height:200px" placeholder="What should be achieved and why…"></textarea></label>
-        <label class="f">Definition of Done<textarea id="nm-dod" style="min-height:200px" placeholder="- criterion (qualitative ones are judged by the orchestrator)&#10;- verify: \`pytest -q\`   ← optional command run on the integration branch"></textarea></label>
+        <label class="f">Definition of Done<textarea id="nm-dod" style="min-height:200px" placeholder="- criterion (qualitative ones are judged by the meta-work)&#10;- verify: \`pytest -q\`   ← optional command run on the integration branch"></textarea></label>
       </div>
       <details><summary class="btn small" style="display:inline-block">Agents, budget & git</summary><div style="margin-top:12px" id="nm-conf">${configForm(d)}</div></details>
       <div class="row"><label class="row small"><input type="checkbox" id="nm-start" checked> Start right away</label><span class="spacer"></span>
@@ -319,7 +319,7 @@ async function renderMission() {
 }
 function renderMissionHead() {
   const M = S.mission, st = M.row.status, { ws, mid } = S.route;
-  const busy = M.meta_active ? '<span class="thinking">orchestrator is thinking</span>' : '';
+  const busy = M.meta_active ? '<span class="thinking">meta-work is thinking</span>' : '';
   const buttons = [];
   if (['draft', 'stopped', 'paused'].includes(st)) buttons.push(`<button class="btn primary" data-act="start">${st === 'draft' ? 'Start mission' : 'Resume'}</button>`);
   if (st === 'running') buttons.push('<button class="btn danger" data-act="stop">Stop</button>');
@@ -345,7 +345,7 @@ function confirmInline(msg) { return window.confirm(msg); }
 function reopenModal() {
   const { ws, mid } = S.route;
   const m = modal(`<div class="modal-head"><h2>Reopen mission</h2><button class="icon-btn" data-close>×</button></div>
-    <p class="muted">Tell the orchestrator what is missing or what to change. It receives this note immediately.</p>
+    <p class="muted">Tell the meta-work what is missing or what to change. It receives this note immediately.</p>
     <textarea id="ro-text" style="min-height:140px" placeholder="e.g. The API works but there are no tests for the error paths…"></textarea>
     <div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="ro-ok">Reopen</button></div>`);
   $('#ro-ok', m).onclick = () => act(async () => {
@@ -354,11 +354,11 @@ function reopenModal() {
   }, 'Mission reopened');
 }
 const TABS = [['overview', 'Overview'], ['sessions', 'Sessions'], ['plan', 'Plan & journal'], ['notes', 'Notes'],
-  ['advisor', 'Advisor'], ['spec', 'Spec & DoD'], ['config', 'Config'], ['git', 'Git']];
+  ['meta-chat', 'Meta-chat'], ['spec', 'Spec & DoD'], ['config', 'Config'], ['git', 'Git']];
 function renderTabs() {
   const M = S.mission, { ws, mid, tab } = S.route;
-  const counts = { sessions: M.sessions.filter(s => s.kind !== 'advisor' && s.status !== 'retired').length,
-    notes: M.notes.filter(n => n.status === 'pending').length || '', advisor: M.sessions.filter(s => s.kind === 'advisor').length || '' };
+  const counts = { sessions: M.sessions.filter(s => s.kind !== 'meta-chat' && s.status !== 'retired').length,
+    notes: M.notes.filter(n => n.status === 'pending').length || '', 'meta-chat': M.sessions.filter(s => s.kind === 'meta-chat').length || '' };
   $('#m-tabs').innerHTML = TABS.map(([k, t]) => `<a class="tab ${tab === k ? 'active' : ''}" href="#/ws/${ws}/m/${mid}/${k}">${t}${counts[k] ? `<span class="count">${counts[k]}</span>` : ''}</a>`).join('');
 }
 async function renderTab() {
@@ -368,7 +368,7 @@ async function renderTab() {
   else if (t === 'sessions') renderSessions();
   else if (t === 'plan') el.innerHTML = planHtml();
   else if (t === 'notes') renderNotes();
-  else if (t === 'advisor') await renderAdvisor();
+  else if (t === 'meta-chat') await renderMetaChat();
   else if (t === 'spec') renderSpec();
   else if (t === 'config') renderConfig();
   else if (t === 'git') await renderGit();
@@ -384,7 +384,7 @@ async function refreshMission(force) {
   const t = S.route.tab;
   if (t === 'sessions') return renderSessions(true);
   if (t === 'notes') return renderNotes(true);
-  if (t === 'advisor') return renderAdvisorList();
+  if (t === 'meta-chat') return renderMetaChatList();
   if ((t === 'spec' || t === 'config') && !force) return;
   if (t === 'overview') {
     const keep = $('#ov-reopen')?.value;
@@ -406,7 +406,7 @@ function budgetRows(b) {
     + row('Tokens', b.tokens, null, `${fmtTok(b.tokens)}/${b.max_tokens || '∞'}`);
 }
 function activityHtml(items) {
-  if (!items.length) return '<div class="empty">No events yet. Start the mission to kick off the orchestrator.</div>';
+  if (!items.length) return '<div class="empty">No events yet. Start the mission to kick off the meta-work.</div>';
   return `<div class="timeline">${items.map(a => {
     const text = a.kind === 'note' ? `Human note #${a.payload.id}: ${a.payload.text}` : a.kind === 'file_changed' ? `${a.payload.name} changed by the human\n\n${a.payload.diff}` : a.payload.text;
     const state = a.consumed ? '' : (a.deferred ? '<span class="pill pending">queued</span>' : '<span class="pill running">pending</span>');
@@ -421,7 +421,7 @@ function overviewHtml() {
   const report = M.files['report.md'];
   return `<div class="grid cols-4">
       <div class="card stat"><div class="label">Plan checklist</div><div class="value">${c.done}/${c.total}</div>${meter(c.done, c.total || 1, true)}
-        <div class="sub">${c.total ? Math.round(100 * c.done / c.total) + '% of items checked by the orchestrator' : 'no checklist yet'}</div></div>
+        <div class="sub">${c.total ? Math.round(100 * c.done / c.total) + '% of items checked by the meta-work' : 'no checklist yet'}</div></div>
       <div class="card stat"><div class="label">Workers</div><div class="value">${running} <span class="muted small">running</span></div>
         <div class="sub">${workers.length} total · ${workers.filter(w => w.merged).length} merged</div></div>
       <div class="card stat"><div class="label">Tokens</div><div class="value">${fmtTok(b.tokens)}</div><div class="sub">${b.cost ? '≈ $' + b.cost.toFixed(2) + ' (estimate)' : 'cost n/a'}</div></div>
@@ -434,9 +434,9 @@ function overviewHtml() {
     <div class="grid cols-2" style="margin-top:14px">
       <div class="card"><h2>Budget</h2>${budgetRows(b)}</div>
       <div class="card"><h2>Definition of Done</h2><div class="md">${md(M.files['dod.md'])}</div>
-        ${M.verify.length ? `<div class="hint" style="margin-top:8px">${M.verify.length} <code>verify:</code> command${M.verify.length > 1 ? 's' : ''} run by the platform on the integration branch before a <b>success</b> close.</div>` : '<div class="hint">No <code>verify:</code> commands — the orchestrator judges completion.</div>'}</div>
+        ${M.verify.length ? `<div class="hint" style="margin-top:8px">${M.verify.length} <code>verify:</code> command${M.verify.length > 1 ? 's' : ''} run by the platform on the integration branch before a <b>success</b> close.</div>` : '<div class="hint">No <code>verify:</code> commands — the meta-work judges completion.</div>'}</div>
     </div>
-    <div class="card" style="margin-top:14px"><h2>What the orchestrator received</h2>${activityHtml(M.activity)}</div>`;
+    <div class="card" style="margin-top:14px"><h2>What the meta-work received</h2>${activityHtml(M.activity)}</div>`;
 }
 function wireOverview() {
   const { ws, mid } = S.route;
@@ -469,7 +469,7 @@ function sessCard(s) {
 }
 function renderSessions(update = false) {
   const el = $('#m-tab');
-  const list = S.mission.sessions.filter(s => s.kind !== 'advisor');
+  const list = S.mission.sessions.filter(s => s.kind !== 'meta-chat');
   const active = list.filter(s => s.status !== 'retired');
   const retired = list.filter(s => s.status === 'retired');
   const ids = active.map(s => s.id).join();
@@ -487,9 +487,9 @@ function renderSessions(update = false) {
     return;
   }
   el.dataset.ids = ids;
-  if (!active.length) { el.innerHTML = '<div class="empty">No sessions yet. Start the mission to create the orchestrator; it spawns workers as it needs them.</div>'; return; }
+  if (!active.length) { el.innerHTML = '<div class="empty">No sessions yet. Start the mission to create the meta-work; it spawns workers as it needs them.</div>'; return; }
   el.innerHTML = `<div class="sessions">${active.map(sessCard).join('')}</div>
-    ${retired.length ? `<p class="muted small" style="margin-top:14px">Retired orchestrator sessions: ${retired.map(r => `<a href="#" data-detail="${r.id}" class="mono">${r.id}</a>`).join(', ')}</p>` : ''}`;
+    ${retired.length ? `<p class="muted small" style="margin-top:14px">Retired meta-work sessions: ${retired.map(r => `<a href="#" data-detail="${r.id}" class="mono">${r.id}</a>`).join(', ')}</p>` : ''}`;
   el.onclick = e => {
     const d = e.target.closest('[data-detail]'), st = e.target.closest('[data-stop]');
     if (d) { e.preventDefault(); sessionModal(d.dataset.detail); }
@@ -548,7 +548,7 @@ async function sessionModal(sid) {
 // plan
 function planHtml() {
   const f = S.mission.files;
-  return `<div class="grid cols-2"><div class="card"><h2>plan.md <span class="faint small">· owned by the orchestrator</span></h2><div class="md">${md(f['plan.md'])}</div></div>
+  return `<div class="grid cols-2"><div class="card"><h2>plan.md <span class="faint small">· owned by the meta-work</span></h2><div class="md">${md(f['plan.md'])}</div></div>
     <div class="card"><h2>journal.md</h2><div class="md">${md(f['journal.md'])}</div></div></div>`;
 }
 
@@ -556,11 +556,11 @@ function planHtml() {
 function renderNotes(update = false) {
   const el = $('#m-tab'), notes = S.mission.notes, review = S.mission.row.status === 'awaiting_review';
   const list = notes.length ? notes.map(n => `<div class="card" style="margin-bottom:10px">
-      <div class="row"><b>#${n.id}</b><span class="chip ${n.author === 'human' ? 'human' : 'advisor'}">${esc(n.author)}</span>${pill(n.status)}
+      <div class="row"><b>#${n.id}</b><span class="chip ${n.author === 'human' ? 'human' : 'meta-chat'}">${esc(n.author)}</span>${pill(n.status)}
         ${n.status === 'approved' ? `<span class="muted small">${n.mode === 'now' ? 'delivered immediately' : 'queued with next event'}</span>` : ''}
         <span class="spacer"></span><span class="faint small">${fmtTime(n.ts)}</span></div>
       ${n.status === 'pending' ? `<textarea data-note-text="${n.id}" style="margin-top:8px;min-height:70px">${esc(n.text)}</textarea>
-        <div class="row" style="margin-top:8px"><span class="muted small">Proposed by the advisor — approve to send it to the orchestrator.</span><span class="spacer"></span>
+        <div class="row" style="margin-top:8px"><span class="muted small">Proposed by the meta-chat — approve to send it to the meta-work.</span><span class="spacer"></span>
         <button class="btn small danger" data-note="${n.id}" data-v="reject">Reject</button>
         ${review ? `<button class="btn small primary" data-note="${n.id}" data-v="approve" data-reopen="1">Approve & reopen mission</button>`
           : `<button class="btn small" data-note="${n.id}" data-v="approve" data-mode="queue">Approve (queue)</button>
@@ -568,12 +568,12 @@ function renderNotes(update = false) {
       : `<div class="md" style="margin-top:6px">${md(n.text)}</div>`}</div>`).join('') : '<div class="empty">No notes yet.</div>';
   if (update && $('#notes-list')) { $('#notes-list').innerHTML = list; return; }
   el.innerHTML = `<div class="grid cols-2" style="align-items:start">
-    <div class="card"><h2>Steer the orchestrator</h2>
-      <p class="hint">Notes override the orchestrator's plan. They are appended to <code>notes.md</code> and delivered to the mission's orchestrator.</p>
+    <div class="card"><h2>Steer the meta-work</h2>
+      <p class="hint">Notes override the meta-work's plan. They are appended to <code>notes.md</code> and delivered to the mission's meta-work.</p>
       <textarea id="note-text" style="min-height:130px" placeholder="e.g. Prefer a simpler approach; skip the caching layer for now."></textarea>
       <div class="row" style="margin-top:10px">
         <label class="row small"><input type="radio" name="nmode" value="queue" checked> Queue — deliver with the next event</label>
-        <label class="row small"><input type="radio" name="nmode" value="now"> Now — wake the orchestrator</label>
+        <label class="row small"><input type="radio" name="nmode" value="now"> Now — wake the meta-work</label>
         <span class="spacer"></span><button class="btn primary" id="note-add">Add note</button></div></div>
     <div id="notes-list">${list}</div></div>`;
   if (review) $('#note-add').textContent = 'Add note & reopen';
@@ -599,40 +599,40 @@ function renderNotes(update = false) {
   };
 }
 
-// advisor chat
-async function renderAdvisor() {
+// meta-chat
+async function renderMetaChat() {
   const el = $('#m-tab');
-  const advisors = S.mission.sessions.filter(s => s.kind === 'advisor');
-  if (!S.adv.sid && advisors.length) S.adv.sid = advisors[advisors.length - 1].id;
-  el.innerHTML = `<div class="chat"><div><button class="btn primary" id="adv-new" style="width:100%;margin-bottom:10px">New advisor chat</button>
-      <div class="adv-list" id="adv-list"></div><p class="hint" style="margin-top:12px">Advisors read the mission state and answer questions. They cannot dispatch workers; they can propose notes for your approval.</p></div>
+  const chats = S.mission.sessions.filter(s => s.kind === 'meta-chat');
+  if (!S.adv.sid && chats.length) S.adv.sid = chats[chats.length - 1].id;
+  el.innerHTML = `<div class="chat"><div><button class="btn primary" id="adv-new" style="width:100%;margin-bottom:10px">New meta-chat</button>
+      <div class="adv-list" id="adv-list"></div><p class="hint" style="margin-top:12px">Meta-chats read the mission state and answer questions. They cannot dispatch workers; they can propose notes for your approval.</p></div>
     <div class="card chat-pane"><div class="messages" id="adv-msgs"></div><div class="live-strip" id="adv-live"></div>
       <div class="composer"><textarea id="adv-input" placeholder="Ask about progress, risks, or propose a strategy change… (Ctrl+Enter to send)"></textarea>
         <button class="btn primary" id="adv-send">Send</button></div></div></div>`;
-  renderAdvisorList();
-  $('#adv-new').onclick = () => newAdvisorModal();
-  $('#adv-send').onclick = sendAdvisor;
-  $('#adv-input').onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendAdvisor(); };
+  renderMetaChatList();
+  $('#adv-new').onclick = () => newMetaChatModal();
+  $('#adv-send').onclick = sendMetaChat;
+  $('#adv-input').onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendMetaChat(); };
   $('#adv-msgs').onclick = e => {
     const b = e.target.closest('[data-save-note]');
     if (b) saveNoteModal(S.adv.messages[Number(b.dataset.saveNote)].text);
   };
-  await loadAdvisorMessages();
+  await loadMetaChatMessages();
 }
-function renderAdvisorList() {
+function renderMetaChatList() {
   const list = $('#adv-list');
   if (!list) return;
-  const advisors = S.mission.sessions.filter(s => s.kind === 'advisor');
-  list.innerHTML = advisors.slice().reverse().map(a => `<div class="adv-item ${a.id === S.adv.sid ? 'active' : ''}" data-adv="${a.id}">
+  const chats = S.mission.sessions.filter(s => s.kind === 'meta-chat');
+  list.innerHTML = chats.slice().reverse().map(a => `<div class="adv-item ${a.id === S.adv.sid ? 'active' : ''}" data-adv="${a.id}">
       <div class="row"><b class="mono small">${a.id}</b><span class="spacer"></span>${a.live ? '<span class="thinking"></span>' : ''}</div>
-      <div class="faint small">${esc(a.agent)} · ${esc(a.model || 'default')} · ${a.turns} turns</div></div>`).join('') || '<div class="muted small">No advisor chats yet.</div>';
-  $$('[data-adv]', list).forEach(x => x.onclick = async () => { S.adv.sid = x.dataset.adv; S.adv.live = ''; renderAdvisorList(); await loadAdvisorMessages(); });
+      <div class="faint small">${esc(a.agent)} · ${esc(a.model || 'default')} · ${a.turns} turns</div></div>`).join('') || '<div class="muted small">No meta-chats yet.</div>';
+  $$('[data-adv]', list).forEach(x => x.onclick = async () => { S.adv.sid = x.dataset.adv; S.adv.live = ''; renderMetaChatList(); await loadMetaChatMessages(); });
 }
-async function loadAdvisorMessages() {
+async function loadMetaChatMessages() {
   const box = $('#adv-msgs');
   if (!box) return;
-  if (!S.adv.sid) { box.innerHTML = '<div class="empty">Start a new advisor chat to talk with a meta-agent about this mission.</div>'; setComposer(false); return; }
-  const r = await api(`/api/advisors/${S.adv.sid}/messages`);
+  if (!S.adv.sid) { box.innerHTML = '<div class="empty">Start a new meta-chat to talk with a meta-agent about this mission.</div>'; setComposer(false); return; }
+  const r = await api(`/api/meta-chats/${S.adv.sid}/messages`);
   S.adv.messages = r.messages; S.adv.busy = r.busy;
   box.innerHTML = r.messages.map((m, i) => m.role === 'user' ? `<div class="msg user">${esc(m.text)}</div>`
     : `<div class="msg assistant"><div class="md">${md(m.text)}</div><div class="msg-actions"><button class="btn small" data-save-note="${i}">Save as note</button></div></div>`).join('')
@@ -647,32 +647,32 @@ function setComposer(enabled) {
   $('#adv-send').disabled = !enabled || !S.adv.sid;
   $('#adv-input').disabled = !S.adv.sid;
 }
-async function sendAdvisor() {
+async function sendMetaChat() {
   const text = $('#adv-input').value.trim();
   if (!text || !S.adv.sid) return;
   await act(async () => {
-    await api(`/api/advisors/${S.adv.sid}/messages`, { body: { text } });
+    await api(`/api/meta-chats/${S.adv.sid}/messages`, { body: { text } });
     $('#adv-input').value = ''; S.adv.live = '';
-    await loadAdvisorMessages();
+    await loadMetaChatMessages();
   });
 }
-function newAdvisorModal() {
+function newMetaChatModal() {
   const { ws, mid } = S.route;
-  const conf = S.mission.config.advisor;
-  const m = modal(`<div class="modal-head"><h2>New advisor chat</h2><button class="icon-btn" data-close>×</button></div>
+  const conf = S.mission.config.meta_chat;
+  const m = modal(`<div class="modal-head"><h2>New meta-chat</h2><button class="icon-btn" data-close>×</button></div>
     <p class="muted">A meta-agent session bound to this mission, for prompt-by-prompt questions.</p>
     <datalist id="models-claude">${MODELS.claude.map(x => `<option value="${x}">`).join('')}</datalist><datalist id="models-codex">${MODELS.codex.map(x => `<option value="${x}">`).join('')}</datalist>
-    <div id="na-form">${agentFields('advisor', conf, { title: 'Advisor' })}</div>
+    <div id="na-form">${agentFields('meta-chat', conf, { title: 'Meta-chat' })}</div>
     <div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="na-ok">Create</button></div>`);
   wireConfigForm($('#na-form', m));
   $('#na-ok', m).onclick = () => act(async () => {
-    const r = await api(`/api/missions/${ws}/${mid}/advisors`, { body: readAgentRow($('.agent-row', m)) });
-    closeModal(); S.adv.sid = r.id; await loadMission(); renderTabs(); await renderAdvisor();
+    const r = await api(`/api/missions/${ws}/${mid}/meta-chats`, { body: readAgentRow($('.agent-row', m)) });
+    closeModal(); S.adv.sid = r.id; await loadMission(); renderTabs(); await renderMetaChat();
   });
 }
 function saveNoteModal(text) {
   const { ws, mid } = S.route;
-  const m = modal(`<div class="modal-head"><h2>Save as note for the orchestrator</h2><button class="icon-btn" data-close>×</button></div>
+  const m = modal(`<div class="modal-head"><h2>Save as note for the meta-work</h2><button class="icon-btn" data-close>×</button></div>
     <textarea id="sn-text" style="min-height:180px">${esc(text)}</textarea>
     <div class="row" style="margin-top:10px"><label class="row small"><input type="radio" name="snmode" value="queue" checked> Queue</label>
       <label class="row small"><input type="radio" name="snmode" value="now"> Deliver now</label><span class="spacer"></span>
@@ -690,8 +690,8 @@ function renderSpec() {
       <button class="btn small primary" data-save="${name}">Save</button></div><p class="hint">${hint}</p>
       <textarea class="editor" data-file="${name}" spellcheck="false">${esc(f[name])}</textarea></div>`;
   $('#m-tab').innerHTML = `<div class="grid cols-2">${box('spec.md', 'Goal, context, inputs and constraints. Read-only for agents.')}
-    ${box('dod.md', 'Definition of Done. Lines like <code>- verify: `pytest -q`</code> are executed on the integration branch before a <b>success</b> close; other criteria are judged by the orchestrator.')}</div>
-    <p class="hint">Saving commits the file as <span class="chip human">human</span>; a running orchestrator is notified with the diff.</p>`;
+    ${box('dod.md', 'Definition of Done. Lines like <code>- verify: `pytest -q`</code> are executed on the integration branch before a <b>success</b> close; other criteria are judged by the meta-work.')}</div>
+    <p class="hint">Saving commits the file as <span class="chip human">human</span>; a running meta-work is notified with the diff.</p>`;
   $$('[data-file]').forEach(t => t.oninput = () => { S.dirty[t.dataset.file] = true; $(`[data-dirty="${t.dataset.file}"]`).textContent = 'unsaved'; });
   $$('[data-save]').forEach(b => b.onclick = () => act(async () => {
     const name = b.dataset.save, { ws, mid } = S.route;
@@ -831,8 +831,8 @@ function handle(evt) {
       }
       if (evt.event.type === 'turn' || evt.event.type === 'turn_end') scheduleRefresh();
       break;
-    case 'advisor_message':
-      if (inMission && evt.session === S.adv.sid) loadAdvisorMessages();
+    case 'meta_chat_message':
+      if (inMission && evt.session === S.adv.sid) loadMetaChatMessages();
       if (inMission) scheduleRefresh();
       break;
     case 'mission_status':

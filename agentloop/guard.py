@@ -46,7 +46,7 @@ def check_path(path: Path, env: dict) -> str | None:
     if PROTECTED_RE.match(rel.as_posix()):
         return f"{rel} is human-owned; propose changes in your journal/report instead"
     role = env.get("LOOP_ROLE")
-    if role in ("meta", "advisor") and top in ("repo", "wt", "data"):
+    if role in ("meta-work", "meta-chat") and top in ("repo", "wt", "data"):
         return "meta-agents are read-only on project code; delegate the change to a worker"
     if role == "worker":
         own = [ws / "wt" / env.get("LOOP_SESSION", "?"), ws / "data"]
@@ -83,7 +83,7 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
         return "agents never push; the human (or the mission push policy) handles remotes"
     if re.search(WRITE_OPS, code) and re.search(PROTECTED_IN_CMD, code):
         return "this command would modify a human-owned file (spec/dod/mission.yaml/loop.yaml/hooks.json)"
-    if env.get("LOOP_ROLE") in ("meta", "advisor") and META_GIT_WRITES.search(bare):
+    if env.get("LOOP_ROLE") in ("meta-work", "meta-chat") and META_GIT_WRITES.search(bare):
         return "meta-agents do not change git state; use `loop merge` or delegate to a worker"
     cmd = code
     for match in re.finditer(r"\brm\s+((?:-\S+\s+)*)(.+?)(?:$|[;&|])", cmd, re.M):

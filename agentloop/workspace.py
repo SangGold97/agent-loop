@@ -157,7 +157,7 @@ def create_mission(ws: Path, title: str, spec: str, dod: str, config: dict | Non
     (mdir / "dod.md").write_text(dod.strip() + "\n" if dod.strip() else (mdir / "dod.md").read_text())
     defaults = workspace_config(ws)["defaults"]
     doc = {"title": title, "created": time.strftime("%Y-%m-%d %H:%M")}
-    for key in ("meta", "advisor", "roles", "budget", "base_branch", "push"):
+    for key in ("meta_work", "meta_chat", "roles", "budget", "base_branch", "push"):
         doc[key] = (config or {}).get(key, defaults[key])
     (mdir / "mission.yaml").write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
     commit(ws, "control-plane", f"control-plane: new mission {mid}")
@@ -170,7 +170,7 @@ def read_mission_files(ws: Path, mid: str) -> dict:
 
 
 def human_write(ws: Path, rel: str, text: str) -> str:
-    """Write a human-owned file and commit it. Returns the diff (for notifying the orchestrator)."""
+    """Write a human-owned file and commit it. Returns the diff (for notifying the meta-work)."""
     target = (ws / rel).resolve()
     if not target.is_relative_to(ws.resolve()):
         raise ValueError("path escapes the workspace")

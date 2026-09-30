@@ -31,7 +31,7 @@ def main():
             Path("hello.py").write_text('print("hello")\n')
             (Path(os.environ["LOOP_RUN_DIR"]) / "artifacts" / "log.txt").write_text("ran hello\n")
             text = "**Result:** created hello.py\n**Evidence:** python hello.py -> hello"
-    elif role == "meta":
+    elif role == "meta-work":
         if "[Kickoff]" in prompt:
             (mdir / "plan.md").write_text("# Plan\n\n- [ ] create hello.py\n")
             text = loop("spawn", "--role", "coder", "--label", "hello", "--prompt", "Create hello.py")

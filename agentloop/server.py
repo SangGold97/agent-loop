@@ -150,8 +150,8 @@ def create_app(api_url: str) -> FastAPI:
             await engine.reopen(ws, mid, b.get("text", ""))
         elif action == "notes":
             return {"id": engine.add_note(ws, mid, b.get("text", ""), mode=b.get("mode", "queue"))}
-        elif action == "advisors":
-            s = engine.create_advisor(ws, mid, b)
+        elif action == "meta-chats":
+            s = engine.create_meta_chat(ws, mid, b)
             return {"id": s["id"]}
         else:
             raise HTTPException(404, "unknown action")
@@ -189,15 +189,15 @@ def create_app(api_url: str) -> FastAPI:
     async def session_stop(sid: str):
         return {"text": await engine.stop_worker(None, sid)}
 
-    @app.get("/api/advisors/{sid}/messages")
-    def advisor_messages(sid: str):
+    @app.get("/api/meta-chats/{sid}/messages")
+    def meta_chat_messages(sid: str):
         s = engine.db.session(sid) or {}
         return {"messages": engine.db.q("SELECT * FROM messages WHERE session=? ORDER BY id", sid),
                 "busy": engine.runner.running(sid), "agent": s.get("agent"), "model": s.get("model")}
 
-    @app.post("/api/advisors/{sid}/messages")
-    async def advisor_send(sid: str, req: Request):
-        engine.advisor_send(sid, (await body(req)).get("text", ""))
+    @app.post("/api/meta-chats/{sid}/messages")
+    async def meta_chat_send(sid: str, req: Request):
+        engine.meta_chat_send(sid, (await body(req)).get("text", ""))
         return {"ok": True}
 
     @app.get("/api/runs/{ws}/{mid}/{sid}/{name}")
@@ -255,9 +255,9 @@ def create_app(api_url: str) -> FastAPI:
         elif cmd == "done":
             text = await engine.done(caller, b.get("status", ""), b.get("report", ""))
         elif cmd == "note":
-            if caller["kind"] != "advisor":
-                raise AgentError("orchestrators write strategy to plan.md; notes are proposed by advisors")
-            nid = engine.add_note(caller["ws"], caller["mission"], b.get("text", ""), author="advisor",
+            if caller["kind"] != "meta-chat":
+                raise AgentError("meta-work sessions write strategy to plan.md; notes are proposed by meta-chats")
+            nid = engine.add_note(caller["ws"], caller["mission"], b.get("text", ""), author="meta-chat",
                                   status="pending", source=caller["id"])
             text = f"Proposed note #{nid}; the human will approve or reject it in the UI."
         elif cmd == "ls":

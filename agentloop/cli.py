@@ -16,8 +16,8 @@ HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   show    worker details / a turn's evidence   loop show w-1a2b3c --turn 2 [--full]
   merge   merge a worker branch into loop/<mission>/integration
   done    close the mission with a report      loop done --status success <<'EOF' ... EOF
-  status  mission overview (advisor)
-  note    propose a note to the human (advisor)  loop note "try X instead of Y"
+  status  mission overview (meta-chat)
+  note    propose a note to the human (meta-chat)  loop note "try X instead of Y"
   budget  budget usage
   infra   host resources"""
 
