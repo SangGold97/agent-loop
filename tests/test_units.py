@@ -148,3 +148,11 @@ def test_claude_catalog_filters_by_version(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     ids = [m["id"] for m in agents._claude_catalog("2.1.285 (Claude Code)")]
     assert ids == ["opus", "claude-old"]
+
+
+def test_language_rule():
+    from agentloop.engine import Engine
+    assert Engine.language_rule("English", True) == "" and Engine.language_rule(None, False) == ""
+    rule = Engine.language_rule("Vietnamese", True)
+    assert "Vietnamese" in rule and "prompts you write for workers" in rule and "commit messages" in rule
+    assert "final report" in Engine.language_rule("Vietnamese", False)

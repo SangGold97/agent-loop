@@ -23,6 +23,8 @@ DEFAULTS: dict = {
             "codex": {"enabled": True, "model": "gpt-6-astra", "effort": "high", "autocompact": None},
         },
         "budget": {"max_concurrent_workers": 3, "max_worker_turns": 40, "max_meta_turns": 80},
+        # Language of everything agents write for the human; code and commit messages follow the project
+        "language": "English",
         "base_branch": None,
         "push": "manual",
     },
@@ -33,7 +35,7 @@ DEFAULTS: dict = {
 }
 
 # Mission-level keys that override workspace defaults
-MISSION_KEYS = ("meta_work", "workers", "budget", "base_branch", "push")
+MISSION_KEYS = ("meta_work", "workers", "budget", "language", "base_branch", "push")
 
 
 def home() -> Path:

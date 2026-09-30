@@ -146,6 +146,9 @@ function configForm(conf) {
       <input type="text" data-rotate value="${esc(mw.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)" style="width:160px"></div>
     <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'concurrent workers')}
       ${num('max_worker_turns', b.max_worker_turns, 'worker turns')}${num('max_meta_turns', b.max_meta_turns, 'meta-work turns')}</div>
+    <div class="k">language</div><div class="row"><select data-lang style="width:160px">${['English', 'Vietnamese'].concat(
+        ['English', 'Vietnamese'].includes(conf.language || 'English') ? [] : [conf.language]).map(l => `<option ${l === (conf.language || 'English') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+      <span class="hint">for plan, journal, report, chat replies, worker prompts and reports; code and commits stay as the project uses</span></div>
     <div class="k">git</div><div class="budget-row">
       <label class="f">base branch<input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo's current"></label>
       <label class="f">push policy<select data-push>${['manual', 'branch'].map(p => `<option ${p === conf.push ? 'selected' : ''}>${p}</option>`).join('')}</select></label></div>
@@ -163,7 +166,8 @@ function readConfigForm(root) {
   if (!Object.values(workers).some(w => w.enabled)) throw new Error('enable at least one worker agent');
   const budget = {};
   $$('[data-b]', root).forEach(i => { budget[i.dataset.b] = i.value.trim() === '' ? null : Number(i.value); });
-  return { meta_work: metaWork, workers, budget, base_branch: $('[data-base]', root).value.trim() || null,
+  return { meta_work: metaWork, workers, budget, language: $('[data-lang]', root).value,
+    base_branch: $('[data-base]', root).value.trim() || null,
     push: $('[data-push]', root).value };
 }
 

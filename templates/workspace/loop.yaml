@@ -17,6 +17,7 @@ defaults:
     max_concurrent_workers: 3
     max_worker_turns: 40      # spawn + send, over the whole mission
     max_meta_turns: 80
+  language: English           # language agents use for plan, journal, report, chat and worker reports
   base_branch: null           # null = the repo's current branch
   push: manual                # manual | branch (push loop/<mission>/integration on accept; never main)
 
