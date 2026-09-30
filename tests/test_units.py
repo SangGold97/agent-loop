@@ -156,3 +156,9 @@ def test_language_rule():
     rule = Engine.language_rule("Vietnamese", True)
     assert "Vietnamese" in rule and "prompts you write for workers" in rule and "commit messages" in rule
     assert "final report" in Engine.language_rule("Vietnamese", False)
+
+
+def test_slug_transliterates():
+    from agentloop.gitops import slug
+    assert slug("Lọc từ theo số lần xuất hiện", 40) == "loc-tu-theo-so-lan-xuat-hien"
+    assert slug("Đường dẫn") == "duong-dan" and slug("!!!") == "w"

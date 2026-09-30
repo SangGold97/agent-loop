@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
 BOT = ["-c", "user.name=agentloop", "-c", "user.email=agentloop@local"]
@@ -19,7 +20,10 @@ def git(cwd: Path, *args: str, check: bool = True, env: dict | None = None) -> s
 
 
 def slug(text: str, limit: int = 24) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:limit] or "w"
+    # Transliterate accents (Vietnamese "lọc từ" -> "loc tu") before dropping non-ASCII
+    ascii_text = unicodedata.normalize("NFKD", text.replace("đ", "d").replace("Đ", "D"))
+    ascii_text = ascii_text.encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")[:limit].strip("-") or "w"
 
 
 def current_branch(repo: Path) -> str:
