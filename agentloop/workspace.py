@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 
 from . import gitops
-from .config import PYTHON, TEMPLATES, workspace_config, workspaces_dir
+from .config import MISSION_KEYS, PYTHON, TEMPLATES, workspace_config, workspaces_dir
 from .guard import PROTECTED_RE
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
@@ -157,7 +157,7 @@ def create_mission(ws: Path, title: str, spec: str, dod: str, config: dict | Non
     (mdir / "dod.md").write_text(dod.strip() + "\n" if dod.strip() else (mdir / "dod.md").read_text())
     defaults = workspace_config(ws)["defaults"]
     doc = {"title": title, "created": time.strftime("%Y-%m-%d %H:%M")}
-    for key in ("meta_work", "meta_chat", "roles", "budget", "base_branch", "push"):
+    for key in MISSION_KEYS:
         doc[key] = (config or {}).get(key, defaults[key])
     (mdir / "mission.yaml").write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
     commit(ws, "control-plane", f"control-plane: new mission {mid}")

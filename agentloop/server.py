@@ -106,6 +106,9 @@ def create_app(api_url: str) -> FastAPI:
         config = b.get("config")
         if isinstance(config, str):
             config = yaml.safe_load(config) or {}
+        errors = agents.config_errors(config or {})
+        if errors:
+            raise AgentError("; ".join(errors))
         mid = workspace.create_mission(workspace.ws_path(ws), b.get("title", ""), b.get("spec", ""),
                                        b.get("dod", ""), config)
         engine.mission_row(ws, mid)
@@ -121,14 +124,10 @@ def create_app(api_url: str) -> FastAPI:
         for s in sessions:
             s.pop("token", None)
             s["live"] = engine.runner.running(s["id"])
-        activity = engine.db.q("SELECT id, ts, kind, payload, consumed, deferred FROM inbox WHERE ws=? AND "
-                               "mission=? ORDER BY id DESC LIMIT 40", ws, mid)
-        for a in activity:
-            a["payload"] = json.loads(a["payload"])
         done, total = digest.checklist(files["plan.md"])
         return {"ws": ws, "id": mid, "row": row, "files": files, "config": mission_config(p, mid)["mission"],
                 "budget": engine.budget(ws, mid), "checklist": {"done": done, "total": total},
-                "sessions": sessions, "activity": activity,
+                "sessions": sessions,
                 "notes": engine.db.q("SELECT * FROM notes WHERE ws=? AND mission=? ORDER BY id DESC", ws, mid),
                 "verify": digest.verify_commands(files["dod.md"]), "meta_active": (ws, mid) in engine.meta_active}
 
@@ -178,8 +177,8 @@ def create_app(api_url: str) -> FastAPI:
 
     # ---------- sessions ----------
     @app.get("/api/sessions/{sid}/events")
-    def session_events(sid: str, limit: int = 400):
-        return {"events": engine.session_events(sid, limit)}
+    def session_events(sid: str, limit: int = 400, types: str | None = None):
+        return {"events": engine.session_events(sid, limit, set(types.split(",")) if types else None)}
 
     @app.get("/api/sessions/{sid}/turns")
     def session_turns(sid: str):
@@ -193,7 +192,7 @@ def create_app(api_url: str) -> FastAPI:
     def meta_chat_messages(sid: str):
         s = engine.db.session(sid) or {}
         return {"messages": engine.db.q("SELECT * FROM messages WHERE session=? ORDER BY id", sid),
-                "busy": engine.runner.running(sid), "agent": s.get("agent"), "model": s.get("model")}
+                "busy": engine.runner.running(sid) or s.get("status") == "running"}
 
     @app.post("/api/meta-chats/{sid}/messages")
     async def meta_chat_send(sid: str, req: Request):
@@ -214,7 +213,17 @@ def create_app(api_url: str) -> FastAPI:
 
     @app.get("/api/agents")
     async def agents_info():
-        return {"versions": await agents.versions(), "ops": engine.agent_ops}
+        return {"versions": await agents.versions(), "ops": engine.agent_ops, "models": agents.load_models()}
+
+    @app.get("/api/models")
+    def models():
+        return agents.load_models()
+
+    @app.post("/api/models/refresh")
+    async def models_refresh():
+        catalog = await agents.refresh_models()
+        engine.publish("models")
+        return catalog
 
     @app.post("/api/agents/{name}/{op}")
     async def agents_op(name: str, op: str):
@@ -244,8 +253,8 @@ def create_app(api_url: str) -> FastAPI:
     async def agent_cmd(cmd: str, req: Request, x_loop_token: str | None = Header(None)):
         caller, b = engine.caller(x_loop_token), await body(req)
         if cmd == "spawn":
-            text = await engine.spawn_worker(caller, b.get("role", ""), b.get("label", ""), b.get("prompt", ""),
-                                             bool(b.get("gpu")))
+            text = await engine.spawn_worker(caller, b.get("agent", ""), b.get("role", ""), b.get("label", ""),
+                                             b.get("prompt", ""), bool(b.get("gpu")))
         elif cmd == "send":
             text = await engine.send_worker(caller, b.get("sid", ""), b.get("prompt", ""))
         elif cmd == "stop":

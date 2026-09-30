@@ -10,9 +10,9 @@ FAKE_ROLE = {"agent": "fake", "model": None, "effort": None, "autocompact": None
 
 
 def mission_config():
-    return {"meta_work": FAKE_ROLE, "meta_chat": FAKE_ROLE, "roles": {"coder": FAKE_ROLE},
-            "budget": {"max_concurrent_workers": 2, "max_worker_turns": 5, "max_meta_turns": 10, "max_hours": 1,
-                       "max_tokens": None}, "base_branch": None, "push": "manual"}
+    return {"meta_work": FAKE_ROLE, "workers": {"fake": {**FAKE_ROLE, "enabled": True}},
+            "budget": {"max_concurrent_workers": 2, "max_worker_turns": 5, "max_meta_turns": 10},
+            "base_branch": None, "push": "manual"}
 
 
 def test_full_mission(server):
@@ -157,3 +157,34 @@ def test_cli_update_flow(server, monkeypatch):
         assert r.status_code == 400 and "running" in r.json()["error"]
     finally:
         engine.db.x("DELETE FROM sessions WHERE id='busy-1'")
+
+
+def test_fixed_agent_settings(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "fixed"})
+    cfg = mission_config()
+    mid = client.post("/api/workspaces/fixed/missions", json={
+        "title": "Fixed", "spec": "x", "dod": "- x", "config": cfg}).json()["id"]
+    client.post(f"/api/missions/fixed/{mid}/start")
+    worker = wait_for(lambda: next((s for s in client.get(f"/api/missions/fixed/{mid}").json()["sessions"]
+                                    if s["kind"] == "worker"), None))
+    meta = engine.db.one("SELECT * FROM sessions WHERE ws='fixed' AND kind='meta-work'")
+    caller = {**meta}
+    # A disabled CLI is refused; the meta-work only picks enabled ones
+    cfg["workers"]["fake"]["enabled"] = False
+    text = yaml.safe_dump({"title": "Fixed", **cfg})
+    assert client.put(f"/api/missions/fixed/{mid}/files/mission.yaml", json={"text": text}).status_code == 200
+    import asyncio
+    engine.db.update("missions", {"ws": "fixed", "id": mid}, status="running")
+    try:
+        asyncio.run(engine.spawn_worker(caller, "fake", "coder", "x", "do it"))
+        raise AssertionError("disabled agent was accepted")
+    except Exception as exc:
+        assert "not enabled" in str(exc)
+    # Model/effort follow the human config at the next turn
+    cfg["workers"]["fake"].update(enabled=True, model="m2", effort="low")
+    client.put(f"/api/missions/fixed/{mid}/files/mission.yaml", json={"text": yaml.safe_dump({"title": "Fixed", **cfg})})
+    w = engine.db.session(worker["id"])
+    spec = engine.build_spec(w, "again", w["turns"] + 1)
+    assert (spec.model, spec.effort) == ("m2", "low") and engine.db.session(w["id"])["model"] == "m2"
+    engine.db.update("missions", {"ws": "fixed", "id": mid}, status="stopped")

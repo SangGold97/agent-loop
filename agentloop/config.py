@@ -15,19 +15,14 @@ PYTHON = sys.executable
 DEFAULTS: dict = {
     "limits": {"max_running_missions": 3, "max_workers_total": 6},
     "defaults": {
+        # Fixed by the human: every meta-work turn and every worker turn uses these settings
         "meta_work": {"agent": "claude", "model": "opus", "effort": "high",
                       "autocompact": None, "rotate_at_tokens": None},
-        "meta_chat": {"agent": "claude", "model": "opus", "effort": "medium",
-                      "autocompact": None},
-        "roles": {
-            "coder": {"agent": "claude", "model": "opus", "effort": "high", "autocompact": None},
-            "research": {"agent": "codex", "model": "gpt-6-astra", "effort": "high",
-                         "autocompact": None},
-            "reviewer": {"agent": "codex", "model": "gpt-6-astra", "effort": "high",
-                         "autocompact": None},
+        "workers": {
+            "claude": {"enabled": True, "model": "opus", "effort": "high", "autocompact": None},
+            "codex": {"enabled": True, "model": "gpt-6-astra", "effort": "high", "autocompact": None},
         },
-        "budget": {"max_concurrent_workers": 3, "max_worker_turns": 40,
-                   "max_meta_turns": 80, "max_hours": 12, "max_tokens": None},
+        "budget": {"max_concurrent_workers": 3, "max_worker_turns": 40, "max_meta_turns": 80},
         "base_branch": None,
         "push": "manual",
     },
@@ -37,8 +32,8 @@ DEFAULTS: dict = {
     "guard": {"deny_patterns": []},
 }
 
-# Mission-level keys that override workspace defaults; "roles" is replaced, not merged
-MISSION_KEYS = ("meta_work", "meta_chat", "roles", "budget", "base_branch", "push")
+# Mission-level keys that override workspace defaults
+MISSION_KEYS = ("meta_work", "workers", "budget", "base_branch", "push")
 
 
 def home() -> Path:
@@ -58,7 +53,7 @@ def state_dir() -> Path:
 def deep_merge(base: dict, over: dict | None) -> dict:
     out = copy.deepcopy(base)
     for key, val in (over or {}).items():
-        if isinstance(val, dict) and isinstance(out.get(key), dict) and key != "roles":
+        if isinstance(val, dict) and isinstance(out.get(key), dict):
             out[key] = deep_merge(out[key], val)
         else:
             out[key] = copy.deepcopy(val)

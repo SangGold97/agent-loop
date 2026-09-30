@@ -34,7 +34,7 @@ def main():
     elif role == "meta-work":
         if "[Kickoff]" in prompt:
             (mdir / "plan.md").write_text("# Plan\n\n- [ ] create hello.py\n")
-            text = loop("spawn", "--role", "coder", "--label", "hello", "--prompt", "Create hello.py")
+            text = loop("spawn", "--agent", "fake", "--role", "coder", "--label", "hello", "--prompt", "Create hello.py")
         elif m := re.search(r"\[Worker (w-\w+)", prompt):
             merged = loop("merge", m.group(1))
             (mdir / "plan.md").write_text("# Plan\n\n- [x] create hello.py\n")

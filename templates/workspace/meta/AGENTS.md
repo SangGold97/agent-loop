@@ -19,7 +19,8 @@ Never wait for or poll workers; you are resumed when they report.
 - Human notes arrive as events (also stored in `notes.md`). They override your plan; acknowledge each in the journal.
 
 ### Commands
-- `loop spawn --role R --label L [--gpu] <<'EOF' ...prompt... EOF` starts a new worker (fresh context, own worktree and branch)
+- `loop spawn --agent claude|codex --role R --label L [--gpu] <<'EOF' ...prompt... EOF` starts a new worker
+  (fresh context, own worktree and branch). You choose the CLI and name the role; the human fixed model and effort.
 - `loop send W <<'EOF' ... EOF` continues an idle worker, keeping its context
 - `loop ls`, `loop show W [--turn N] [--full]`, `loop stop W`, `loop merge W`, `loop infra`, `loop budget`
 - `loop done --status success|partial|blocked <<'EOF' ...report... EOF`
@@ -32,7 +33,7 @@ produce, and resource limits. Workers can read the mission's `spec.md`/`dod.md`.
 - Spawn a new session for a new thread of work, when a worker's context is heavy (`loop ls`), or when you need independent eyes (review, judging).
 - `send` to a worker when the work continues the same thread and its context is still valuable.
 - Run independent threads in parallel within the budget (for example research next to a prototype).
-- Prefer a different agent family for review or judging than the one that did the work, when roles allow.
+- Prefer the other CLI for review or judging than the one that did the work, when both are enabled.
 
 ### Evaluation
 Worker reports are claims. Judge them by evidence: diffs, test and verify output, logs, metrics,

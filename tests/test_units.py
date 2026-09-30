@@ -8,9 +8,10 @@ from agentloop.adapters.codex import CodexAdapter
 from agentloop.config import deep_merge
 
 
-def test_deep_merge_replaces_roles():
-    out = deep_merge({"roles": {"a": 1, "b": 2}, "x": {"y": 1, "z": 2}}, {"roles": {"c": 3}, "x": {"y": 9}})
-    assert out == {"roles": {"c": 3}, "x": {"y": 9, "z": 2}}
+def test_deep_merge():
+    out = deep_merge({"workers": {"claude": {"model": "a", "effort": "high"}}, "x": 1},
+                     {"workers": {"claude": {"model": "b"}}})
+    assert out == {"workers": {"claude": {"model": "b", "effort": "high"}}, "x": 1}
 
 
 def test_to_tokens():
@@ -32,7 +33,7 @@ def test_codex_argv_meta_resume(tmp_path):
                 add_dirs=[tmp_path / "mission"], system_text="MODE", last_message_file=tmp_path / "l.txt")
     a = CodexAdapter().argv(s)
     assert a[:4] == ["codex", "exec", "resume", "t1"] and a[-1] == "-"
-    assert 'model_reasoning_effort="xhigh"' in a and "-C" not in a
+    assert 'model_reasoning_effort="max"' in a and "-C" not in a
     assert any("writable_roots" in x for x in a) and "--dangerously-bypass-approvals-and-sandbox" not in a
 
 
@@ -118,3 +119,32 @@ def test_guard_rm_edge_cases(tmp_path):
     assert guard.check(ev("rm -rf ../../repo"), w)
     assert guard.check(ev("echo $((1<<2))\ngit push"), w)
     assert not guard.check(ev("rm -rf build dist && pytest -q"), w)
+
+
+def test_config_errors_use_catalog(tmp_path, monkeypatch):
+    from agentloop import agents
+    catalog = {"claude": {"version": "2.1", "models": [{"id": "opus", "efforts": ["low", "high"]},
+                                                      {"id": "haiku", "efforts": []}]},
+               "codex": {"version": "0.1", "models": [{"id": "gpt-x", "efforts": ["low", "max"]}]}}
+    monkeypatch.setattr(agents, "load_models", lambda: catalog)
+    ok = {"meta_work": {"agent": "claude", "model": "opus", "effort": "high"},
+          "workers": {"codex": {"enabled": True, "model": "gpt-x", "effort": "max"},
+                      "claude": {"enabled": False, "model": "nope"}}}
+    assert agents.config_errors(ok) == []
+    bad = {"meta_work": {"agent": "claude", "model": "haiku", "effort": "high"},
+           "workers": {"codex": {"model": "gpt-y"}, "gemini": {}}}
+    errors = agents.config_errors(bad)
+    assert len(errors) == 3 and "haiku" in errors[0] and "gpt-y" in errors[1] and "gemini" in errors[2]
+
+
+def test_claude_catalog_filters_by_version(tmp_path, monkeypatch):
+    from agentloop import agents
+    cache = tmp_path / ".claude/cache/model-catalog"
+    cache.mkdir(parents=True)
+    models = [{"id": "claude-new", "short_name": "Opus", "section": "main", "min_claude_code_version": "2.2.0",
+               "thinking": {"effort_options": [{"id": "high"}]}},
+              {"id": "claude-old", "short_name": "Opus", "section": "main", "thinking": {"effort_options": [{"id": "low"}]}}]
+    (cache / "acct-cc.json").write_text(json.dumps({"catalog": {"config": {"models": models}}}))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    ids = [m["id"] for m in agents._claude_catalog("2.1.285 (Claude Code)")]
+    assert ids == ["opus", "claude-old"]

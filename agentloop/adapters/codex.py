@@ -5,7 +5,6 @@ import json
 
 from .base import Adapter, ParseState, RunSpec, short, to_tokens
 
-EFFORT = {"max": "xhigh"}
 
 
 class CodexAdapter(Adapter):
@@ -18,7 +17,7 @@ class CodexAdapter(Adapter):
         if s.model:
             a += ["-m", s.model]
         if s.effort:
-            a += ["-c", f'model_reasoning_effort="{EFFORT.get(s.effort, s.effort)}"']
+            a += ["-c", f'model_reasoning_effort="{s.effort}"']
         tokens = to_tokens(s.autocompact)
         if tokens:
             a += ["-c", f"model_auto_compact_token_limit={tokens}"]

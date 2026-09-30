@@ -1,12 +1,11 @@
 'use strict';
 /* agent-loop web UI: vanilla JS, hash routing, live updates over SSE. */
 
-const S = { workspaces: [], route: {}, mission: null, logs: {}, infra: null, history: [], agents: null,
-  adv: { sid: null, messages: [], busy: false, live: '' }, dirty: {}, git: null };
+const S = { workspaces: [], route: {}, mission: null, feeds: {}, infra: null, history: [], agents: null, models: {},
+  chat: { sid: null, messages: [], busy: false, live: '', creating: false }, edit: {}, cfgDirty: false };
 const main = document.getElementById('main');
-const EFFORTS = { claude: ['low', 'medium', 'high', 'xhigh', 'max'], codex: ['minimal', 'low', 'medium', 'high', 'xhigh'] };
-const MODELS = { claude: ['opus', 'sonnet', 'haiku', 'fable', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-fable-5-1'],
-  codex: ['gpt-6-astra'] };
+const AGENTS = ['claude', 'codex'];
+const FEED_TYPES = ['turn', 'text', 'tool', 'turn_end', 'error'];
 
 // ---------- helpers ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -14,10 +13,13 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const md = s => (window.marked && window.DOMPurify) ? DOMPurify.sanitize(marked.parse(s || '')) : `<pre>${esc(s)}</pre>`;
 const fmtTok = n => !n ? '0' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n);
-const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '–';
-const hhmm = ts => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '–';
+const hhmm = ts => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const fmtDur = hours => { const m = Math.round(hours * 60); return `${Math.floor(m / 60)} h ${m % 60} mins`; };
 const label = s => String(s || '').replace(/_/g, ' ');
 const firstLine = s => (String(s || '').split('\n').find(l => l.trim()) || '').slice(0, 220);
+// Workers and meta sessions are shown with three states only
+const simpleStatus = s => (s.live || s.status === 'running') ? 'running' : s.status === 'failed' ? 'failed' : 'idle';
 let refreshTimer = null;
 
 async function api(path, opts = {}) {
@@ -49,14 +51,16 @@ function modal(html, wide = false) {
 function closeModal() { $('#modal-root').innerHTML = ''; }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 function pill(status, text) { return `<span class="pill ${esc(status)}">${esc(label(text || status))}</span>`; }
-function meter(used, max, invert = false) {
-  if (!max) return `<div class="meter"><i style="width:0"></i></div>`;
+function meter(used, max, progress = false) {
+  if (!max) return '<div class="meter"><i style="width:0"></i></div>';
   const pct = Math.min(100, (used / max) * 100);
-  const cls = pct >= 100 ? 'bad' : pct >= 80 ? 'warn' : invert ? 'ok' : '';
+  // A limit turns amber/red as it fills; progress (e.g. the plan checklist) stays green
+  const cls = progress ? '' : pct >= 100 ? 'bad' : pct >= 80 ? 'warn' : '';
   return `<div class="meter ${cls}"><i style="width:${pct}%"></i></div>`;
 }
+const box = (title, body, attrs = '') => `<div class="box" ${attrs}><div class="lt">${title}</div>${body}</div>`;
 
-// ---------- YAML (small dumper for mission.yaml / config objects) ----------
+// ---------- YAML (small dumper for mission.yaml) ----------
 function yamlScalar(v) {
   if (v === null || v === undefined || v === '') return 'null';
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
@@ -72,86 +76,105 @@ function toYaml(obj, ind = '') {
   return lines.join('\n') + (ind ? '' : '\n');
 }
 
-// ---------- agent/budget form (new mission + config tab) ----------
-function agentFields(key, conf = {}, opts = {}) {
-  const agent = conf.agent || 'claude';
-  const efforts = EFFORTS[agent] || [];
-  return `<div class="agent-row" data-key="${esc(key)}">
-    ${opts.editableName ? `<label class="f">Role<input type="text" data-f="name" value="${esc(key)}"></label>` : `<div class="name">${esc(opts.title || key)}</div>`}
-    <label class="f">Agent<select data-f="agent">${['claude', 'codex'].map(a => `<option ${a === agent ? 'selected' : ''}>${a}</option>`).join('')}</select></label>
-    <label class="f">Model<input type="text" data-f="model" list="models-${agent}" value="${esc(conf.model ?? '')}" placeholder="CLI default"></label>
-    <label class="f">Effort<select data-f="effort"><option value="">default</option>${efforts.map(e => `<option ${e === conf.effort ? 'selected' : ''}>${e}</option>`).join('')}</select></label>
-    <label class="f">Autocompact<input type="text" data-f="autocompact" value="${esc(conf.autocompact ?? '')}" placeholder="e.g. 400k"></label>
-    ${opts.editableName ? `<button type="button" class="icon-btn" data-remove title="Remove role" style="margin-bottom:6px">×</button>` : '<span></span>'}
+// ---------- model catalog (follows the installed CLI versions; Agent CLIs page refreshes it) ----------
+const modelList = agent => S.models?.[agent]?.models || [];
+function modelOptions(agent, current) {
+  const list = modelList(agent);
+  const opts = list.map(m => `<option value="${esc(m.id)}" ${m.id === current ? 'selected' : ''}>${esc(m.alias ? m.name : m.id)}</option>`);
+  if (current && !list.some(m => m.id === current)) opts.unshift(`<option value="${esc(current)}" selected>${esc(current)} (not available)</option>`);
+  return `<option value="" ${current ? '' : 'selected'}>CLI default</option>${opts.join('')}`;
+}
+function effortOptions(agent, model, current) {
+  const m = modelList(agent).find(x => x.id === model);
+  const list = m ? m.efforts : [...new Set(modelList(agent).flatMap(x => x.efforts))];
+  const opts = list.map(e => `<option ${e === current ? 'selected' : ''}>${esc(e)}</option>`);
+  if (current && !list.includes(current)) opts.unshift(`<option value="${esc(current)}" selected>${esc(current)} (unsupported)</option>`);
+  return `<option value="" ${current ? '' : 'selected'}>default</option>${opts.join('')}`;
+}
+async function loadModels() { try { S.models = await api('/api/models'); } catch { S.models = {}; } }
+
+// ---------- agent settings form (HUMAN layer, new mission, new meta-chat) ----------
+function agentRow(key, conf = {}, opts = {}) {
+  const agent = conf.agent || opts.agent || 'claude';
+  const off = opts.toggle && conf.enabled === false;
+  return `<div class="agent-row ${off ? 'off' : ''}" data-key="${esc(key)}" data-agent="${esc(agent)}">
+    <div class="name">${opts.toggle ? `<label class="inline"><input type="checkbox" data-f="enabled" ${off ? '' : 'checked'}> ${esc(opts.title)}</label>` : esc(opts.title)}</div>
+    ${opts.fixedAgent ? `<div>${esc(agent)}</div>` : `<select data-f="agent">${AGENTS.map(a => `<option ${a === agent ? 'selected' : ''}>${a}</option>`).join('')}</select>`}
+    <select data-f="model">${modelOptions(agent, conf.model)}</select>
+    <select data-f="effort">${effortOptions(agent, conf.model, conf.effort)}</select>
+    ${opts.noAutocompact ? '<span></span>' : `<input type="text" data-f="autocompact" value="${esc(conf.autocompact ?? '')}" placeholder="autocompact">`}
   </div>`;
 }
-function configForm(conf) {
-  const b = conf.budget || {};
-  const num = (k, v) => `<label class="f">${label(k)}<input type="number" min="0" step="any" data-b="${k}" value="${v ?? ''}" placeholder="∞"></label>`;
-  return `<datalist id="models-claude">${MODELS.claude.map(m => `<option value="${m}">`).join('')}</datalist>
-    <datalist id="models-codex">${MODELS.codex.map(m => `<option value="${m}">`).join('')}</datalist>
-    <fieldset><legend>Meta-work (runs the mission)</legend>${agentFields('meta_work', conf.meta_work, { title: 'Meta-work' })}
-      <label class="f" style="max-width:260px">Rotate session when context exceeds<input type="text" data-rotate value="${esc(conf.meta_work?.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)"></label>
-      <div style="height:8px"></div></fieldset>
-    <fieldset><legend>Meta-chat (Q&A chat)</legend>${agentFields('meta_chat', conf.meta_chat, { title: 'Meta-chat' })}</fieldset>
-    <fieldset><legend>Worker roles</legend><div data-roles>${Object.entries(conf.roles || {}).map(([k, r]) => agentFields(k, r, { editableName: true })).join('')}</div>
-      <button type="button" class="btn small" data-add-role>+ Add role</button><div style="height:10px"></div></fieldset>
-    <fieldset><legend>Budget</legend><div class="form-grid">
-      ${num('max_concurrent_workers', b.max_concurrent_workers)}${num('max_worker_turns', b.max_worker_turns)}
-      ${num('max_meta_turns', b.max_meta_turns)}${num('max_hours', b.max_hours)}
-      <label class="f">max tokens<input type="text" data-b="max_tokens" value="${esc(b.max_tokens ?? '')}" placeholder="∞ (e.g. 20M)"></label>
-    </div><div style="height:10px"></div></fieldset>
-    <fieldset><legend>Git</legend><div class="form-grid">
-      <label class="f">Base branch<input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo's current branch"></label>
-      <label class="f">Push policy<select data-push>${['manual', 'branch'].map(p => `<option ${p === conf.push ? 'selected' : ''}>${p}</option>`).join('')}</select></label>
-    </div><div style="height:10px"></div></fieldset>`;
+function agentHeader() {
+  return `<div class="agent-row faint small"><span></span><span>agent</span><span>model</span><span>effort</span><span>autocompact</span></div>`;
 }
-function wireConfigForm(root) {
+function wireAgentRows(root, onChange) {
   root.addEventListener('change', e => {
-    if (e.target.dataset.f !== 'agent') return;
     const row = e.target.closest('.agent-row');
-    const agent = e.target.value;
-    $('[data-f=model]', row).setAttribute('list', `models-${agent}`);
-    $('[data-f=effort]', row).innerHTML = '<option value="">default</option>' + EFFORTS[agent].map(x => `<option>${x}</option>`).join('');
-  });
-  root.addEventListener('click', e => {
-    if (e.target.matches('[data-remove]')) e.target.closest('.agent-row').remove();
-    if (e.target.matches('[data-add-role]')) {
-      $('[data-roles]', root).insertAdjacentHTML('beforeend', agentFields('new-role', { agent: 'claude', model: 'opus', effort: 'high' }, { editableName: true }));
+    if (row) {
+      const f = e.target.dataset.f;
+      if (f === 'agent') {
+        row.dataset.agent = e.target.value;
+        $('[data-f=model]', row).innerHTML = modelOptions(e.target.value, null);
+      }
+      if (f === 'agent' || f === 'model') {
+        const agent = row.dataset.agent, eff = $('[data-f=effort]', row);
+        eff.innerHTML = effortOptions(agent, $('[data-f=model]', row).value, eff.value);
+      }
+      if (f === 'enabled') row.classList.toggle('off', !e.target.checked);
     }
+    onChange?.();
   });
+  root.addEventListener('input', () => onChange?.());
 }
 function readAgentRow(row) {
-  const val = f => { const v = $(`[data-f=${f}]`, row).value.trim(); return v === '' ? null : v; };
-  return { agent: val('agent'), model: val('model'), effort: val('effort'), autocompact: val('autocompact') };
+  const val = f => { const el = $(`[data-f=${f}]`, row); const v = el ? el.value.trim() : ''; return v === '' ? null : v; };
+  const out = { agent: row.dataset.agent, model: val('model'), effort: val('effort') };
+  if ($('[data-f=autocompact]', row)) out.autocompact = val('autocompact');
+  if ($('[data-f=enabled]', row)) out.enabled = $('[data-f=enabled]', row).checked;
+  return out;
+}
+function configForm(conf) {
+  const b = conf.budget || {}, mw = conf.meta_work || {}, wk = conf.workers || {};
+  const num = (k, v, title) => `<label class="f">${title}<input type="number" min="0" step="1" data-b="${k}" value="${v ?? ''}" placeholder="∞"></label>`;
+  return `<div class="cfg">
+    <div class="k">agents</div><div>${agentHeader()}
+      ${agentRow('meta_work', mw, { title: 'meta-work' })}
+      ${AGENTS.map(a => agentRow(`worker:${a}`, { agent: a, ...(wk[a] || {}) }, { title: 'worker', toggle: true, fixedAgent: true })).join('')}
+      <div class="hint">The meta-work picks <code>--agent claude|codex</code> per worker; model and effort are always taken from here.</div></div>
+    <div class="k">rotate</div><div class="row"><span class="muted small">start a fresh meta-work session when its context exceeds</span>
+      <input type="text" data-rotate value="${esc(mw.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)" style="width:160px"></div>
+    <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'concurrent workers')}
+      ${num('max_worker_turns', b.max_worker_turns, 'worker turns')}${num('max_meta_turns', b.max_meta_turns, 'meta-work turns')}</div>
+    <div class="k">git</div><div class="budget-row">
+      <label class="f">base branch<input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo's current"></label>
+      <label class="f">push policy<select data-push>${['manual', 'branch'].map(p => `<option ${p === conf.push ? 'selected' : ''}>${p}</option>`).join('')}</select></label></div>
+  </div>`;
 }
 function readConfigForm(root) {
-  const rows = $$('.agent-row', root);
+  const rows = $$('.agent-row[data-key]', root);
   const metaWork = readAgentRow(rows.find(r => r.dataset.key === 'meta_work'));
   metaWork.rotate_at_tokens = $('[data-rotate]', root).value.trim() || null;
-  const roles = {};
-  $$('[data-roles] .agent-row', root).forEach(r => {
-    const name = $('[data-f=name]', r).value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
-    if (name) roles[name] = readAgentRow(r);
+  const workers = {};
+  rows.filter(r => r.dataset.key.startsWith('worker:')).forEach(r => {
+    const { agent, ...conf } = readAgentRow(r);
+    workers[agent] = conf;
   });
-  if (!Object.keys(roles).length) throw new Error('at least one worker role is required');
+  if (!Object.values(workers).some(w => w.enabled)) throw new Error('enable at least one worker agent');
   const budget = {};
-  $$('[data-b]', root).forEach(i => {
-    const v = i.value.trim();
-    budget[i.dataset.b] = v === '' ? null : (i.type === 'number' ? Number(v) : v);
-  });
-  return { meta_work: metaWork, meta_chat: readAgentRow(rows.find(r => r.dataset.key === 'meta_chat')), roles, budget,
-    base_branch: $('[data-base]', root).value.trim() || null, push: $('[data-push]', root).value };
+  $$('[data-b]', root).forEach(i => { budget[i.dataset.b] = i.value.trim() === '' ? null : Number(i.value); });
+  return { meta_work: metaWork, workers, budget, base_branch: $('[data-base]', root).value.trim() || null,
+    push: $('[data-push]', root).value };
 }
 
-// ---------- sidebar ----------
+// ---------- sidebar & routing ----------
 async function loadState() {
   S.workspaces = (await api('/api/state')).workspaces;
   renderSidebar();
 }
 function renderSidebar() {
   const r = S.route;
-  $('#ws-list').innerHTML = S.workspaces.map(w => `<div class="ws-item">
+  $('#ws-list').innerHTML = S.workspaces.map(w => `<div>
       <a class="ws-name ${r.view === 'workspace' && r.ws === w.name ? 'active' : ''}" href="#/ws/${w.name}">
         <span>${esc(w.name)}</span><button class="icon-btn" data-new-mission="${esc(w.name)}" title="New mission">+</button></a>
       ${w.missions.map(m => `<a class="m-link ${r.mid === m.id && r.ws === w.name ? 'active' : ''}" href="#/ws/${w.name}/m/${m.id}" title="${esc(m.title)}">
@@ -163,10 +186,13 @@ function renderSidebar() {
 }
 $('#new-ws').onclick = () => newWorkspaceModal();
 
-// ---------- routing ----------
+const TABS = [['overview', 'Overview'], ['plan', 'Plan & journal'], ['notes', 'Notes'], ['git', 'Git']];
 function parseHash() {
   const p = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
-  if (p[0] === 'ws' && p[2] === 'm') return { view: 'mission', ws: p[1], mid: p[3], tab: p[4] || 'overview' };
+  if (p[0] === 'ws' && p[2] === 'm') {
+    const tab = TABS.some(([k]) => k === p[4]) ? p[4] : 'overview';
+    return { view: 'mission', ws: p[1], mid: p[3], tab };
+  }
   if (p[0] === 'ws' && p[1]) return { view: 'workspace', ws: p[1] };
   if (p[0] === 'infra') return { view: 'infra' };
   if (p[0] === 'agents') return { view: 'agents' };
@@ -175,7 +201,10 @@ function parseHash() {
 async function render() {
   const prev = S.route;
   S.route = parseHash();
-  if (prev.mid !== S.route.mid) { S.logs = {}; S.adv = { sid: null, messages: [], busy: false, live: '' }; S.dirty = {}; }
+  if (prev.mid !== S.route.mid) {
+    S.feeds = {}; S.edit = {}; S.cfgDirty = false;
+    S.chat = { sid: null, messages: [], busy: false, live: '', creating: false };
+  }
   renderSidebar();
   try {
     if (S.route.view === 'mission') await renderMission();
@@ -192,14 +221,14 @@ window.addEventListener('hashchange', () => { closeModal(); render(); });
 // ---------- home & workspace ----------
 function renderHome() {
   main.innerHTML = `<div class="hero">
-    <h1>Human on the loop.</h1>
-    <p class="muted" style="max-width:720px">Write a spec and a Definition of Done; a meta-agent plans, delegates to Claude Code / Codex workers,
-      evaluates evidence and iterates until the DoD is met. You steer with notes, review the report, and merge.</p>
-    <div class="row" style="margin-top:14px"><button class="btn primary" id="h-new-ws">New workspace</button></div>
+    <h1>$ human on the loop</h1>
+    <p class="muted" style="max-width:760px">Write a spec and a Definition of Done. A meta-work agent plans, delegates to Claude Code / Codex
+      workers, evaluates evidence and iterates until the DoD is met. You steer with notes and meta-chat, review the report, and merge.</p>
+    <div class="row" style="margin-top:14px"><button class="btn primary" id="h-new-ws">new workspace</button></div>
     <div class="ws-cards">${S.workspaces.map(w => {
       const counts = w.missions.reduce((a, m) => (a[m.status] = (a[m.status] || 0) + 1, a), {});
-      return `<a class="card" href="#/ws/${w.name}" style="color:inherit"><h2>${esc(w.name)}</h2>
-        <div class="row">${Object.entries(counts).map(([k, v]) => pill(k, `${v} ${label(k)}`)).join('') || '<span class="muted small">no missions</span>'}</div></a>`;
+      return `<a class="card" href="#/ws/${w.name}"><h2>${esc(w.name)}</h2>
+        <div class="row" style="margin-top:6px">${Object.entries(counts).map(([k, v]) => pill(k, `${v} ${label(k)}`)).join('') || '<span class="faint small">no missions</span>'}</div></a>`;
     }).join('')}</div></div>`;
   $('#h-new-ws').onclick = () => newWorkspaceModal();
 }
@@ -207,27 +236,25 @@ async function renderWorkspace() {
   const ws = S.route.ws;
   const [info, state] = [await api(`/api/workspaces/${ws}`), S.workspaces.find(w => w.name === ws)];
   main.innerHTML = `<div class="page">
-    <div class="page-head"><div><div class="crumbs">workspace</div><h1>${esc(ws)}</h1><div class="muted small mono">${esc(info.path)}</div></div>
-      <div class="actions"><button class="btn primary" id="w-new">New mission</button></div></div>
-    <div class="grid cols-2">
-      <div class="card"><h2>Missions</h2>${state && state.missions.length ? `<table class="t"><tr><th>Mission</th><th>Status</th></tr>
-        ${state.missions.map(m => `<tr><td><a href="#/ws/${ws}/m/${m.id}">${esc(m.title)}</a><div class="faint small mono">${esc(m.id)}</div></td>
-        <td>${pill(m.status)} ${m.outcome ? pill(m.outcome) : ''}</td></tr>`).join('')}</table>` : '<div class="empty">No missions yet.</div>'}</div>
-      <div class="card"><div class="row"><h2 style="margin:0">loop.yaml</h2><span class="dirty" id="w-dirty"></span><span class="spacer"></span>
-        <button class="btn small primary" id="w-save">Save</button></div>
-        <p class="hint">Workspace defaults (agents, models, budgets, infra limits, guard patterns). New missions copy <code>defaults</code>.</p>
-        <textarea class="editor" id="w-yaml" spellcheck="false">${esc(info.loop_yaml)}</textarea></div>
+    <div class="page-head"><div><div class="crumbs">workspace</div><h1>${esc(ws)}</h1><div class="faint small">${esc(info.path)}</div></div>
+      <div class="actions"><button class="btn primary" id="w-new">new mission</button></div></div>
+    <div class="grid cols-2" style="margin-top:18px">
+      ${box('missions', state && state.missions.length ? `<table class="t"><tr><th>mission</th><th>status</th></tr>
+        ${state.missions.map(m => `<tr><td><a href="#/ws/${ws}/m/${m.id}">${esc(m.title)}</a><div class="faint small">${esc(m.id)}</div></td>
+        <td>${pill(m.status)} ${m.outcome ? pill(m.outcome) : ''}</td></tr>`).join('')}</table>` : '<div class="empty">No missions yet.</div>')}
+      ${box('loop.yaml <span class="dirty" id="w-dirty"></span>', `<div class="row"><span class="hint">Workspace defaults; new missions copy <code>defaults</code>.</span><span class="spacer"></span>
+        <button class="btn small primary" id="w-save">save</button></div>
+        <textarea class="editor" id="w-yaml" spellcheck="false">${esc(info.loop_yaml)}</textarea>`)}
     </div>
-    <div class="card" style="margin-top:14px"><div class="row"><h2 style="margin:0">Harness</h2><span class="spacer"></span>
-        <input type="text" id="h-newpath" placeholder="new file, e.g. worker/skills/kaggle-submit/SKILL.md" style="max-width:420px">
-        <button class="btn small" id="h-new">Create</button></div>
-      <p class="hint">Instructions, skills, hooks and memory for the meta layer (<code>meta/</code>) and the workers (<code>worker/</code>).
-        Changes apply to the next agent turn and are committed as <span class="chip human">human</span>.</p>
-      <div class="grid" style="grid-template-columns:minmax(220px,300px) 1fr"><div id="h-files" class="adv-list"></div>
-        <div><div class="row"><b class="mono" id="h-path">select a file</b><span class="dirty" id="h-dirty"></span><span class="spacer"></span>
-          <button class="btn small primary" id="h-save" disabled>Save</button></div>
-          <textarea class="editor" id="h-text" spellcheck="false" style="margin-top:8px" disabled></textarea></div></div></div>
-    <div class="card" style="margin-top:14px"><h2>Audit log</h2>${auditTable(info.log)}</div></div>`;
+    <div style="margin-top:22px">${box('harness <span class="dirty" id="h-dirty"></span>', `<div class="row">
+        <span class="hint">Instructions, skills, hooks and memory for <code>meta/</code> and <code>worker/</code>. Changes apply to the next turn, committed as <span class="chip human">human</span>.</span>
+        <span class="spacer"></span><input type="text" id="h-newpath" placeholder="new file, e.g. worker/skills/kaggle-submit/SKILL.md" style="max-width:420px">
+        <button class="btn small" id="h-new">create</button></div>
+      <div class="grid" style="grid-template-columns:minmax(220px,320px) 1fr;margin-top:8px"><div id="h-files" class="file-list"></div>
+        <div><div class="row"><b id="h-path">select a file</b><span class="spacer"></span>
+          <button class="btn small primary" id="h-save" disabled>save</button></div>
+          <textarea class="editor" id="h-text" spellcheck="false" style="margin-top:6px" disabled></textarea></div></div>`)}</div>
+    <div style="margin-top:22px">${box('audit log', auditTable(info.log))}</div></div>`;
   wireHarness(ws);
   $('#w-new').onclick = () => newMissionModal(ws);
   $('#w-yaml').oninput = () => $('#w-dirty').textContent = 'unsaved';
@@ -238,15 +265,15 @@ async function renderWorkspace() {
 }
 async function wireHarness(ws, select) {
   const { files } = await api(`/api/workspaces/${ws}/harness`);
-  const box = $('#h-files');
-  box.innerHTML = files.map(f => `<div class="adv-item mono small" data-hf="${esc(f)}">${esc(f)}</div>`).join('');
+  const list = $('#h-files');
+  list.innerHTML = files.map(f => `<div class="list-item small" data-hf="${esc(f)}">${esc(f)}</div>`).join('');
   const open = async path => {
     const r = await api(`/api/workspaces/${ws}/harness?path=${encodeURIComponent(path)}`);
-    $$('[data-hf]', box).forEach(x => x.classList.toggle('active', x.dataset.hf === path));
+    $$('[data-hf]', list).forEach(x => x.classList.toggle('active', x.dataset.hf === path));
     $('#h-path').textContent = path; $('#h-text').value = r.text; $('#h-text').disabled = false;
     $('#h-save').disabled = false; $('#h-dirty').textContent = '';
   };
-  $$('[data-hf]', box).forEach(x => x.onclick = () => open(x.dataset.hf));
+  $$('[data-hf]', list).forEach(x => x.onclick = () => open(x.dataset.hf));
   $('#h-text').oninput = () => $('#h-dirty').textContent = 'unsaved';
   $('#h-save').onclick = () => act(async () => {
     await api(`/api/workspaces/${ws}/harness`, { method: 'PUT', body: { path: $('#h-path').textContent, text: $('#h-text').value } });
@@ -263,41 +290,39 @@ async function wireHarness(ws, select) {
 }
 function auditTable(rows) {
   const chip = a => { const k = a.startsWith('meta-work') ? 'meta-work' : a.startsWith('meta-chat') ? 'meta-chat' : a; return `<span class="chip ${esc(k)}">${esc(a)}</span>`; };
-  return rows.length ? `<table class="t"><tr><th>Commit</th><th>Actor</th><th>Message</th><th>When</th></tr>${rows.map(c =>
-    `<tr><td class="mono">${esc(c.hash)}</td><td>${chip(c.author)}</td><td>${esc(c.subject)}</td><td class="muted small">${esc(c.when)}</td></tr>`).join('')}</table>`
+  return rows.length ? `<table class="t"><tr><th>commit</th><th>actor</th><th>message</th><th>when</th></tr>${rows.map(c =>
+    `<tr><td>${esc(c.hash)}</td><td>${chip(c.author)}</td><td>${esc(c.subject)}</td><td class="faint small">${esc(c.when)}</td></tr>`).join('')}</table>`
     : '<div class="empty">No commits.</div>';
 }
 function newWorkspaceModal() {
-  const m = modal(`<div class="modal-head"><h2>New workspace</h2><button class="icon-btn" data-close>×</button></div>
-    <div class="grid" style="gap:12px">
-      <label class="f">Name (lowercase, e.g. <code>kaggle-titanic</code>)<input type="text" id="nw-name" placeholder="my-project"></label>
-      <label class="f">Project repository to clone (git URL or local path) — leave empty for a fresh repo<input type="text" id="nw-repo" placeholder="git@github.com:org/repo.git or /path/to/repo"></label>
-      <label class="f">Base branch (optional)<input type="text" id="nw-base" placeholder="repo default"></label>
-      <p class="hint">The workspace gets its own git history, a meta-agent harness (<code>meta/</code>) and a worker harness (<code>worker/</code>) you can customise.</p>
-      <div class="row"><span class="spacer"></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="nw-ok">Create</button></div></div>`);
+  const m = modal(`<div class="modal-head"><h2>new workspace</h2><button class="icon-btn" data-close>×</button></div>
+    <div class="grid" style="gap:10px">
+      <label class="f">name (lowercase, e.g. kaggle-titanic)<input type="text" id="nw-name" placeholder="my-project"></label>
+      <label class="f">project repository to clone (git URL or local path); empty = fresh repo<input type="text" id="nw-repo" placeholder="git@github.com:org/repo.git or /path/to/repo"></label>
+      <label class="f">base branch (optional)<input type="text" id="nw-base" placeholder="repo default"></label>
+      <div class="row"><span class="spacer"></span><button class="btn" data-close>cancel</button><button class="btn primary" id="nw-ok">create</button></div></div>`);
   $('#nw-name', m).focus();
   $('#nw-ok', m).onclick = () => act(async () => {
-    $('#nw-ok', m).disabled = true; $('#nw-ok', m).textContent = 'Creating…';
+    $('#nw-ok', m).disabled = true;
     try {
       const r = await api('/api/workspaces', { body: { name: $('#nw-name', m).value.trim(), repo: $('#nw-repo', m).value.trim(), base_branch: $('#nw-base', m).value.trim() } });
       closeModal(); await loadState(); location.hash = `#/ws/${r.name}`;
-    } finally { $('#nw-ok', m) && ($('#nw-ok', m).disabled = false, $('#nw-ok', m).textContent = 'Create'); }
+    } finally { if ($('#nw-ok', m)) $('#nw-ok', m).disabled = false; }
   }, 'Workspace created');
 }
 async function newMissionModal(ws) {
   const info = await api(`/api/workspaces/${ws}`);
-  const d = info.config.defaults;
-  const m = modal(`<div class="modal-head"><h2>New mission · ${esc(ws)}</h2><button class="icon-btn" data-close>×</button></div>
+  const m = modal(`<div class="modal-head"><h2>new mission · ${esc(ws)}</h2><button class="icon-btn" data-close>×</button></div>
     <div class="grid" style="gap:12px">
-      <label class="f">Title<input type="text" id="nm-title" placeholder="e.g. Add OAuth login"></label>
+      <label class="f">title<input type="text" id="nm-title" placeholder="e.g. Add OAuth login"></label>
       <div class="grid cols-2">
-        <label class="f">Spec — goal, context, inputs, constraints<textarea id="nm-spec" style="min-height:200px" placeholder="What should be achieved and why…"></textarea></label>
-        <label class="f">Definition of Done<textarea id="nm-dod" style="min-height:200px" placeholder="- criterion (qualitative ones are judged by the meta-work)&#10;- verify: \`pytest -q\`   ← optional command run on the integration branch"></textarea></label>
+        <label class="f">spec: goal, context, inputs, constraints<textarea id="nm-spec" style="min-height:190px"></textarea></label>
+        <label class="f">definition of done<textarea id="nm-dod" style="min-height:190px" placeholder="- criterion (qualitative ones are judged by the meta-work)&#10;- verify: \`pytest -q\`   (optional command run on the integration branch)"></textarea></label>
       </div>
-      <details><summary class="btn small" style="display:inline-block">Agents, budget & git</summary><div style="margin-top:12px" id="nm-conf">${configForm(d)}</div></details>
-      <div class="row"><label class="row small"><input type="checkbox" id="nm-start" checked> Start right away</label><span class="spacer"></span>
-        <button class="btn" data-close>Cancel</button><button class="btn primary" id="nm-ok">Create mission</button></div></div>`, true);
-  wireConfigForm($('#nm-conf', m));
+      <div id="nm-conf">${configForm(info.config.defaults)}</div>
+      <div class="row"><label class="inline"><input type="checkbox" id="nm-start" checked> start right away</label><span class="spacer"></span>
+        <button class="btn" data-close>cancel</button><button class="btn primary" id="nm-ok">create mission</button></div></div>`, true);
+  wireAgentRows($('#nm-conf', m));
   $('#nm-title', m).focus();
   $('#nm-ok', m).onclick = () => act(async () => {
     const config = readConfigForm($('#nm-conf', m));
@@ -307,7 +332,7 @@ async function newMissionModal(ws) {
   }, 'Mission created');
 }
 
-// ---------- mission ----------
+// ---------- mission page ----------
 async function loadMission() {
   const { ws, mid } = S.route;
   S.mission = await api(`/api/missions/${ws}/${mid}`);
@@ -319,58 +344,49 @@ async function renderMission() {
 }
 function renderMissionHead() {
   const M = S.mission, st = M.row.status, { ws, mid } = S.route;
-  const busy = M.meta_active ? '<span class="thinking">meta-work is thinking</span>' : '';
   const buttons = [];
-  if (['draft', 'stopped', 'paused'].includes(st)) buttons.push(`<button class="btn primary" data-act="start">${st === 'draft' ? 'Start mission' : 'Resume'}</button>`);
-  if (st === 'running') buttons.push('<button class="btn danger" data-act="stop">Stop</button>');
-  if (st === 'awaiting_review') buttons.push('<button class="btn" data-act="reopen">Reopen with note</button><button class="btn primary" data-act="accept">Accept</button>');
+  if (['draft', 'stopped', 'paused'].includes(st)) buttons.push(`<button class="btn primary" data-act="start">${st === 'draft' ? 'start mission' : 'resume'}</button>`);
+  if (st === 'running') buttons.push('<button class="btn danger" data-act="stop">stop</button>');
+  if (st === 'awaiting_review') buttons.push('<button class="btn" data-act="reopen">reopen with note</button><button class="btn primary" data-act="accept">accept</button>');
   $('#m-head').innerHTML = `<div class="page-head"><div>
-      <div class="crumbs"><a href="#/ws/${ws}">${esc(ws)}</a> / <span class="mono">${esc(mid)}</span></div>
+      <div class="crumbs"><a href="#/ws/${ws}">${esc(ws)}</a> / ${esc(mid)}</div>
       <h1>${esc(M.config.title)}</h1>
-      <div class="row" style="margin-top:6px">${pill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''} ${busy}</div></div>
+      <div class="row" style="margin-top:4px">${pill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''}
+        ${M.meta_active ? '<span class="thinking">meta-work is thinking</span>' : ''}</div></div>
     <div class="actions">${buttons.join('')}</div></div>`;
   $$('[data-act]', $('#m-head')).forEach(b => b.onclick = () => missionAction(b.dataset.act));
 }
 async function missionAction(action) {
   const { ws, mid } = S.route;
   if (action === 'reopen') return reopenModal();
-  if (action === 'stop' && !confirmInline('Stop the mission? Running sessions are killed; their work is snapshotted.')) return;
+  if (action === 'stop' && !window.confirm('Stop the mission? Running sessions are killed; their work is snapshotted.')) return;
   await act(async () => {
     const r = await api(`/api/missions/${ws}/${mid}/${action}`, { body: {} });
     if (action === 'accept' && r.tags?.length) toast(`Unmerged experiments kept as tags: ${r.tags.join(', ')}`, 'info', 9000);
     await loadState(); await refreshMission(true);
   }, { start: 'Mission started', stop: 'Mission stopped', accept: 'Mission accepted' }[action]);
 }
-function confirmInline(msg) { return window.confirm(msg); }
-function reopenModal() {
+function reopenModal(prefill = '') {
   const { ws, mid } = S.route;
-  const m = modal(`<div class="modal-head"><h2>Reopen mission</h2><button class="icon-btn" data-close>×</button></div>
+  const m = modal(`<div class="modal-head"><h2>reopen mission</h2><button class="icon-btn" data-close>×</button></div>
     <p class="muted">Tell the meta-work what is missing or what to change. It receives this note immediately.</p>
-    <textarea id="ro-text" style="min-height:140px" placeholder="e.g. The API works but there are no tests for the error paths…"></textarea>
-    <div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="ro-ok">Reopen</button></div>`);
+    <textarea id="ro-text" style="min-height:140px">${esc(prefill)}</textarea>
+    <div class="row" style="margin-top:10px"><span class="spacer"></span><button class="btn" data-close>cancel</button><button class="btn primary" id="ro-ok">reopen</button></div>`);
   $('#ro-ok', m).onclick = () => act(async () => {
     await api(`/api/missions/${ws}/${mid}/reopen`, { body: { text: $('#ro-text', m).value } });
     closeModal(); await loadState(); await refreshMission(true);
   }, 'Mission reopened');
 }
-const TABS = [['overview', 'Overview'], ['sessions', 'Sessions'], ['plan', 'Plan & journal'], ['notes', 'Notes'],
-  ['meta-chat', 'Meta-chat'], ['spec', 'Spec & DoD'], ['config', 'Config'], ['git', 'Git']];
 function renderTabs() {
   const M = S.mission, { ws, mid, tab } = S.route;
-  const counts = { sessions: M.sessions.filter(s => s.kind !== 'meta-chat' && s.status !== 'retired').length,
-    notes: M.notes.filter(n => n.status === 'pending').length || '', 'meta-chat': M.sessions.filter(s => s.kind === 'meta-chat').length || '' };
+  const counts = { notes: M.notes.filter(n => n.status === 'pending').length || '' };
   $('#m-tabs').innerHTML = TABS.map(([k, t]) => `<a class="tab ${tab === k ? 'active' : ''}" href="#/ws/${ws}/m/${mid}/${k}">${t}${counts[k] ? `<span class="count">${counts[k]}</span>` : ''}</a>`).join('');
 }
 async function renderTab() {
-  const el = $('#m-tab');
   const t = S.route.tab;
-  if (t === 'overview') el.innerHTML = overviewHtml(), wireOverview();
-  else if (t === 'sessions') renderSessions();
-  else if (t === 'plan') el.innerHTML = planHtml();
+  if (t === 'overview') renderOverview();
+  else if (t === 'plan') $('#m-tab').innerHTML = planHtml();
   else if (t === 'notes') renderNotes();
-  else if (t === 'meta-chat') await renderMetaChat();
-  else if (t === 'spec') renderSpec();
-  else if (t === 'config') renderConfig();
   else if (t === 'git') await renderGit();
 }
 function scheduleRefresh() {
@@ -382,201 +398,347 @@ async function refreshMission(force) {
   try { await loadMission(); } catch { return; }
   renderMissionHead(); renderTabs();
   const t = S.route.tab;
-  if (t === 'sessions') return renderSessions(true);
+  if (t === 'overview') return updateOverview(force);
   if (t === 'notes') return renderNotes(true);
-  if (t === 'meta-chat') return renderMetaChatList();
-  if ((t === 'spec' || t === 'config') && !force) return;
-  if (t === 'overview') {
-    const keep = $('#ov-reopen')?.value;
-    await renderTab();
-    if (keep && $('#ov-reopen')) $('#ov-reopen').value = keep;
-    return;
-  }
+  if (t === 'git' && !force) return;
   await renderTab();
 }
 
-// overview
-function budgetRows(b) {
-  const row = (name, used, max, txt) => `<div class="budget-row"><span class="muted">${name}</span>${meter(used, max)}<span class="small mono">${txt}</span></div>`;
-  const lim = v => v ? v : '∞';
-  return row('Running workers', b.running_workers, b.max_concurrent_workers, `${b.running_workers}/${lim(b.max_concurrent_workers)}`)
-    + row('Worker turns', b.worker_turns, b.max_worker_turns, `${b.worker_turns}/${lim(b.max_worker_turns)}`)
-    + row('Meta turns', b.meta_turns, b.max_meta_turns, `${b.meta_turns}/${lim(b.max_meta_turns)}`)
-    + row('Hours', b.hours, b.max_hours, `${b.hours.toFixed(1)}/${lim(b.max_hours)}`)
-    + row('Tokens', b.tokens, null, `${fmtTok(b.tokens)}/${b.max_tokens || '∞'}`);
+// ---------- overview: stats, then HUMAN / META-AGENTS / WORKER-AGENTS layers ----------
+function renderOverview() {
+  $('#m-tab').innerHTML = `<div id="ov-stats" class="stats"></div>
+    <div class="layer human"><div class="lt">human</div><div id="ov-report"></div><div id="ov-human"></div></div>
+    <div class="layer"><div class="lt">meta-agents</div><div class="meta-grid">
+      <div class="box" id="ov-mw"></div><div class="box" id="ov-chat"></div></div></div>
+    <div class="layer"><div class="lt">worker-agents <span class="x faint" id="ov-wcount"></span></div><div id="ov-workers"></div></div>`;
+  renderStats(); renderReport(); renderHuman(); renderMetaWork(); renderChat(); renderWorkers();
 }
-function activityHtml(items) {
-  if (!items.length) return '<div class="empty">No events yet. Start the mission to kick off the meta-work.</div>';
-  return `<div class="timeline">${items.map(a => {
-    const text = a.kind === 'note' ? `Human note #${a.payload.id}: ${a.payload.text}` : a.kind === 'file_changed' ? `${a.payload.name} changed by the human\n\n${a.payload.diff}` : a.payload.text;
-    const state = a.consumed ? '' : (a.deferred ? '<span class="pill pending">queued</span>' : '<span class="pill running">pending</span>');
-    return `<details class="tl-item"><summary><span class="tl-kind ${a.kind}">${label(a.kind)}</span><span class="tl-first">${esc(firstLine(text))}</span>${state}
-      <span class="faint small">${hhmm(a.ts)}</span></summary><pre>${esc(text)}</pre></details>`;
-  }).join('')}</div>`;
+function updateOverview(force) {
+  if (!$('#ov-stats')) return renderOverview();
+  renderStats(); renderReport(); renderHuman(force); renderMetaWorkHead(); renderChatBar(); renderWorkers();
+  // A rotated meta-work session joins the same feed
+  const fresh = S.mission.sessions.filter(s => s.kind === 'meta-work' && !S.feeds[s.id]);
+  if (fresh.length) Promise.all(fresh.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
 }
-function overviewHtml() {
+function renderStats() {
   const M = S.mission, b = M.budget, c = M.checklist;
   const workers = M.sessions.filter(s => s.kind === 'worker');
-  const running = workers.filter(s => s.status === 'running').length;
-  const report = M.files['report.md'];
-  return `<div class="grid cols-4">
-      <div class="card stat"><div class="label">Plan checklist</div><div class="value">${c.done}/${c.total}</div>${meter(c.done, c.total || 1, true)}
-        <div class="sub">${c.total ? Math.round(100 * c.done / c.total) + '% of items checked by the meta-work' : 'no checklist yet'}</div></div>
-      <div class="card stat"><div class="label">Workers</div><div class="value">${running} <span class="muted small">running</span></div>
-        <div class="sub">${workers.length} total · ${workers.filter(w => w.merged).length} merged</div></div>
-      <div class="card stat"><div class="label">Tokens</div><div class="value">${fmtTok(b.tokens)}</div><div class="sub">${b.cost ? '≈ $' + b.cost.toFixed(2) + ' (estimate)' : 'cost n/a'}</div></div>
-      <div class="card stat"><div class="label">Elapsed</div><div class="value">${b.hours.toFixed(1)} h</div><div class="sub">${M.row.started ? 'started ' + fmtTime(M.row.started) : M.row.ended ? 'closed ' + fmtTime(M.row.ended) : 'not started'}</div></div>
-    </div>
-    ${report ? `<div class="card" style="margin-top:14px;border-color:var(--warn)"><div class="row"><h2 style="margin:0">Completion report</h2><span class="spacer"></span>
-      ${M.row.status === 'awaiting_review' ? '<button class="btn" id="ov-reopen-btn">Reopen with note</button><button class="btn primary" id="ov-accept">Accept</button>' : ''}</div>
-      <div class="md">${md(report.replace(/^# Completion report\s*\n/, ''))}</div>
-      ${M.row.status === 'awaiting_review' ? '<textarea id="ov-reopen" placeholder="Optional: what should change if you reopen…" style="min-height:70px;margin-top:8px"></textarea>' : ''}</div>` : ''}
-    <div class="grid cols-2" style="margin-top:14px">
-      <div class="card"><h2>Budget</h2>${budgetRows(b)}</div>
-      <div class="card"><h2>Definition of Done</h2><div class="md">${md(M.files['dod.md'])}</div>
-        ${M.verify.length ? `<div class="hint" style="margin-top:8px">${M.verify.length} <code>verify:</code> command${M.verify.length > 1 ? 's' : ''} run by the platform on the integration branch before a <b>success</b> close.</div>` : '<div class="hint">No <code>verify:</code> commands — the meta-work judges completion.</div>'}</div>
-    </div>
-    <div class="card" style="margin-top:14px"><h2>What the meta-work received</h2>${activityHtml(M.activity)}</div>`;
+  const running = workers.filter(s => simpleStatus(s) === 'running').length;
+  const lim = v => v || '∞';
+  $('#ov-stats').innerHTML = `
+    <div class="card stat"><div class="label">plan</div><div class="value">${c.done}/${c.total}</div>${meter(c.done, c.total || 1, true)}
+      <div class="sub">${c.total ? 'items checked by the meta-work' : 'no checklist yet'}</div></div>
+    <div class="card stat"><div class="label">workers</div><div class="value">${running} running</div>
+      <div class="sub">${workers.length} sessions · max ${lim(b.max_concurrent_workers)} at once</div></div>
+    <div class="card stat"><div class="label">turns</div><div class="value">worker ${b.worker_turns}/${lim(b.max_worker_turns)}</div>
+      <div class="sub">meta-work ${b.meta_turns}/${lim(b.max_meta_turns)}</div></div>
+    <div class="card stat"><div class="label">time</div>
+      <div class="sub">From ${fmtTime(b.from)} To ${b.from ? (b.to ? fmtTime(b.to) : 'now') : '–'}</div>
+      <div class="value">Total: ${fmtDur(b.hours)}</div></div>`;
 }
-function wireOverview() {
-  const { ws, mid } = S.route;
-  if ($('#ov-accept')) $('#ov-accept').onclick = () => missionAction('accept');
-  if ($('#ov-reopen-btn')) $('#ov-reopen-btn').onclick = () => act(async () => {
-    const text = $('#ov-reopen').value.trim();
-    if (!text) return reopenModal();
-    await api(`/api/missions/${ws}/${mid}/reopen`, { body: { text } });
-    await loadState(); await refreshMission(true);
-  }, 'Mission reopened');
+function renderReport() {
+  const M = S.mission, report = M.files['report.md'], el = $('#ov-report');
+  const review = M.row.status === 'awaiting_review';
+  if (!report) { el.innerHTML = ''; return; }
+  if (el.dataset.report === report + review) return;
+  el.dataset.report = report + review;
+  el.innerHTML = `<div class="box report" style="margin-bottom:18px"><div class="lt">report${review ? ' · awaiting your review' : ''}</div>
+    <div class="md">${md(report.replace(/^# Completion report\s*\n/, ''))}</div>
+    ${review ? `<div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn" id="ov-reopen">reopen with note</button>
+      <button class="btn primary" id="ov-accept">accept</button></div>` : ''}</div>`;
+  if (review) { $('#ov-accept').onclick = () => missionAction('accept'); $('#ov-reopen').onclick = () => reopenModal(); }
+}
+function renderHuman(force) {
+  const M = S.mission, el = $('#ov-human');
+  // Never overwrite what the human is typing, and skip repaints when nothing changed
+  if (!force && (S.edit.spec || S.edit.dod || S.cfgDirty) && el.innerHTML) return;
+  const key = JSON.stringify([M.files['spec.md'], M.files['dod.md'], M.config, S.edit, Object.keys(S.models)]);
+  if (!force && el.dataset.key === key) return;
+  el.dataset.key = key;
+  const doc = (name, title, hint) => {
+    const editing = S.edit[name];
+    return box(`${title} ${editing ? '' : `<button class="btn small" data-edit="${name}">edit</button>`}`,
+      editing ? `<textarea class="editor" data-doc="${name}" spellcheck="false" style="min-height:220px">${esc(M.files[name + '.md'])}</textarea>
+        <div class="row" style="margin-top:6px"><span class="hint">${hint}</span><span class="spacer"></span>
+          <button class="btn small" data-cancel="${name}">cancel</button><button class="btn small primary" data-save-doc="${name}">save</button></div>`
+      : `<div class="md">${md(M.files[name + '.md'])}</div>`);
+  };
+  const verify = M.verify.length ? `${M.verify.length} verify command${M.verify.length > 1 ? 's' : ''} run on the integration branch before a success close`
+    : 'no verify: commands; the meta-work judges completion';
+  el.innerHTML = `<div class="grid cols-2">${doc('spec', 'spec', 'read-only for agents; a running meta-work is notified with the diff')}
+      ${doc('dod', `definition of done <span class="x">${esc(verify)}</span>`, 'lines like - verify: `pytest -q` are executed by the platform')}</div>
+    <div style="margin-top:18px">${box('agents · budget · git <span class="dirty" id="cfg-dirty"></span>', `<div id="ov-cfg">${configForm(M.config)}</div>
+      <div class="row" style="margin-top:8px"><span class="hint">Applies from the next turn. Changing the meta-work agent starts a fresh meta-work session (plan and journal carry over).</span>
+        <span class="spacer"></span><button class="btn small primary" id="cfg-save">save config</button></div>`)}</div>`;
+  S.cfgDirty = false;
+  wireAgentRows($('#ov-cfg'), () => { S.cfgDirty = true; $('#cfg-dirty').textContent = 'unsaved'; });
+  $('#cfg-save').onclick = () => act(async () => {
+    const { ws, mid } = S.route;
+    const created = (M.files['mission.yaml'].match(/^created:\s*(.+)$/m) || [])[1];
+    const obj = { title: M.config.title, ...(created ? { created: created.replace(/^['"]|['"]$/g, '') } : {}), ...readConfigForm($('#ov-cfg')) };
+    await api(`/api/missions/${ws}/${mid}/files/mission.yaml`, { method: 'PUT', body: { text: toYaml(obj) } });
+    S.cfgDirty = false; await loadMission(); renderHuman(true);
+  }, 'Configuration saved');
+  $$('[data-edit]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.edit] = true; renderHuman(true); });
+  $$('[data-cancel]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.cancel] = false; renderHuman(true); });
+  $$('[data-save-doc]', el).forEach(b => b.onclick = () => act(async () => {
+    const name = b.dataset.saveDoc, { ws, mid } = S.route;
+    await api(`/api/missions/${ws}/${mid}/files/${name}.md`, { method: 'PUT', body: { text: $(`[data-doc="${name}"]`, el).value } });
+    S.edit[name] = false; await loadMission(); renderHuman(true);
+  }, `${b.dataset.saveDoc}.md saved`));
 }
 
-// sessions
-function sessMeta(s) {
-  const infra = (S.infra?.sessions || []).find(x => x.id === s.id);
-  return [`${s.agent} · ${s.model || 'default'} · ${s.effort || 'default'}`, `${s.turns} turns`, `${fmtTok(s.tokens)} tokens`,
-    s.context ? `ctx ~${fmtTok(s.context)}` : '', s.cost ? `$${s.cost.toFixed(2)}` : '', infra ? `${infra.rss_gb} GB RSS` : '',
-    s.branch ? `<span class="mono">${esc(s.branch)}</span>` : ''].filter(Boolean).map(x => `<span>${x}</span>`).join('');
-}
-function sessCard(s) {
-  const status = s.live ? 'running' : s.status;
-  return `<div class="card sess ${s.kind}" id="card-${s.id}">
-    <div class="sess-head"><div class="sess-title"><span class="kind">${s.kind}</span><span class="sess-id">${esc(s.id)}</span>
-      ${s.kind === 'worker' ? `<span>${esc(s.role)} · ${esc(s.label)}</span>` : ''}<span class="spacer"></span>
-      ${s.merged ? '<span class="pill ok">merged</span>' : ''}<span data-st>${pill(status)}</span></div>
-      <div class="sess-meta" data-meta>${sessMeta(s)}</div></div>
-    <div class="log" id="log-${s.id}"><div class="faint small">loading…</div></div>
-    <div class="sess-foot"><button class="btn small" data-detail="${s.id}">Details & turns</button>
-      ${s.kind === 'worker' && status === 'running' ? `<button class="btn small danger" data-stop="${s.id}">Stop</button>` : ''}</div></div>`;
-}
-function renderSessions(update = false) {
-  const el = $('#m-tab');
-  const list = S.mission.sessions.filter(s => s.kind !== 'meta-chat');
-  const active = list.filter(s => s.status !== 'retired');
-  const retired = list.filter(s => s.status === 'retired');
-  const ids = active.map(s => s.id).join();
-  if (update && el.dataset.ids === ids) {
-    active.forEach(s => {
-      const card = $(`#card-${s.id}`);
-      if (!card) return;
-      $('[data-st]', card).innerHTML = pill(s.live ? 'running' : s.status);
-      $('[data-meta]', card).innerHTML = sessMeta(s);
-      const foot = $('.sess-foot', card);
-      const running = s.live || s.status === 'running';
-      if (s.kind === 'worker' && running && !$('[data-stop]', foot)) foot.insertAdjacentHTML('beforeend', `<button class="btn small danger" data-stop="${s.id}">Stop</button>`);
-      if (!running) $('[data-stop]', foot)?.remove();
-    });
-    return;
-  }
-  el.dataset.ids = ids;
-  if (!active.length) { el.innerHTML = '<div class="empty">No sessions yet. Start the mission to create the meta-work; it spawns workers as it needs them.</div>'; return; }
-  el.innerHTML = `<div class="sessions">${active.map(sessCard).join('')}</div>
-    ${retired.length ? `<p class="muted small" style="margin-top:14px">Retired meta-work sessions: ${retired.map(r => `<a href="#" data-detail="${r.id}" class="mono">${r.id}</a>`).join(', ')}</p>` : ''}`;
-  el.onclick = e => {
-    const d = e.target.closest('[data-detail]'), st = e.target.closest('[data-stop]');
-    if (d) { e.preventDefault(); sessionModal(d.dataset.detail); }
-    if (st) act(() => api(`/api/sessions/${st.dataset.stop}/stop`, { body: {} }), 'Stop requested');
+// feeds: one frame colour for prompts sent to a session, another for what the session answers
+function feedHtml(evs, who) {
+  const out = [];
+  let tools = 0, lastTool = '', reply = [];
+  const flushTools = () => {
+    if (tools) out.push(`<div class="fe tools">${tools} tool call${tools > 1 ? 's' : ''} · last: ${esc(lastTool)}</div>`);
+    tools = 0;
   };
-  active.forEach(async s => {
-    if (!S.logs[s.id]) S.logs[s.id] = (await api(`/api/sessions/${s.id}/events?limit=250`)).events;
-    paintLog(s.id);
+  const flushReply = () => {
+    if (reply.length) out.push(`<div class="fr reply"><div class="fl">◀ ${esc(who.reply)}</div><div class="md">${md(reply.join('\n\n'))}</div></div>`);
+    reply = [];
+  };
+  for (const e of evs) {
+    if (e.type === 'turn') {
+      flushTools(); flushReply();
+      out.push(`<div class="fr prompt"><div class="fl"><span>▶ ${esc(who.prompt)}</span><span class="faint">turn ${e.n} · ${hhmm(e.ts)}</span></div><pre>${esc(e.prompt)}</pre></div>`);
+    } else if (e.type === 'text') { flushTools(); reply.push(e.text); }
+    else if (e.type === 'tool') { flushReply(); tools++; lastTool = `${e.name} ${e.detail || ''}`.slice(0, 100); }
+    else if (e.type === 'error') { flushTools(); flushReply(); out.push(`<div class="fe err">! ${esc(e.text)}</div>`); }
+    else if (e.type === 'turn_end') {
+      flushTools(); flushReply();
+      out.push(`<div class="fe ${e.status === 'failed' ? 'err' : ''}">└ turn ${e.n} ${esc(e.status)}${e.tokens ? ' · ' + fmtTok(e.tokens) + ' tokens' : ''}${e.status === 'failed' && e.error ? ' · ' + esc(e.error) : ''}</div>`);
+    }
+  }
+  flushTools(); flushReply();
+  return out.join('') || '<div class="empty">no activity yet</div>';
+}
+async function loadFeed(sid) {
+  if (!S.feeds[sid]) S.feeds[sid] = (await api(`/api/sessions/${sid}/events?limit=4000&types=${FEED_TYPES.join(',')}`)).events;
+}
+const painting = new Set();
+function paintFeed(key) {
+  // Coalesce bursts of streamed events into one repaint per frame
+  if (painting.has(key)) return;
+  painting.add(key);
+  requestAnimationFrame(() => {
+    painting.delete(key);
+    const el = $(`[data-feed="${key}"]`);
+    if (!el) return;
+    const atBottom = !el.dataset.painted || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (key === 'meta-work') {
+      const sessions = S.mission.sessions.filter(s => s.kind === 'meta-work');
+      el.innerHTML = feedHtml(sessions.flatMap(s => S.feeds[s.id] || []), { prompt: 'platform → meta-work', reply: 'meta-work' });
+    } else {
+      const s = S.mission.sessions.find(x => x.id === key);
+      if (s) el.innerHTML = feedHtml(S.feeds[key] || [], { prompt: 'meta-work → worker', reply: s.agent });
+    }
+    el.dataset.painted = '1';
+    if (atBottom) el.scrollTop = el.scrollHeight;
   });
 }
+function agentLine(s) { return `${esc(s.agent)} · ${esc(s.model || 'default')} · ${esc(s.effort || 'default')}`; }
+
+// META-WORK: every meta-work session of the mission, oldest first, as one continuous feed
+function renderMetaWork() {
+  $('#ov-mw').innerHTML = `<div class="lt">meta-work</div><div id="mw-head" class="row small" style="margin-bottom:4px"></div>
+    <div class="feed" data-feed="meta-work"></div>`;
+  renderMetaWorkHead();
+  const sessions = S.mission.sessions.filter(s => s.kind === 'meta-work');
+  Promise.all(sessions.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
+}
+function renderMetaWorkHead() {
+  const el = $('#mw-head');
+  if (!el) return;
+  const sessions = S.mission.sessions.filter(s => s.kind === 'meta-work');
+  const cur = sessions.find(s => s.id === S.mission.row.meta_work) || sessions[sessions.length - 1];
+  if (!cur) { el.innerHTML = `<span class="muted">${agentLine({ agent: S.mission.config.meta_work.agent, ...S.mission.config.meta_work })}</span>`; return; }
+  const tokens = sessions.reduce((a, s) => a + (s.tokens || 0), 0);
+  el.innerHTML = `<span class="muted">${agentLine(cur)}</span><span class="faint">·</span><span>${fmtTok(tokens)} tokens</span>
+    <span class="spacer"></span>${pill(simpleStatus(cur))}<a href="#" data-log="${cur.id}" class="small">log</a>`;
+  $('[data-log]', el).onclick = e => { e.preventDefault(); sessionModal(cur.id); };
+}
+
+// META-CHAT: chats bound to this mission; agent/model/effort chosen per chat
+function renderChat() {
+  $('#ov-chat').innerHTML = `<div class="lt">meta-chat</div>
+    <div class="chat-bar" id="chat-bar"></div><div id="chat-new"></div>
+    <div class="feed" id="chat-feed" style="min-height:120px"></div><div class="live-strip" id="chat-live"></div>
+    <div class="composer"><textarea id="chat-input" placeholder="ask about progress or risks, or propose a change… (ctrl+enter)"></textarea>
+      <button class="btn primary" id="chat-send">send</button></div>`;
+  renderChatBar();
+  $('#chat-send').onclick = sendChat;
+  $('#chat-input').onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendChat(); };
+  $('#chat-feed').onclick = e => {
+    const b = e.target.closest('[data-save-note]');
+    if (b) saveNoteModal(S.chat.messages[Number(b.dataset.saveNote)].text);
+  };
+  loadChatMessages();
+}
+function renderChatBar() {
+  const bar = $('#chat-bar');
+  if (!bar) return;
+  const chats = S.mission.sessions.filter(s => s.kind === 'meta-chat');
+  if (!S.chat.sid && chats.length) S.chat.sid = chats[chats.length - 1].id;
+  bar.innerHTML = `<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
+      chat ${i + 1} · ${esc(c.agent)}/${esc(c.model || 'default')}/${esc(c.effort || 'default')} · ${c.turns} turns</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
+    <button class="btn small" id="chat-new-btn">+ new chat</button>`;
+  $('#chat-sel').onchange = e => { S.chat.sid = e.target.value; S.chat.live = ''; loadChatMessages(); };
+  $('#chat-new-btn').onclick = () => { S.chat.creating = !S.chat.creating; renderNewChat(); };
+  renderNewChat();
+}
+function renderNewChat() {
+  const el = $('#chat-new');
+  if (!S.chat.creating) { el.innerHTML = ''; return; }
+  if (el.innerHTML) return;
+  el.innerHTML = `<div class="new-chat">${agentHeader()}${agentRow('meta_chat', S.mission.config.meta_work, { title: 'meta-chat', noAutocompact: true })}
+    <div class="row" style="margin-top:6px"><span class="hint">Read-only on the mission; proposes notes you approve.</span><span class="spacer"></span>
+      <button class="btn small" id="nc-cancel">cancel</button><button class="btn small primary" id="nc-ok">create</button></div></div>`;
+  wireAgentRows(el);
+  $('#nc-cancel').onclick = () => { S.chat.creating = false; renderNewChat(); };
+  $('#nc-ok').onclick = () => act(async () => {
+    const { ws, mid } = S.route;
+    const r = await api(`/api/missions/${ws}/${mid}/meta-chats`, { body: readAgentRow($('.agent-row[data-key]', el)) });
+    S.chat = { ...S.chat, sid: r.id, creating: false };
+    await loadMission(); renderChatBar(); await loadChatMessages();
+  }, 'Meta-chat created');
+}
+async function loadChatMessages() {
+  const feed = $('#chat-feed');
+  if (!feed) return;
+  if (!S.chat.sid) { feed.innerHTML = '<div class="empty">Create a chat to talk with a meta-agent about this mission.</div>'; setComposer(false); return; }
+  const r = await api(`/api/meta-chats/${S.chat.sid}/messages`);
+  S.chat.messages = r.messages; S.chat.busy = r.busy;
+  feed.innerHTML = r.messages.map((m, i) => m.role === 'user'
+    ? `<div class="fr prompt"><div class="fl"><span>▶ human</span><span class="faint">${hhmm(m.ts)}</span></div><pre>${esc(m.text)}</pre></div>`
+    : `<div class="fr reply"><div class="fl"><span>◀ meta-chat</span><span class="spacer"></span><button class="btn small" data-save-note="${i}">save as note</button></div>
+        <div class="md">${md(m.text)}</div></div>`).join('')
+    + (r.busy ? '<div class="fe"><span class="thinking">thinking</span></div>' : '')
+    || '<div class="empty">Ask anything, e.g. what is blocking the DoD right now?</div>';
+  feed.scrollTop = feed.scrollHeight;
+  $('#chat-live').textContent = r.busy ? S.chat.live : '';
+  setComposer(!r.busy);
+}
+function setComposer(enabled) {
+  if (!$('#chat-send')) return;
+  $('#chat-send').disabled = !enabled || !S.chat.sid;
+  $('#chat-input').disabled = !S.chat.sid;
+}
+async function sendChat() {
+  const text = $('#chat-input').value.trim();
+  if (!text || !S.chat.sid) return;
+  await act(async () => {
+    await api(`/api/meta-chats/${S.chat.sid}/messages`, { body: { text } });
+    $('#chat-input').value = ''; S.chat.live = '';
+    await loadChatMessages();
+  });
+}
+function saveNoteModal(text) {
+  const { ws, mid } = S.route;
+  const m = modal(`<div class="modal-head"><h2>save as note for the meta-work</h2><button class="icon-btn" data-close>×</button></div>
+    <textarea id="sn-text" style="min-height:180px">${esc(text)}</textarea>
+    <div class="row" style="margin-top:10px"><label class="inline"><input type="radio" name="snmode" value="queue" checked> queue</label>
+      <label class="inline"><input type="radio" name="snmode" value="now"> deliver now</label><span class="spacer"></span>
+      <button class="btn" data-close>cancel</button><button class="btn primary" id="sn-ok">save note</button></div>`);
+  $('#sn-ok', m).onclick = () => act(async () => {
+    await api(`/api/missions/${ws}/${mid}/notes`, { body: { text: $('#sn-text', m).value, mode: $('input[name=snmode]:checked', m).value } });
+    closeModal(); await loadMission(); renderTabs();
+  }, 'Note saved');
+}
+
+// WORKER-AGENTS: newest first; left = role/label/tokens/status, right = prompts and replies
+function workerLeft(w) {
+  const st = simpleStatus(w);
+  return `<div class="role">${esc(w.role)}</div><div class="label">${esc(w.label)}</div>
+    <div class="small">${fmtTok(w.tokens)} tokens</div><div>${pill(st)}</div>
+    <div class="faint small">${esc(w.agent)}</div>
+    <div class="row small" style="margin-top:4px"><a href="#" data-log="${w.id}">log</a>
+      ${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}</div>`;
+}
+function renderWorkers() {
+  const el = $('#ov-workers');
+  if (!el) return;
+  const workers = S.mission.sessions.filter(s => s.kind === 'worker').sort((a, b) => b.created - a.created);
+  $('#ov-wcount').textContent = workers.length ? `(${workers.length})` : '';
+  const ids = workers.map(w => w.id).join();
+  if (el.dataset.ids !== ids) {
+    el.dataset.ids = ids;
+    el.innerHTML = workers.map(w => `<div class="worker ${simpleStatus(w)}" id="w-${w.id}"><div class="wl">${workerLeft(w)}</div>
+      <div class="wr"><div class="feed" data-feed="${w.id}"></div></div></div>`).join('')
+      || '<div class="empty">No workers yet. The meta-work spawns them as it needs them.</div>';
+    el.onclick = e => {
+      const log = e.target.closest('[data-log]'), stop = e.target.closest('[data-stop]');
+      if (log) { e.preventDefault(); sessionModal(log.dataset.log); }
+      if (stop) act(() => api(`/api/sessions/${stop.dataset.stop}/stop`, { body: {} }), 'Stop requested');
+    };
+    workers.forEach(w => loadFeed(w.id).then(() => paintFeed(w.id)));
+    return;
+  }
+  workers.forEach(w => {
+    const row = $(`#w-${w.id}`);
+    row.className = `worker ${simpleStatus(w)}`;
+    $('.wl', row).innerHTML = workerLeft(w);
+  });
+}
+
+// full log with tool calls and evidence files
 function evHtml(e) {
   switch (e.type) {
-    case 'turn': return `<div class="ev turn"><details><summary>Turn ${e.n} · ${hhmm(e.ts)} — prompt</summary><pre>${esc(e.prompt)}</pre></details></div>`;
-    case 'text': return `<div class="ev text md">${md(e.text)}</div>`;
-    case 'tool': return `<div class="ev tool">▸ <b>${esc(e.name)}</b> ${esc(e.detail)}</div>`;
-    case 'tool_result': return `<div class="ev tool_result ${e.error ? 'err' : ''}">${esc(e.text)}</div>`;
-    case 'thinking': return `<div class="ev thinking">${esc(e.text)}</div>`;
-    case 'error': return `<div class="ev error">⚠ ${esc(e.text)}</div>`;
-    case 'turn_end': return `<div class="ev turn_end">turn ${e.n} ${esc(e.status)}${e.error ? ' — ' + esc(e.error) : ''}${e.tokens ? ' · ' + fmtTok(e.tokens) + ' tokens' : ''}</div>`;
+    case 'turn': return `<div class="fr prompt"><div class="fl">▶ turn ${e.n} · ${hhmm(e.ts)}</div><pre>${esc(e.prompt)}</pre></div>`;
+    case 'text': return `<div class="fr reply"><div class="md">${md(e.text)}</div></div>`;
+    case 'tool': return `<div class="fe">▸ ${esc(e.name)} ${esc(e.detail)}</div>`;
+    case 'tool_result': return `<div class="fe ${e.error ? 'err' : ''}" style="padding-left:14px">${esc(String(e.text || '').slice(0, 400))}</div>`;
+    case 'thinking': return `<div class="fe" style="font-style:italic">${esc(e.text)}</div>`;
+    case 'error': return `<div class="fe err">! ${esc(e.text)}</div>`;
+    case 'turn_end': return `<div class="fe">└ turn ${e.n} ${esc(e.status)}${e.error ? ' · ' + esc(e.error) : ''}${e.tokens ? ' · ' + fmtTok(e.tokens) + ' tokens' : ''}</div>`;
     default: return '';
   }
-}
-function paintLog(sid) {
-  const el = $(`#log-${sid}`);
-  if (!el) return;
-  const evs = S.logs[sid] || [];
-  el.innerHTML = evs.map(evHtml).join('') || '<div class="faint small">no activity yet</div>';
-  el.scrollTop = el.scrollHeight;
-}
-function appendLog(sid, evt) {
-  if (!S.logs[sid]) return;
-  S.logs[sid].push(evt);
-  if (S.logs[sid].length > 800) S.logs[sid].splice(0, 200);
-  const el = $(`#log-${sid}`);
-  if (!el) return;
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-  if (el.firstElementChild?.classList.contains('faint')) el.innerHTML = '';
-  el.insertAdjacentHTML('beforeend', evHtml(evt));
-  if (atBottom) el.scrollTop = el.scrollHeight;
 }
 async function sessionModal(sid) {
   const { ws, mid } = S.route;
   const s = S.mission.sessions.find(x => x.id === sid) || { id: sid };
   const [turns, evs] = await Promise.all([api(`/api/sessions/${sid}/turns`), api(`/api/sessions/${sid}/events?limit=3000`)]);
   const file = (n, ext) => `<a href="/api/runs/${ws}/${mid}/${sid}/t${n}.${ext}" target="_blank">${ext}</a>`;
-  const m = modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind || '')} ${esc(s.role || '')}</div><h2 class="mono" style="margin:0">${esc(sid)}</h2></div>
+  const title = s.kind === 'worker' ? `${s.role} · ${s.label}` : s.kind;
+  const m = modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s)}</div><h2>${esc(title)}</h2></div>
       <button class="icon-btn" data-close>×</button></div>
-    <div class="sess-meta" style="margin-bottom:10px">${s.agent ? sessMeta(s) : ''}${s.cwd ? `<span class="mono">${esc(s.cwd)}</span>` : ''}</div>
-    <table class="t"><tr><th>#</th><th>Status</th><th>Started</th><th>Tokens</th><th>Final message</th>${s.kind === 'worker' ? '<th>Evidence</th>' : ''}</tr>
+    ${s.cwd ? `<div class="faint small">${esc(s.cwd)}${s.branch ? ' · ' + esc(s.branch) : ''}</div>` : ''}
+    <table class="t" style="margin-top:8px"><tr><th>#</th><th>status</th><th>started</th><th>tokens</th><th>final message</th>${s.kind === 'worker' ? '<th>evidence</th>' : ''}</tr>
       ${turns.turns.map(t => `<tr><td>${t.n}</td><td>${pill(t.status)}</td><td class="small">${fmtTime(t.started)}</td><td class="small">${fmtTok(t.tokens)}</td>
-        <td class="small">${esc(firstLine(t.final))}</td>${s.kind === 'worker' ? `<td class="small">${file(t.n, 'prompt.md')} · ${file(t.n, 'out.md')} · ${file(t.n, 'diff')}</td>` : ''}</tr>`).join('')}</table>
-    <h3 style="margin-top:16px">Full log</h3><div class="log" style="height:52vh;border:1px solid var(--border);border-radius:8px">${evs.events.map(evHtml).join('')}</div>`, true);
-  const log = $('.log', m); log.scrollTop = log.scrollHeight;
+        <td class="small">${esc(firstLine(t.final))}</td>${s.kind === 'worker' ? `<td class="small">${file(t.n, 'prompt.md')} ${file(t.n, 'out.md')} ${file(t.n, 'diff')}</td>` : ''}</tr>`).join('')}</table>
+    <div class="feed" style="max-height:56vh;margin-top:10px">${evs.events.map(evHtml).join('')}</div>`, true);
+  const log = $('.feed', m); log.scrollTop = log.scrollHeight;
 }
 
-// plan
+// ---------- plan, notes, git ----------
 function planHtml() {
   const f = S.mission.files;
-  return `<div class="grid cols-2"><div class="card"><h2>plan.md <span class="faint small">· owned by the meta-work</span></h2><div class="md">${md(f['plan.md'])}</div></div>
-    <div class="card"><h2>journal.md</h2><div class="md">${md(f['journal.md'])}</div></div></div>`;
+  return `<div class="grid cols-2" style="margin-top:18px">${box('plan.md <span class="x">owned by the meta-work</span>', `<div class="md">${md(f['plan.md'])}</div>`)}
+    ${box('journal.md <span class="x">decision log, written by the meta-work</span>', `<div class="md">${md(f['journal.md'])}</div>`)}</div>`;
 }
-
-// notes
 function renderNotes(update = false) {
   const el = $('#m-tab'), notes = S.mission.notes, review = S.mission.row.status === 'awaiting_review';
-  const list = notes.length ? notes.map(n => `<div class="card" style="margin-bottom:10px">
-      <div class="row"><b>#${n.id}</b><span class="chip ${n.author === 'human' ? 'human' : 'meta-chat'}">${esc(n.author)}</span>${pill(n.status)}
-        ${n.status === 'approved' ? `<span class="muted small">${n.mode === 'now' ? 'delivered immediately' : 'queued with next event'}</span>` : ''}
-        <span class="spacer"></span><span class="faint small">${fmtTime(n.ts)}</span></div>
-      ${n.status === 'pending' ? `<textarea data-note-text="${n.id}" style="margin-top:8px;min-height:70px">${esc(n.text)}</textarea>
-        <div class="row" style="margin-top:8px"><span class="muted small">Proposed by the meta-chat — approve to send it to the meta-work.</span><span class="spacer"></span>
-        <button class="btn small danger" data-note="${n.id}" data-v="reject">Reject</button>
-        ${review ? `<button class="btn small primary" data-note="${n.id}" data-v="approve" data-reopen="1">Approve & reopen mission</button>`
-          : `<button class="btn small" data-note="${n.id}" data-v="approve" data-mode="queue">Approve (queue)</button>
-        <button class="btn small primary" data-note="${n.id}" data-v="approve" data-mode="now">Approve & deliver now</button>`}</div>`
-      : `<div class="md" style="margin-top:6px">${md(n.text)}</div>`}</div>`).join('') : '<div class="empty">No notes yet.</div>';
+  const list = notes.length ? notes.map(n => `<div class="box" style="margin-top:18px"><div class="lt">note #${n.id}
+        <span class="chip ${n.author === 'human' ? 'human' : 'meta-chat'}">${esc(n.author)}</span>${pill(n.status)}</div>
+      <div class="row small faint">${n.status === 'approved' ? (n.mode === 'now' ? 'delivered immediately' : 'queued with the next event') : ''}<span class="spacer"></span>${fmtTime(n.ts)}</div>
+      ${n.status === 'pending' ? `<textarea data-note-text="${n.id}" style="margin-top:6px;min-height:70px">${esc(n.text)}</textarea>
+        <div class="row" style="margin-top:6px"><span class="hint">proposed by a meta-chat; approve to send it to the meta-work</span><span class="spacer"></span>
+        <button class="btn small danger" data-note="${n.id}" data-v="reject">reject</button>
+        ${review ? `<button class="btn small primary" data-note="${n.id}" data-v="approve" data-reopen="1">approve & reopen mission</button>`
+          : `<button class="btn small" data-note="${n.id}" data-v="approve" data-mode="queue">approve (queue)</button>
+        <button class="btn small primary" data-note="${n.id}" data-v="approve" data-mode="now">approve & deliver now</button>`}</div>`
+      : `<div class="md" style="margin-top:4px">${md(n.text)}</div>`}</div>`).join('') : '<div class="empty">No notes yet.</div>';
   if (update && $('#notes-list')) { $('#notes-list').innerHTML = list; return; }
-  el.innerHTML = `<div class="grid cols-2" style="align-items:start">
-    <div class="card"><h2>Steer the meta-work</h2>
-      <p class="hint">Notes override the meta-work's plan. They are appended to <code>notes.md</code> and delivered to the mission's meta-work.</p>
-      <textarea id="note-text" style="min-height:130px" placeholder="e.g. Prefer a simpler approach; skip the caching layer for now."></textarea>
-      <div class="row" style="margin-top:10px">
-        <label class="row small"><input type="radio" name="nmode" value="queue" checked> Queue — deliver with the next event</label>
-        <label class="row small"><input type="radio" name="nmode" value="now"> Now — wake the meta-work</label>
-        <span class="spacer"></span><button class="btn primary" id="note-add">Add note</button></div></div>
+  el.innerHTML = `<div class="grid cols-2" style="align-items:start;margin-top:18px">
+    ${box('steer the meta-work', `<p class="hint">Notes override the meta-work's plan. They are appended to <code>notes.md</code> and delivered to the meta-work.</p>
+      <textarea id="note-text" style="min-height:130px" placeholder="e.g. prefer a simpler approach; skip the caching layer for now."></textarea>
+      <div class="row" style="margin-top:8px">
+        <label class="inline"><input type="radio" name="nmode" value="queue" checked> queue: deliver with the next event</label>
+        <label class="inline"><input type="radio" name="nmode" value="now"> now: wake the meta-work</label>
+        <span class="spacer"></span><button class="btn primary" id="note-add">${review ? 'add note & reopen' : 'add note'}</button></div>`)}
     <div id="notes-list">${list}</div></div>`;
-  if (review) $('#note-add').textContent = 'Add note & reopen';
   $('#note-add').onclick = () => act(async () => {
     const { ws, mid } = S.route;
     if (S.mission.row.status === 'awaiting_review') {
@@ -598,148 +760,16 @@ function renderNotes(update = false) {
     }, b.dataset.reopen ? 'Note approved; mission reopened' : b.dataset.v === 'approve' ? 'Note approved' : 'Note rejected');
   };
 }
-
-// meta-chat
-async function renderMetaChat() {
-  const el = $('#m-tab');
-  const chats = S.mission.sessions.filter(s => s.kind === 'meta-chat');
-  if (!S.adv.sid && chats.length) S.adv.sid = chats[chats.length - 1].id;
-  el.innerHTML = `<div class="chat"><div><button class="btn primary" id="adv-new" style="width:100%;margin-bottom:10px">New meta-chat</button>
-      <div class="adv-list" id="adv-list"></div><p class="hint" style="margin-top:12px">Meta-chats read the mission state and answer questions. They cannot dispatch workers; they can propose notes for your approval.</p></div>
-    <div class="card chat-pane"><div class="messages" id="adv-msgs"></div><div class="live-strip" id="adv-live"></div>
-      <div class="composer"><textarea id="adv-input" placeholder="Ask about progress, risks, or propose a strategy change… (Ctrl+Enter to send)"></textarea>
-        <button class="btn primary" id="adv-send">Send</button></div></div></div>`;
-  renderMetaChatList();
-  $('#adv-new').onclick = () => newMetaChatModal();
-  $('#adv-send').onclick = sendMetaChat;
-  $('#adv-input').onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendMetaChat(); };
-  $('#adv-msgs').onclick = e => {
-    const b = e.target.closest('[data-save-note]');
-    if (b) saveNoteModal(S.adv.messages[Number(b.dataset.saveNote)].text);
-  };
-  await loadMetaChatMessages();
-}
-function renderMetaChatList() {
-  const list = $('#adv-list');
-  if (!list) return;
-  const chats = S.mission.sessions.filter(s => s.kind === 'meta-chat');
-  list.innerHTML = chats.slice().reverse().map(a => `<div class="adv-item ${a.id === S.adv.sid ? 'active' : ''}" data-adv="${a.id}">
-      <div class="row"><b class="mono small">${a.id}</b><span class="spacer"></span>${a.live ? '<span class="thinking"></span>' : ''}</div>
-      <div class="faint small">${esc(a.agent)} · ${esc(a.model || 'default')} · ${a.turns} turns</div></div>`).join('') || '<div class="muted small">No meta-chats yet.</div>';
-  $$('[data-adv]', list).forEach(x => x.onclick = async () => { S.adv.sid = x.dataset.adv; S.adv.live = ''; renderMetaChatList(); await loadMetaChatMessages(); });
-}
-async function loadMetaChatMessages() {
-  const box = $('#adv-msgs');
-  if (!box) return;
-  if (!S.adv.sid) { box.innerHTML = '<div class="empty">Start a new meta-chat to talk with a meta-agent about this mission.</div>'; setComposer(false); return; }
-  const r = await api(`/api/meta-chats/${S.adv.sid}/messages`);
-  S.adv.messages = r.messages; S.adv.busy = r.busy;
-  box.innerHTML = r.messages.map((m, i) => m.role === 'user' ? `<div class="msg user">${esc(m.text)}</div>`
-    : `<div class="msg assistant"><div class="md">${md(m.text)}</div><div class="msg-actions"><button class="btn small" data-save-note="${i}">Save as note</button></div></div>`).join('')
-    + (r.busy ? '<div class="msg assistant"><span class="thinking">thinking</span></div>' : '')
-    || '<div class="empty">Ask anything about this mission — e.g. “What is blocking the DoD right now?”</div>';
-  box.scrollTop = box.scrollHeight;
-  $('#adv-live').textContent = r.busy ? S.adv.live : '';
-  setComposer(!r.busy);
-}
-function setComposer(enabled) {
-  if (!$('#adv-send')) return;
-  $('#adv-send').disabled = !enabled || !S.adv.sid;
-  $('#adv-input').disabled = !S.adv.sid;
-}
-async function sendMetaChat() {
-  const text = $('#adv-input').value.trim();
-  if (!text || !S.adv.sid) return;
-  await act(async () => {
-    await api(`/api/meta-chats/${S.adv.sid}/messages`, { body: { text } });
-    $('#adv-input').value = ''; S.adv.live = '';
-    await loadMetaChatMessages();
-  });
-}
-function newMetaChatModal() {
-  const { ws, mid } = S.route;
-  const conf = S.mission.config.meta_chat;
-  const m = modal(`<div class="modal-head"><h2>New meta-chat</h2><button class="icon-btn" data-close>×</button></div>
-    <p class="muted">A meta-agent session bound to this mission, for prompt-by-prompt questions.</p>
-    <datalist id="models-claude">${MODELS.claude.map(x => `<option value="${x}">`).join('')}</datalist><datalist id="models-codex">${MODELS.codex.map(x => `<option value="${x}">`).join('')}</datalist>
-    <div id="na-form">${agentFields('meta-chat', conf, { title: 'Meta-chat' })}</div>
-    <div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn" data-close>Cancel</button><button class="btn primary" id="na-ok">Create</button></div>`);
-  wireConfigForm($('#na-form', m));
-  $('#na-ok', m).onclick = () => act(async () => {
-    const r = await api(`/api/missions/${ws}/${mid}/meta-chats`, { body: readAgentRow($('.agent-row', m)) });
-    closeModal(); S.adv.sid = r.id; await loadMission(); renderTabs(); await renderMetaChat();
-  });
-}
-function saveNoteModal(text) {
-  const { ws, mid } = S.route;
-  const m = modal(`<div class="modal-head"><h2>Save as note for the meta-work</h2><button class="icon-btn" data-close>×</button></div>
-    <textarea id="sn-text" style="min-height:180px">${esc(text)}</textarea>
-    <div class="row" style="margin-top:10px"><label class="row small"><input type="radio" name="snmode" value="queue" checked> Queue</label>
-      <label class="row small"><input type="radio" name="snmode" value="now"> Deliver now</label><span class="spacer"></span>
-      <button class="btn" data-close>Cancel</button><button class="btn primary" id="sn-ok">Save note</button></div>`);
-  $('#sn-ok', m).onclick = () => act(async () => {
-    await api(`/api/missions/${ws}/${mid}/notes`, { body: { text: $('#sn-text', m).value, mode: $('input[name=snmode]:checked', m).value } });
-    closeModal(); await loadMission(); renderTabs();
-  }, 'Note saved');
-}
-
-// spec & dod
-function renderSpec() {
-  const f = S.mission.files;
-  const box = (name, hint) => `<div class="card"><div class="row"><h2 style="margin:0">${name}</h2><span class="dirty" data-dirty="${name}"></span><span class="spacer"></span>
-      <button class="btn small primary" data-save="${name}">Save</button></div><p class="hint">${hint}</p>
-      <textarea class="editor" data-file="${name}" spellcheck="false">${esc(f[name])}</textarea></div>`;
-  $('#m-tab').innerHTML = `<div class="grid cols-2">${box('spec.md', 'Goal, context, inputs and constraints. Read-only for agents.')}
-    ${box('dod.md', 'Definition of Done. Lines like <code>- verify: `pytest -q`</code> are executed on the integration branch before a <b>success</b> close; other criteria are judged by the meta-work.')}</div>
-    <p class="hint">Saving commits the file as <span class="chip human">human</span>; a running meta-work is notified with the diff.</p>`;
-  $$('[data-file]').forEach(t => t.oninput = () => { S.dirty[t.dataset.file] = true; $(`[data-dirty="${t.dataset.file}"]`).textContent = 'unsaved'; });
-  $$('[data-save]').forEach(b => b.onclick = () => act(async () => {
-    const name = b.dataset.save, { ws, mid } = S.route;
-    await api(`/api/missions/${ws}/${mid}/files/${name}`, { method: 'PUT', body: { text: $(`[data-file="${name}"]`).value } });
-    S.dirty[name] = false; $(`[data-dirty="${name}"]`).textContent = '';
-    await loadMission();
-  }, `${b.dataset.save} saved`));
-}
-
-// config
-function renderConfig() {
-  const M = S.mission;
-  $('#m-tab').innerHTML = `<div class="card"><div class="row"><h2 style="margin:0">Mission configuration</h2><span class="spacer"></span>
-      <button class="btn small" id="cf-raw">Edit raw YAML</button><button class="btn small primary" id="cf-save">Save</button></div>
-    <p class="hint">Changes apply to the next session turn. Existing sessions keep their agent; new workers use the updated roles.</p>
-    <div id="cf-form">${configForm(M.config)}</div>
-    <textarea class="editor" id="cf-yaml" spellcheck="false" style="display:none">${esc(M.files['mission.yaml'])}</textarea></div>`;
-  wireConfigForm($('#cf-form'));
-  let raw = false;
-  $('#cf-raw').onclick = () => {
-    raw = !raw;
-    $('#cf-form').style.display = raw ? 'none' : ''; $('#cf-yaml').style.display = raw ? '' : 'none';
-    $('#cf-raw').textContent = raw ? 'Use form' : 'Edit raw YAML';
-  };
-  $('#cf-save').onclick = () => act(async () => {
-    const { ws, mid } = S.route;
-    let text = $('#cf-yaml').value;
-    if (!raw) {
-      const created = (M.files['mission.yaml'].match(/^created:\s*(.+)$/m) || [])[1];
-      const obj = { title: M.config.title, ...(created ? { created: created.replace(/^['"]|['"]$/g, '') } : {}), ...readConfigForm($('#cf-form')) };
-      text = toYaml(obj);
-    }
-    await api(`/api/missions/${ws}/${mid}/files/mission.yaml`, { method: 'PUT', body: { text } });
-    await loadMission(); renderConfig();
-  }, 'Configuration saved');
-}
-
-// git
 async function renderGit() {
   const { ws, mid } = S.route;
   const g = await api(`/api/missions/${ws}/${mid}/git`);
-  $('#m-tab').innerHTML = `<div class="grid cols-2" style="align-items:start">
-    <div class="card"><h2>Branches</h2>${g.branches.length ? `<table class="t"><tr><th>Branch</th><th>Ahead</th><th>State</th><th>Last commit</th></tr>
-      ${g.branches.map(b => `<tr><td class="mono small">${esc(b.branch)}</td><td>${b.ahead}</td><td>${b.branch.endsWith('/integration') ? pill('running', 'integration') : b.merged ? pill('ok', 'merged') : pill('pending', 'not merged')}</td>
+  $('#m-tab').innerHTML = `<div class="grid cols-2" style="align-items:start;margin-top:18px">
+    ${box('branches', `${g.branches.length ? `<table class="t"><tr><th>branch</th><th>ahead</th><th>state</th><th>last commit</th></tr>
+      ${g.branches.map(b => `<tr><td class="small">${esc(b.branch)}</td><td>${b.ahead}</td><td>${b.branch.endsWith('/integration') ? pill('running', 'integration') : b.merged ? pill('ok', 'merged') : pill('pending', 'not merged')}</td>
       <td class="small">${esc(b.subject)}<div class="faint">${esc(b.when)}</div></td></tr>`).join('')}</table>` : '<div class="empty">No branches yet (created when the mission starts).</div>'}
-      <p class="hint">Only you merge the integration branch into your main branch (open a PR from it).</p></div>
-    <div class="card"><h2>Integration branch <span class="faint small">· commits not in ${esc(g.base)}</span></h2>${g.integration_log.length ? `<table class="t">${g.integration_log.map(c => `<tr><td class="mono small">${esc(c.hash)}</td><td class="small">${esc(c.subject)}</td><td class="faint small">${esc(c.when)}</td></tr>`).join('')}</table>` : '<div class="empty">Empty.</div>'}</div></div>
-    <div class="card" style="margin-top:14px"><h2>Workspace audit log (this mission)</h2>${auditTable(g.workspace_log)}</div>`;
+      <p class="hint">Only you merge the integration branch into your main branch.</p>`)}
+    ${box(`integration branch <span class="x">commits not in ${esc(g.base)}</span>`, g.integration_log.length ? `<table class="t">${g.integration_log.map(c => `<tr><td class="small">${esc(c.hash)}</td><td class="small">${esc(c.subject)}</td><td class="faint small">${esc(c.when)}</td></tr>`).join('')}</table>` : '<div class="empty">Empty.</div>')}</div>
+    <div style="margin-top:22px">${box('workspace audit log (this mission)', auditTable(g.workspace_log))}</div>`;
 }
 
 // ---------- infra ----------
@@ -747,22 +777,21 @@ function renderInfra() {
   const s = S.infra;
   if (!s) { main.innerHTML = '<div class="page"><div class="empty">Waiting for the first sample…</div></div>'; return; }
   const usedRam = (s.ram_total_gb - s.ram_free_gb).toFixed(1);
-  main.innerHTML = `<div class="page"><div class="page-head"><div><div class="crumbs">host</div><h1>Infrastructure</h1></div>
-      <span class="muted small">updated ${hhmm(s.ts)}</span></div>
+  main.innerHTML = `<div class="page"><div class="page-head"><div><div class="crumbs">host</div><h1>infrastructure</h1></div>
+      <span class="faint small">updated ${hhmm(s.ts)}</span></div>
     <div class="grid cols-4">
-      <div class="card stat"><div class="label">CPU</div><div class="value">${s.cpu_pct.toFixed(0)}%</div>${meter(s.cpu_pct, 100)}<div class="sub">${s.cpus} cores · load ${s.load.join(' / ')}</div></div>
-      <div class="card stat"><div class="label">RAM</div><div class="value">${usedRam} <span class="muted small">/ ${s.ram_total_gb} GB</span></div>${meter(s.ram_pct, 100)}<div class="sub">${s.ram_free_gb} GB available · swap ${s.swap_pct}%</div></div>
-      <div class="card stat"><div class="label">Disk</div><div class="value">${s.disk_free_gb} <span class="muted small">GB free</span></div>${meter(s.disk_total_gb - s.disk_free_gb, s.disk_total_gb)}<div class="sub">of ${s.disk_total_gb} GB</div></div>
-      <div class="card stat"><div class="label">GPU</div>${s.gpus.length ? s.gpus.map(g => `<div class="value" style="font-size:16px">${esc(g.name)}</div>${meter(g.mem_used_gb, g.mem_total_gb)}<div class="sub">VRAM ${g.mem_used_gb}/${g.mem_total_gb} GB · util ${g.util}%</div>`).join('')
-        : '<div class="value" style="font-size:16px">None detected</div><div class="sub">workers run CPU-only; <code>--gpu</code> spawns are refused</div>'}</div>
+      <div class="card stat"><div class="label">cpu</div><div class="value">${s.cpu_pct.toFixed(0)}%</div>${meter(s.cpu_pct, 100)}<div class="sub">${s.cpus} cores · load ${s.load.join(' / ')}</div></div>
+      <div class="card stat"><div class="label">ram</div><div class="value">${usedRam} / ${s.ram_total_gb} GB</div>${meter(s.ram_pct, 100)}<div class="sub">${s.ram_free_gb} GB available · swap ${s.swap_pct}%</div></div>
+      <div class="card stat"><div class="label">disk</div><div class="value">${s.disk_free_gb} GB free</div>${meter(s.disk_total_gb - s.disk_free_gb, s.disk_total_gb)}<div class="sub">of ${s.disk_total_gb} GB</div></div>
+      <div class="card stat"><div class="label">gpu</div>${s.gpus.length ? s.gpus.map(g => `<div class="value">${esc(g.name)}</div>${meter(g.mem_used_gb, g.mem_total_gb)}<div class="sub">VRAM ${g.mem_used_gb}/${g.mem_total_gb} GB · util ${g.util}%</div>`).join('')
+        : '<div class="value">none</div><div class="sub">workers run CPU-only; --gpu spawns are refused</div>'}</div>
     </div>
-    <div class="card" style="margin-top:14px"><div class="row"><h2 style="margin:0">Last 10 minutes</h2><span class="spacer"></span>
-      <span class="legend"><span><i style="background:var(--accent)"></i>CPU %</span><span><i style="background:var(--ok)"></i>RAM %</span>${s.gpus.length ? '<span><i style="background:var(--warn)"></i>VRAM %</span>' : ''}</span></div>
-      <canvas class="chart" id="infra-chart"></canvas></div>
-    <div class="card" style="margin-top:14px"><h2>Running sessions</h2>${s.sessions?.length ? `<table class="t"><tr><th>Session</th><th>Kind</th><th>Mission</th><th>Memory</th></tr>
-      ${s.sessions.map(x => `<tr><td class="mono">${esc(x.id)}</td><td>${esc(x.kind)} ${esc(x.role || '')}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/m/${x.mission}/sessions">${esc(x.ws)}/${esc(x.mission)}</a>` : ''}</td><td>${x.rss_gb} GB</td></tr>`).join('')}</table>`
+    <div style="margin-top:22px">${box('last 10 minutes', `<div class="legend"><span><i style="background:var(--accent)"></i>cpu %</span><span><i style="background:var(--reply)"></i>ram %</span>${s.gpus.length ? '<span><i style="background:var(--warn)"></i>vram %</span>' : ''}</div>
+      <canvas class="chart" id="infra-chart"></canvas>`)}</div>
+    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>mission</th><th>memory</th></tr>
+      ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)} ${esc(x.role || '')}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/m/${x.mission}">${esc(x.ws)}/${esc(x.mission)}</a>` : ''}</td><td>${x.rss_gb} GB</td></tr>`).join('')}</table>`
         : '<div class="empty">No agent sessions running.</div>'}
-      <p class="hint">Workers run in a systemd scope capped by <code>infra.worker_memory_max_gb</code> (loop.yaml); new workers are refused below <code>min_free_ram_gb</code>.</p></div></div>`;
+      <p class="hint">Workers run in a systemd scope capped by infra.worker_memory_max_gb (loop.yaml); new workers are refused below min_free_ram_gb.</p>`)}</div></div>`;
   drawChart();
 }
 function drawChart() {
@@ -772,42 +801,48 @@ function drawChart() {
   c.width = w * dpr; c.height = h * dpr;
   const g = c.getContext('2d'); g.scale(dpr, dpr);
   const css = getComputedStyle(document.documentElement);
-  const border = css.getPropertyValue('--border'), faint = css.getPropertyValue('--faint');
-  g.strokeStyle = border; g.fillStyle = faint; g.font = '11px sans-serif'; g.lineWidth = 1;
+  g.strokeStyle = css.getPropertyValue('--border'); g.fillStyle = css.getPropertyValue('--faint');
+  g.font = `11px ${css.getPropertyValue('--font')}`; g.lineWidth = 1;
   [0, 25, 50, 75, 100].forEach(v => { const y = h - 18 - (h - 28) * v / 100; g.beginPath(); g.moveTo(30, y); g.lineTo(w, y); g.stroke(); g.fillText(v, 4, y + 4); });
   const hist = S.history.slice(-200);
-  const series = [[css.getPropertyValue('--accent'), x => x.cpu_pct], [css.getPropertyValue('--ok'), x => x.ram_pct]];
+  const series = [[css.getPropertyValue('--accent'), x => x.cpu_pct], [css.getPropertyValue('--reply'), x => x.ram_pct]];
   if (hist.some(x => x.gpus?.length)) series.push([css.getPropertyValue('--warn'), x => x.gpus?.[0] ? 100 * x.gpus[0].mem_used_gb / x.gpus[0].mem_total_gb : 0]);
   series.forEach(([color, f]) => {
-    g.strokeStyle = color; g.lineWidth = 2; g.beginPath();
+    g.strokeStyle = color; g.lineWidth = 1.5; g.beginPath();
     hist.forEach((x, i) => { const px = 30 + (w - 30) * i / Math.max(1, hist.length - 1), py = h - 18 - (h - 28) * Math.min(100, f(x)) / 100; i ? g.lineTo(px, py) : g.moveTo(px, py); });
     g.stroke();
   });
 }
 
-// ---------- agent CLIs ----------
+// ---------- agent CLIs: versions, smoke test, update, available models ----------
 async function renderAgents() {
   S.agents = await api('/api/agents');
+  S.models = S.agents.models || {};
   const card = name => {
-    const op = S.agents.ops[name];
-    const res = op?.result;
+    const op = S.agents.ops[name], res = op?.result;
     const smoke = res?.smoke || (op?.op === 'smoke' ? res : null);
-    return `<div class="card"><div class="row"><h2 style="margin:0">${name === 'claude' ? 'Claude Code' : 'Codex'}</h2><span class="spacer"></span>
+    const models = modelList(name);
+    return box(name === 'claude' ? 'claude code' : 'codex', `<div class="row"><span>${esc(S.agents.versions[name])}</span><span class="spacer"></span>
         ${op?.state === 'running' ? `<span class="thinking">${op.op} running</span>` : ''}</div>
-      <div class="mono" style="margin:8px 0 12px">${esc(S.agents.versions[name])}</div>
-      <div class="row"><button class="btn" data-op="${name}/smoke" ${op?.state === 'running' ? 'disabled' : ''}>Smoke test</button>
-        <button class="btn primary" data-op="${name}/update" ${op?.state === 'running' ? 'disabled' : ''}>Update to latest</button></div>
-      ${smoke ? `<div style="margin-top:14px">${pill(smoke.ok ? 'ok' : 'failed', smoke.ok ? 'smoke test passed' : 'smoke test failed')}
-        <span class="muted small">${smoke.seconds ?? ''}s</span>${smoke.error ? `<pre>${esc(smoke.error)}</pre>` : ''}</div>` : ''}
-      ${res?.output ? `<h3 style="margin-top:14px">Update output</h3><pre style="max-height:260px">${esc(res.output)}</pre>` : ''}
-      ${op?.state === 'failed' ? `<pre>${esc(res?.error)}</pre>` : ''}</div>`;
+      <div class="row" style="margin-top:8px"><button class="btn" data-op="${name}/smoke" ${op?.state === 'running' ? 'disabled' : ''}>smoke test</button>
+        <button class="btn primary" data-op="${name}/update" ${op?.state === 'running' ? 'disabled' : ''}>update to latest</button></div>
+      ${smoke ? `<div style="margin-top:10px">${pill(smoke.ok ? 'ok' : 'failed', smoke.ok ? 'smoke test passed' : 'smoke test failed')}
+        <span class="faint small">${smoke.seconds ?? ''}s</span>${smoke.error ? `<pre class="fe err">${esc(smoke.error)}</pre>` : ''}</div>` : ''}
+      ${res?.output ? `<div class="hint" style="margin-top:10px">update output</div><pre class="small" style="max-height:200px;overflow:auto">${esc(res.output)}</pre>` : ''}
+      ${op?.state === 'failed' ? `<pre class="fe err">${esc(res?.error)}</pre>` : ''}
+      <div class="row" style="margin-top:14px"><b>available models</b><span class="faint small">${models.length} · as reported by ${esc(S.models[name]?.version || '?')}</span></div>
+      ${models.length ? `<table class="t" style="margin-top:4px"><tr><th>model</th><th>efforts</th></tr>${models.map(m => `<tr><td>${esc(m.alias ? m.name : m.id)}</td>
+        <td class="small">${esc(m.efforts.join(' ') || '(none)')}</td></tr>`).join('')}</table>` : '<div class="empty">No catalog yet; run a smoke test, then refresh.</div>'}`);
   };
-  main.innerHTML = `<div class="page"><div class="page-head"><div><div class="crumbs">platform</div><h1>Agent CLIs</h1>
-      <p class="muted small">Sessions use your existing logins. After an update a smoke test runs one tiny turn through the adapter to confirm flags and output parsing still work.</p></div></div>
-    <div class="grid cols-2">${card('claude')}${card('codex')}</div></div>`;
+  main.innerHTML = `<div class="page"><div class="page-head"><div><div class="crumbs">platform</div><h1>agent CLIs</h1>
+      <p class="muted small">Sessions use your existing logins. Update runs the CLI's own updater, then a smoke turn, then re-reads the model list;
+        every model/effort selector in the UI uses this list.</p></div>
+      <div class="actions"><button class="btn" id="models-refresh">refresh model list</button></div></div>
+    <div class="grid cols-2" style="margin-top:18px">${card('claude')}${card('codex')}</div></div>`;
   $$('[data-op]').forEach(b => b.onclick = () => act(async () => {
     await api(`/api/agents/${b.dataset.op}`, { body: {} }); await renderAgents();
   }, 'Started'));
+  $('#models-refresh').onclick = () => act(async () => { await api('/api/models/refresh', { body: {} }); await renderAgents(); }, 'Model list refreshed');
 }
 
 // ---------- live events ----------
@@ -822,17 +857,25 @@ function handle(evt) {
       $('#nav-infra').title = `CPU ${evt.data.cpu_pct.toFixed(0)}% · RAM ${evt.data.ram_pct}%`;
       if (r.view === 'infra') renderInfra();
       break;
-    case 'session_event':
+    case 'session_event': {
       if (!inMission) break;
-      appendLog(evt.session, evt.event);
-      if (evt.session === S.adv.sid && ['tool', 'text', 'thinking'].includes(evt.event.type)) {
-        S.adv.live = evt.event.type === 'tool' ? `▸ ${evt.event.name} ${evt.event.detail}` : firstLine(evt.event.text);
-        if ($('#adv-live')) $('#adv-live').textContent = S.adv.live;
+      const e = evt.event;
+      if (S.feeds[evt.session] && FEED_TYPES.includes(e.type)) {
+        S.feeds[evt.session].push(e);
+        const s = S.mission?.sessions.find(x => x.id === evt.session);
+        paintFeed(s?.kind === 'meta-work' ? 'meta-work' : evt.session);
+      } else if (!S.feeds[evt.session] && e.type === 'turn') {
+        S.feeds[evt.session] = [e];  // a session that started after the page loaded
       }
-      if (evt.event.type === 'turn' || evt.event.type === 'turn_end') scheduleRefresh();
+      if (evt.session === S.chat.sid && ['tool', 'text', 'thinking'].includes(e.type)) {
+        S.chat.live = e.type === 'tool' ? `▸ ${e.name} ${e.detail}` : firstLine(e.text);
+        if ($('#chat-live')) $('#chat-live').textContent = S.chat.live;
+      }
+      if (e.type === 'turn' || e.type === 'turn_end') scheduleRefresh();
       break;
+    }
     case 'meta_chat_message':
-      if (inMission && evt.session === S.adv.sid) loadMetaChatMessages();
+      if (inMission && evt.session === S.chat.sid) loadChatMessages();
       if (inMission) scheduleRefresh();
       break;
     case 'mission_status':
@@ -846,6 +889,9 @@ function handle(evt) {
       break;
     case 'agents':
       if (r.view === 'agents') renderAgents();
+      break;
+    case 'models':
+      loadModels().then(() => { if (r.view === 'agents') renderAgents(); });
       break;
     case 'error':
       toast(evt.text, 'error', 9000);
@@ -864,7 +910,7 @@ window.addEventListener('resize', () => { if (S.route.view === 'infra') drawChar
 
 (async function boot() {
   try { const r = await api('/api/infra'); S.history = r.history; S.infra = r.latest; } catch { /* first sample arrives over SSE */ }
-  await loadState();
+  await Promise.all([loadState(), loadModels()]);
   connect();
   render();
 })();

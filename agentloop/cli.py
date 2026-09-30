@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 HELP = """Commands for meta-agents (run `loop <command> -h` for options):
-  spawn   start a new worker session           loop spawn --role coder --label api <<'EOF' ... EOF
+  spawn   start a new worker session           loop spawn --agent claude --role coder --label api <<'EOF' ... EOF
   send    continue an idle worker              loop send w-1a2b3c <<'EOF' ... EOF
   stop    stop a running worker                loop stop w-1a2b3c
   ls      list this mission's workers
@@ -61,7 +61,8 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="loop", description=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("spawn", help="start a new worker")
-    sp.add_argument("--role", required=True)
+    sp.add_argument("--agent", required=True, help="worker CLI (claude or codex); model and effort are fixed by the human")
+    sp.add_argument("--role", required=True, help="what the worker does, e.g. coder, reviewer, research")
     sp.add_argument("--label", default="")
     sp.add_argument("--gpu", action="store_true")
     for name, sparser in (("spawn", sp), ("send", sub.add_parser("send", help="continue an idle worker"))):
@@ -86,7 +87,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if a.cmd in ("spawn", "send"):
         payload = {"prompt": text_arg(a, "prompt")}
-        payload.update({"role": a.role, "label": a.label, "gpu": a.gpu} if a.cmd == "spawn" else {"sid": a.sid})
+        payload.update({"agent": a.agent, "role": a.role, "label": a.label, "gpu": a.gpu} if a.cmd == "spawn" else {"sid": a.sid})
     elif a.cmd in ("stop", "merge"):
         payload = {"sid": a.sid}
     elif a.cmd == "show":

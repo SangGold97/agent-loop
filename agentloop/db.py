@@ -9,7 +9,7 @@ from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS missions(
-  ws TEXT, id TEXT, status TEXT, meta_work TEXT, started REAL, ended REAL,
+  ws TEXT, id TEXT, status TEXT, meta_work TEXT, first_started REAL, started REAL, ended REAL,
   meta_turns INT DEFAULT 0, worker_turns INT DEFAULT 0, tokens INT DEFAULT 0,
   cost REAL DEFAULT 0, final_turn INT DEFAULT 0, idle_streak INT DEFAULT 0,
   fail_streak INT DEFAULT 0, active_s REAL DEFAULT 0, outcome TEXT,
@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS notes(
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY, session TEXT, ts REAL, role TEXT, text TEXT);
 """
+# Columns added after the first release: (table, column, type)
+ADDED_COLUMNS = [("missions", "first_started", "REAL")]
 
 
 class DB:
@@ -42,6 +44,9 @@ class DB:
         with self.lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.executescript(SCHEMA)
+            for table, col, typ in ADDED_COLUMNS:
+                if col not in [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")]:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
     def q(self, sql: str, *args) -> list[dict]:
         with self.lock:

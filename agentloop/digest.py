@@ -45,9 +45,7 @@ def budget_line(b: dict) -> str:
         return "∞" if v in (None, 0) else v
     return (f"[Budget] running workers {b['running_workers']}/{lim(b['max_concurrent_workers'])} · "
             f"worker turns {b['worker_turns']}/{lim(b['max_worker_turns'])} · "
-            f"meta turns {b['meta_turns']}/{lim(b['max_meta_turns'])} · "
-            f"hours {b['hours']:.1f}/{lim(b['max_hours'])} · tokens {fmt_tokens(b['tokens'])}/"
-            f"{fmt_tokens(b['max_tokens']) if b['max_tokens'] else '∞'}")
+            f"meta turns {b['meta_turns']}/{lim(b['max_meta_turns'])} · active {b['hours']:.1f} h")
 
 
 def envelope(items: list[dict], budget: str, infra: str) -> str:

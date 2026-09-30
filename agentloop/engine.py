@@ -13,7 +13,9 @@ import time
 from collections import deque
 from pathlib import Path
 
-from . import digest, gitops, workspace
+import yaml
+
+from . import agents, digest, gitops, workspace
 from .adapters import RunSpec
 from .adapters.base import to_tokens
 from .config import PYTHON, home, mission_config, state_dir, workspace_config
@@ -156,6 +158,7 @@ class Engine:
                 "(continue them with `loop send`)." if names else "No workers were interrupted."))})
             self.kick(m["ws"], m["id"])
         self.spawn(self.infra_loop())
+        self.spawn(agents.refresh_models())  # model lists follow the installed CLI versions
 
     async def infra_loop(self) -> None:
         while True:
@@ -180,20 +183,17 @@ class Engine:
     def budget(self, ws: str, mid: str) -> dict:
         cfg = mission_config(self.wsp(ws), mid)["mission"]["budget"]
         m = self.mission_row(ws, mid)
-        active = (m["active_s"] or 0) + (time.time() - m["started"] if m["status"] == "running" and m["started"] else 0)
+        running = m["status"] == "running" and m["started"]
+        active = (m["active_s"] or 0) + (time.time() - m["started"] if running else 0)
         return {**cfg, "running_workers": len(self.workers(ws, mid, running_only=True)),
                 "worker_turns": m["worker_turns"], "meta_turns": m["meta_turns"], "hours": active / 3600,
-                "tokens": m["tokens"], "cost": m["cost"]}
+                "from": m["first_started"], "to": None if running else m["ended"]}
 
     @staticmethod
     def exhausted(b: dict) -> tuple[str, bool] | None:
         """(reason, hard) when a budget limit is reached; hard limits also stop running workers."""
         if b.get("max_meta_turns") and b["meta_turns"] >= b["max_meta_turns"]:
             return "meta turns", True
-        if b.get("max_hours") and b["hours"] >= b["max_hours"]:
-            return "hours", True
-        if b.get("max_tokens") and b["tokens"] >= to_tokens(b["max_tokens"]):
-            return "tokens", True
         if b.get("max_worker_turns") and b["worker_turns"] >= b["max_worker_turns"]:
             return "worker turns", False
         return None
@@ -253,16 +253,29 @@ class Engine:
                 f"Meta-work session: {orch}. Follow the META-CHAT section of your AGENTS.md; "
                 "you cannot dispatch workers.")
 
+    def session_conf(self, sess: dict) -> dict:
+        """Agent settings for the next turn: fixed by the human config for meta-work and workers,
+        chosen at creation for a meta-chat."""
+        keys = ("model", "effort", "autocompact")
+        if sess["kind"] == "meta-chat":
+            return {k: sess[k] for k in keys}
+        mc = mission_config(self.wsp(sess["ws"]), sess["mission"])["mission"]
+        conf = mc["meta_work"] if sess["kind"] == "meta-work" else mc["workers"].get(sess["agent"], {})
+        return {k: None if conf.get(k) is None else str(conf[k]) for k in keys}
+
     def build_spec(self, sess: dict, prompt: str, n: int) -> RunSpec:
         ws, mid, sid = sess["ws"], sess["mission"], sess["id"]
         p, mdir = self.wsp(ws), self.mdir(ws, mid)
         cfg = mission_config(p, mid)
         worker = sess["kind"] == "worker"
+        conf = self.session_conf(sess)
+        if any(conf[k] != sess[k] for k in conf):  # the human changed the config since the last turn
+            self.db.update("sessions", {"id": sid}, **conf)
         env = {"LOOP_ROLE": sess["kind"],
                "LOOP_WS": p, "LOOP_MISSION": mid, "LOOP_MISSION_DIR": mdir, "LOOP_SESSION": sid,
                "LOOP_GUARD_PATTERNS": json.dumps(cfg["guard"]["deny_patterns"] or [])}
         spec = RunSpec(agent=sess["agent"], kind="worker" if worker else "meta", cwd=Path(sess["cwd"]),
-                       prompt=prompt, model=sess["model"], effort=sess["effort"], autocompact=sess["autocompact"],
+                       prompt=prompt, model=conf["model"], effort=conf["effort"], autocompact=conf["autocompact"],
                        resume_id=sess["vendor_id"], env=env)
         if worker:
             env.update({"LOOP_RUN_DIR": mdir / "runs" / sid})
@@ -295,7 +308,7 @@ class Engine:
         turn_id = self.db.x("INSERT INTO turns(session, n, started, status, start_commit) VALUES(?,?,?,?,?)",
                             sid, n, time.time(), "running", start_commit)
         self.publish("session_status", ws=ws, mission=mid, session=sid, status="running", turn=n)
-        self._log_event(ws, mid, sid, n, events, {"type": "turn", "n": n, "prompt": prompt[:6000]})
+        self._log_event(ws, mid, sid, n, events, {"type": "turn", "n": n, "prompt": prompt})
 
         async def on_event(evt: dict) -> None:
             if evt["type"] == "init" and evt.get("vendor_id") and not sess["vendor_id"]:
@@ -328,14 +341,14 @@ class Engine:
     def kickoff_text(self, ws: str, mid: str) -> str:
         p, mdir = self.wsp(ws), self.mdir(ws, mid)
         mc = mission_config(p, mid)["mission"]
-        roles = "\n".join(f"  - {name}: {r['agent']} / {r.get('model') or 'default model'} / effort "
-                          f"{r.get('effort') or 'default'}" for name, r in mc["roles"].items())
+        agents = "\n".join(f"  - `--agent {a}`: {c.get('model') or 'default model'} / effort {c.get('effort') or 'default'}"
+                           for a, c in mc["workers"].items() if c.get("enabled", True))
         return (f"[Kickoff] Mission \"{mc['title']}\" ({mid}) in workspace {ws}.\n"
                 f"- Mission dir: {mdir}. Read spec.md and dod.md first (read-only for you). "
                 "You own plan.md and journal.md there.\n"
                 f"- Project repo (read-only for you): {p / 'repo'}. Integration branch {gitops.int_branch(mid)} is checked out "
                 f"at {p / 'wt' / ('_int-' + mid)}.\n"
-                f"- Worker roles you can spawn:\n{roles}\n"
+                f"- Worker agents (the human fixed model and effort; you pick the CLI and name the role):\n{agents}\n"
                 f"- Workspace map: {p / 'PLATFORM.md'}. Cross-mission memory: {p / 'meta' / 'memory'}.\n"
                 "Write plan.md, add a journal entry, dispatch workers with `loop spawn`, then end your turn.")
 
@@ -357,7 +370,7 @@ class Engine:
             self.db.push_inbox(ws, mid, "system", {"text": "[System] The human resumed the mission. "
                                                            "Check `loop ls` and continue."})
         self.set_mission(ws, mid, status="running", started=time.time(), final_turn=0, idle_streak=0,
-                         fail_streak=0)
+                         fail_streak=0, first_started=m["first_started"] or time.time())
         self.kick(ws, mid)
 
     async def stop_mission(self, ws: str, mid: str, status: str = "stopped", meta_work: bool = True) -> None:
@@ -413,14 +426,15 @@ class Engine:
         mc = mission_config(p, mid)["mission"]
         orch = self.db.session(m["meta_work"])
         rotate = to_tokens(mc["meta_work"].get("rotate_at_tokens"))
-        if rotate and orch["context"] > rotate:
+        # A vendor session cannot move between CLIs, so a new meta-work agent means a fresh session
+        if orch["agent"] != mc["meta_work"]["agent"] or (rotate and orch["context"] > rotate):
             # Fresh meta-work session; plan.md/journal.md carry the state across
             self.db.update("sessions", {"id": orch["id"]}, status="retired")
             orch = self.new_session(ws, mid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
             self.set_mission(ws, mid, meta_work=orch["id"])
             items = [{"kind": "handoff", "payload": json.dumps({"text": (
-                "[Handoff] You are a fresh meta-work session replacing a previous one whose context grew "
-                "too large. Regain state from plan.md, journal.md, notes.md and `loop ls`.\n\n"
+                "[Handoff] You are a fresh meta-work session replacing a previous one (its context grew too "
+                "large, or the human switched the meta-work agent). Regain state from plan.md, journal.md, notes.md and `loop ls`.\n\n"
                 + self.kickoff_text(ws, mid))})}] + items
         workspace.commit_external(p)
         text = digest.envelope(items, digest.budget_line(self.budget(ws, mid)), self.infra.summary())
@@ -548,6 +562,11 @@ class Engine:
         self.publish("note", ws=n["ws"], mission=n["mission"], id=nid)
 
     def human_edit(self, ws: str, rel: str, text: str) -> None:
+        if rel.endswith(".yaml"):
+            data = yaml.safe_load(text) or {}
+            errors = agents.config_errors((data.get("defaults") if rel == "loop.yaml" else data) or {})
+            if errors:
+                raise AgentError("; ".join(errors))
         change = workspace.human_write(self.wsp(ws), rel, text)
         parts = Path(rel).parts
         if change and len(parts) == 3 and parts[0] == "missions":
@@ -579,19 +598,25 @@ class Engine:
             raise AgentError(f"mission is {m['status']}")
         return m
 
-    async def spawn_worker(self, caller: dict, role: str, label: str, prompt: str, gpu: bool = False) -> str:
+    async def spawn_worker(self, caller: dict, agent: str, role: str, label: str, prompt: str,
+                           gpu: bool = False) -> str:
         self.require_meta_work(caller)
         ws, mid = caller["ws"], caller["mission"]
         p = self.wsp(ws)
-        roles = mission_config(p, mid)["mission"]["roles"]
-        if role not in roles:
-            raise AgentError(f"unknown role {role!r}; available: {', '.join(roles)}")
+        workers = mission_config(p, mid)["mission"]["workers"]
+        enabled = [a for a, c in workers.items() if c.get("enabled", True)]
+        if agent not in enabled:
+            raise AgentError(f"worker agent {agent!r} is not enabled; use --agent {' or '.join(enabled) or '(none)'}")
+        if not role.strip():
+            raise AgentError("--role is required (e.g. coder, reviewer, research)")
+        role = gitops.slug(role)
         if not prompt.strip():
             raise AgentError("empty prompt")
         self.check_dispatch(ws, mid, gpu)
         sid = f"w-{secrets.token_hex(3)}"
         wt, branch = gitops.add_worker_worktree(p, mid, sid, label or role)
-        sess = self.new_session(ws, mid, "worker", role, label or role, roles[role], wt, parent=caller["id"],
+        sess = self.new_session(ws, mid, "worker", role, label or role, {"agent": agent, **workers[agent]}, wt,
+                                parent=caller["id"],
                                 branch=branch, gpu=gpu, sid=sid)
         self.db.update("sessions", {"id": sid}, status="running")
         self._count_dispatch(ws, mid)
@@ -777,7 +802,7 @@ class Engine:
                 lines.append(f"- {key} ({s['kind']} {s['role']}): {tree_rss(proc.pid) / 2**30:.2f} GB RSS")
         return "\n".join(lines)
 
-    def session_events(self, sid: str, limit: int = 400) -> list[dict]:
+    def session_events(self, sid: str, limit: int = 400, types: set[str] | None = None) -> list[dict]:
         s = self.db.session(sid)
         if not s:
             raise AgentError("unknown session")
@@ -785,13 +810,25 @@ class Engine:
         if not path.exists():
             return []
         with path.open() as fh:
-            return [json.loads(x) for x in deque(fh, maxlen=limit)]
+            if not types:
+                return [json.loads(x) for x in deque(fh, maxlen=limit)]
+            # Cheap substring pre-filter before parsing: logs can hold large tool results
+            keys = tuple(f'"type": "{t}"' for t in types)
+            return [json.loads(x) for x in deque((x for x in fh if x.startswith(keys, 1)), maxlen=limit)]
 
     # ---------- meta-chats ----------
     def create_meta_chat(self, ws: str, mid: str, overrides: dict | None = None) -> dict:
         self.mission_row(ws, mid)
+        # Chosen per chat by the human; unset fields fall back to the mission's meta-work settings
         mc = mission_config(self.wsp(ws), mid)["mission"]
-        conf = {**mc["meta_chat"], **{k: v for k, v in (overrides or {}).items() if v}}
+        conf = {k: v for k, v in (overrides or {}).items() if k in ("agent", "model", "effort") and v}
+        if conf.get("agent", mc["meta_work"]["agent"]) != mc["meta_work"]["agent"]:
+            conf.setdefault("model", None)
+            conf.setdefault("effort", None)
+        conf = {"autocompact": None, **{k: mc["meta_work"].get(k) for k in ("agent", "model", "effort")}, **conf}
+        reason = agents.check_agent_conf(conf["agent"], conf, agents.load_models())
+        if reason:
+            raise AgentError(reason)
         return self.new_session(ws, mid, "meta-chat", "meta-chat", "meta-chat", conf, self.wsp(ws) / "meta")
 
     def meta_chat_send(self, sid: str, text: str) -> None:
