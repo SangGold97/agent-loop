@@ -68,6 +68,11 @@ def test_verify_and_checklist():
 def test_trim_words_keeps_tail():
     text, cut = digest.trim_words(" ".join(f"w{i}" for i in range(1000)), 100)
     assert cut and "w0" in text and "w999" in text
+    assert len(text.split()) == 101  # 60 head + marker + 40 tail
+    report = "**Result:** done\n" + "x " * 300 + "\n**Issues:** none\n**Next:** ship"
+    text, cut = digest.trim_words(report, 50)
+    assert cut and text.startswith("**Result:** done\n") and text.endswith("**Issues:** none\n**Next:** ship")
+    assert digest.trim_words("a\nb", 5) == ("a\nb", False)
 
 
 def guard_env(tmp_path: Path, role: str) -> dict:

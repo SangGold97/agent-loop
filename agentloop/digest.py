@@ -7,12 +7,15 @@ from pathlib import Path
 
 
 def trim_words(text: str, limit: int) -> tuple[str, bool]:
-    words = text.split()
-    if len(words) <= limit:
-        return text.strip(), False
+    text = text.strip()
+    # Words at even indexes, the original whitespace between them at odd ones (keeps line breaks)
+    parts = re.split(r"(\s+)", text) if text else []
+    words = (len(parts) + 1) // 2
+    if words <= limit:
+        return text, False
     # Keep the tail too: final reports usually end with the most decision-relevant lines
     head, tail = int(limit * 0.6), int(limit * 0.4)
-    return " ".join(words[:head]) + "\n[…]\n" + " ".join(words[-tail:]), True
+    return "".join(parts[:2 * head - 1]) + "\n[…]\n" + "".join(parts[2 * (words - tail):]), True
 
 
 def fmt_tokens(n: int | None) -> str:
