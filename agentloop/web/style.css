@@ -111,7 +111,8 @@ label.inline { display: inline-flex; gap: 6px; align-items: center; color: var(-
 .pill { font-size: 12px; white-space: nowrap; color: var(--muted); }
 .pill::before { content: '['; color: var(--faint); } .pill::after { content: ']'; color: var(--faint); }
 .pill.running, .pill.pending { color: var(--run); }
-.pill.idle, .pill.draft, .pill.stopped, .pill.retired, .pill.interrupted { color: var(--muted); }
+.pill.idle { color: var(--ok); }
+.pill.draft, .pill.stopped, .pill.retired, .pill.interrupted { color: var(--muted); }
 .pill.ok, .pill.done, .pill.success, .pill.approved { color: var(--ok); }
 .pill.awaiting_review, .pill.partial, .pill.paused, .pill.warn { color: var(--warn); }
 .pill.failed, .pill.blocked, .pill.rejected { color: var(--bad); }
@@ -202,6 +203,12 @@ table.t { width: 100%; border-collapse: collapse; }
 /* workers share the column: running ones get twice the room, the list scrolls once they hit their minimum */
 .worker { display: flex; flex-direction: column; border: 1px solid var(--border); flex: 1 0 150px; min-height: 0; }
 .worker.running { flex: 2 0 300px; }
+.worker:not(.open) { flex: none; }
+.worker:not(.open) > .feed-wrap { display: none; }
+.worker:not(.open) > .wh { border-bottom: 0; }
+.worker .wh { cursor: pointer; }
+.worker .wh:hover { background: var(--panel-2); }
+.worker .fold { color: var(--faint); width: 10px; }
 .worker .wh { padding: 3px 8px; border-bottom: 1px solid var(--border); gap: 6px; flex-wrap: nowrap; white-space: nowrap; }
 .worker .wh .role { font-weight: 700; }
 .worker .wh .wlabel { color: var(--muted); overflow: hidden; text-overflow: ellipsis; min-width: 0; }

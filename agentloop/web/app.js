@@ -3,7 +3,7 @@
 
 const S = { workspaces: [], route: {}, goal: null, feeds: {}, infra: null, history: [], agents: null, models: {},
   chat: { sid: null, messages: [], busy: false, liveEvs: [], creating: false }, edit: {}, cfgDirty: false,
-  partial: {}, modal: null };
+  partial: {}, modal: null, open: {} };
 const main = document.getElementById('main');
 const AGENTS = ['claude', 'codex'];
 const FEED_TYPES = ['turn', 'text', 'tool', 'tool_result', 'thinking', 'turn_end', 'error'];
@@ -534,7 +534,7 @@ function tuiEvent(e, who) {
     case 'tool_result': return e.text ? `<div class="tres ${e.error ? 'err' : ''}">⎿ ${esc(firstLines(e.text, 3))}</div>` : '';
     case 'thinking': return `<div class="think">✻ ${esc(firstLine(e.text))}</div>`;
     case 'error': return `<div class="fe err">! ${esc(e.text)}</div>`;
-    case 'turn_end': return `<div class="fe ${e.status === 'failed' ? 'err' : ''}">└ turn ${e.n} ${esc(e.status)}${e.tokens ? ' · ' + fmtTok(e.tokens) + ' tokens' : ''}${e.status === 'failed' && e.error ? ' · ' + esc(e.error) : ''}</div>`;
+    case 'turn_end': return e.status === 'failed' ? `<div class="fe err">! turn ${e.n} failed${e.error ? ': ' + esc(e.error) : ''}</div>` : '';
     default: return '';
   }
 }
@@ -614,7 +614,9 @@ document.addEventListener('click', e => {
   const el = $('.feed', b.parentElement);
   el.dataset.free = ''; b.hidden = true; el.scrollTop = el.scrollHeight;
 });
-function agentLine(s) { return `${esc(s.agent)} · ${esc(s.model || 'default')} · ${esc(s.effort || 'default')}`; }
+function agentLine(s, tokens) {
+  return `${esc(cliName(s.agent))} · ${esc(s.model || 'default')}/${esc(s.effort || 'default')}${tokens === undefined ? '' : ` · ${fmtTok(tokens)} tokens`}`;
+}
 
 // META-WORK: every meta-work session of the goal, oldest first, as one continuous feed
 function renderMetaWork() {
@@ -630,7 +632,7 @@ function renderMetaWorkHead() {
   const cur = sessions.find(s => s.id === S.goal.row.meta_work) || sessions[sessions.length - 1];
   if (!cur) { el.innerHTML = `<span class="muted">${agentLine({ agent: S.goal.config.meta_work.agent, ...S.goal.config.meta_work })}</span>`; return; }
   const tokens = sessions.reduce((a, s) => a + (s.tokens || 0), 0);
-  el.innerHTML = `<span class="muted">${agentLine(cur)}</span><span class="faint">·</span><span>${fmtTok(tokens)} tokens</span>
+  el.innerHTML = `<span class="muted">${agentLine(cur, tokens)}</span>
     <span class="spacer"></span>${pill(simpleStatus(cur))}<a href="#" data-log="${cur.id}" class="small">log</a>`;
   $('[data-log]', el).onclick = e => { e.preventDefault(); sessionModal(cur.id); };
 }
@@ -656,9 +658,10 @@ function renderChatBar() {
   if (!bar) return;
   const chats = S.goal.sessions.filter(s => s.kind === 'meta-chat');
   if (!S.chat.sid && chats.length) S.chat.sid = chats[chats.length - 1].id;
+  const cur = chats.find(c => c.id === S.chat.sid);
   bar.innerHTML = `<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
-      chat ${i + 1} · ${esc(c.agent)}/${esc(c.model || 'default')}/${esc(c.effort || 'default')} · ${c.turns} turns</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
-    <button class="btn small" id="chat-new-btn">+ new chat</button>`;
+      chat ${i + 1} · ${agentLine(c, c.tokens)}</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
+    ${cur ? pill(simpleStatus(cur)) : ''}<button class="btn small" id="chat-new-btn">+ new chat</button>`;
   $('#chat-sel').onchange = e => { S.chat.sid = e.target.value; S.chat.liveEvs = []; loadChatMessages(); };
   $('#chat-new-btn').onclick = () => { S.chat.creating = !S.chat.creating; renderNewChat(); };
   renderNewChat();
@@ -733,10 +736,11 @@ function saveNoteModal(text) {
 }
 
 // WORKER-AGENTS: running first, then newest; header = role · label · status · CLI · model/effort
+const workerOpen = w => simpleStatus(w) === 'running' || !!S.open[w.id];
 function workerHead(w) {
   const st = simpleStatus(w);
-  return `<span class="role">${esc(w.role)}</span><span class="faint">·</span><span class="wlabel">${esc(w.label)}</span>${pill(st)}
-    <span class="spacer"></span><span class="faint">${esc(cliName(w.agent))} · ${esc(w.model || 'default')}/${esc(w.effort || 'default')}</span>
+  return `<span class="fold">${workerOpen(w) ? '▾' : '▸'}</span><span class="role">${esc(w.role)}</span><span class="faint">·</span><span class="wlabel">${esc(w.label)}</span>${pill(st)}
+    <span class="spacer"></span><span class="faint">${agentLine(w, w.tokens)}</span>
     <a href="#" data-log="${w.id}">log</a>${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}`;
 }
 function renderWorkers() {
@@ -748,22 +752,35 @@ function renderWorkers() {
   const ids = workers.map(w => w.id).join();
   if (el.dataset.ids !== ids) {
     el.dataset.ids = ids;
-    el.innerHTML = workers.map(w => `<div class="worker ${simpleStatus(w)}" id="w-${w.id}"><div class="wh row small">${workerHead(w)}</div>
+    el.innerHTML = workers.map(w => `<div class="${workerClass(w)}" id="w-${w.id}"><div class="wh row small">${workerHead(w)}</div>
       ${feedShell(w.id)}</div>`).join('')
       || '<div class="empty">No workers yet. The meta-work spawns them as it needs them.</div>';
     el.onclick = e => {
-      const log = e.target.closest('[data-log]'), stop = e.target.closest('[data-stop]');
+      const log = e.target.closest('[data-log]'), stop = e.target.closest('[data-stop]'), head = e.target.closest('.wh');
       if (log) { e.preventDefault(); sessionModal(log.dataset.log); }
-      if (stop) act(() => api(`/api/sessions/${stop.dataset.stop}/stop`, { body: {} }), 'Stop requested');
+      else if (stop) act(() => api(`/api/sessions/${stop.dataset.stop}/stop`, { body: {} }), 'Stop requested');
+      else if (head) toggleWorker(head.parentElement.id.slice(2));
     };
     workers.forEach(w => loadFeed(w.id).then(() => paintFeed(w.id)));
     return;
   }
   workers.forEach(w => {
-    const row = $(`#w-${w.id}`);
-    row.className = `worker ${simpleStatus(w)}`;
+    const row = $(`#w-${w.id}`), was = row.classList.contains('open');
+    row.className = workerClass(w);
     $('.wh', row).innerHTML = workerHead(w);
+    if (!was && workerOpen(w)) renderLive(w.id);  // just opened: jump to the live end
   });
+}
+function workerClass(w) {
+  // A worker that starts running opens itself and folds again when it goes idle
+  if (simpleStatus(w) === 'running') delete S.open[w.id];
+  return `worker ${simpleStatus(w)} ${workerOpen(w) ? 'open' : ''}`;
+}
+function toggleWorker(sid) {
+  const w = S.goal.sessions.find(x => x.id === sid);
+  if (!w || simpleStatus(w) === 'running') return;
+  S.open[sid] = !S.open[sid];
+  renderWorkers();
 }
 
 // log window: one session, every event, streaming live while it runs
@@ -773,7 +790,7 @@ async function sessionModal(sid) {
   const [turns, evs] = await Promise.all([api(`/api/sessions/${sid}/turns`), api(`/api/sessions/${sid}/events?limit=3000`)]);
   const file = (n, ext) => `<a href="/api/runs/${ws}/${gid}/${sid}/t${n}.${ext}" target="_blank">${ext}</a>`;
   const title = s.kind === 'worker' ? `${s.role} · ${s.label}` : s.kind;
-  modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${esc(cliName(s.agent))} · ${esc(s.model || 'default')}/${esc(s.effort || 'default')}</div><h2>${esc(title)}</h2></div>
+  modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s, s.tokens)}</div><h2>${esc(title)}</h2></div>
       <button class="icon-btn" data-close>×</button></div>
     ${s.cwd ? `<div class="faint small">${esc(s.cwd)}${s.branch ? ' · ' + esc(s.branch) : ''}</div>` : ''}
     <details class="turns"><summary class="small">${turns.turns.length} turns</summary>
