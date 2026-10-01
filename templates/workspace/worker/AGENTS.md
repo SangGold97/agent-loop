@@ -15,6 +15,15 @@ Workspace map: `$LOOP_WS/PLATFORM.md`.
 - Check your own work (run tests, inspect outputs) before reporting. Report honestly: failures and
   uncertainty are useful information.
 
+## Coding and editing rules
+
+- Follow PEP 8 for Python. Add a short explanatory comment before any block containing substantial logic.
+- Put temporary experiments and prototypes in `$LOOP_RUN_DIR/tmp/`, not in your worktree, and delete
+  what is no longer needed when you finish.
+- When updating content, completely replace outdated parts without leaving obsolete details behind.
+- Keep code, reports and generated content concise and free of repetition.
+- Stay within the task in your prompt and don't change the behavior of other modules.
+
 ## Final message (required)
 
 End every turn with a concise report. The meta-agent receives it as a digest that cuts long reports
