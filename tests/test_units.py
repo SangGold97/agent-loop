@@ -49,6 +49,12 @@ def test_codex_parse_stream():
     assert [e["type"] for e in events] == ["init", "tool", "tool_result", "text", "usage"]
 
 
+
+def test_codex_ignores_hook_trust_notice():
+    notice = {"type": "item.completed", "item": {"type": "error", "message":
+              "`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation."}}
+    assert CodexAdapter().parse(notice, ParseState()) == []
+
 def test_claude_parse_result():
     st, ad = ParseState(), ClaudeAdapter()
     ad.parse({"type": "system", "subtype": "init", "session_id": "S"}, st)

@@ -149,7 +149,7 @@ function configForm(conf) {
       ${num('max_worker_turns', b.max_worker_turns, 'worker turns')}${num('max_meta_turns', b.max_meta_turns, 'meta-work turns')}</div>
     <div class="k">language</div><div class="row"><select data-lang style="width:160px">${['English', 'Vietnamese'].concat(
         ['English', 'Vietnamese'].includes(conf.language || 'English') ? [] : [conf.language]).map(l => `<option ${l === (conf.language || 'English') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
-      <span class="hint">for plan, journal, report, chat replies, worker prompts and reports; code and commits stay as the project uses</span></div>
+      <span class="hint">for plan, journal, report and chat replies to you; meta-work and workers talk to each other in English</span></div>
     <div class="k">git</div><div class="budget-row">
       <label class="f">base branch<input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo's current"></label>
       <label class="f">push policy<select data-push>${['manual', 'branch'].map(p => `<option ${p === conf.push ? 'selected' : ''}>${p}</option>`).join('')}</select></label></div>
@@ -533,7 +533,7 @@ function tuiEvent(e, who) {
     case 'tool': return `<div class="tl"><span class="dotc">⏺</span><b>${esc(e.name)}</b> ${esc(e.detail || '')}</div>`;
     case 'tool_result': return e.text ? `<div class="tres ${e.error ? 'err' : ''}">⎿ ${esc(firstLines(e.text, 3))}</div>` : '';
     case 'thinking': return `<div class="think">✻ ${esc(firstLine(e.text))}</div>`;
-    case 'error': return `<div class="fe err">! ${esc(e.text)}</div>`;
+    case 'error': return /--dangerously-bypass-hook-trust/.test(e.text) ? '' : `<div class="fe err">! ${esc(e.text)}</div>`;
     case 'turn_end': return e.status === 'failed' ? `<div class="fe err">! turn ${e.n} failed${e.error ? ': ' + esc(e.error) : ''}</div>` : '';
     default: return '';
   }

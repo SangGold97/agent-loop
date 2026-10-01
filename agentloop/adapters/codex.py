@@ -60,7 +60,8 @@ class CodexAdapter(Adapter):
                             "detail": short(item.get("arguments") or "", 240)})
             elif itype == "web_search":
                 out.append({"type": "tool", "name": "web_search", "detail": short(item.get("query", ""), 240)})
-            elif itype == "error":
+            elif itype == "error" and "--dangerously-bypass-hook-trust" not in item.get("message", ""):
+                # Codex reports the hook-trust flag we pass on purpose as an error item; it is only a notice
                 out.append({"type": "error", "text": short(item.get("message", ""), 400)})
         elif kind == "turn.completed":
             u = o.get("usage") or {}
