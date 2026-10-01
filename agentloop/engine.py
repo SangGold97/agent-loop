@@ -215,7 +215,7 @@ class Engine:
         self.set_mission(ws, mid, final_turn=1)
         self.db.push_inbox(ws, mid, "budget", {"text": (
             f"[Budget exhausted: {reason}] No more workers can be started. This is your final turn: "
-            "call `loop done --status partial` (or `success` if the DoD is met) with a report.")})
+            "call `loop done --status partial` (or `success` if the goal is met) with a report.")})
         self.kick(ws, mid)
 
     def check_dispatch(self, ws: str, mid: str, gpu: bool) -> None:
@@ -354,7 +354,7 @@ class Engine:
         agents = "\n".join(f"  - `--agent {a}`: {c.get('model') or 'default model'} / effort {c.get('effort') or 'default'}"
                            for a, c in mc["workers"].items() if c.get("enabled", True))
         return (f"[Kickoff] Mission \"{mc['title']}\" ({mid}) in workspace {ws}.\n"
-                f"- Mission dir: {mdir}. Read spec.md and dod.md first (read-only for you). "
+                f"- Mission dir: {mdir}. Read spec.md and goal.md first (read-only for you). "
                 "You own plan.md and journal.md there.\n"
                 f"- Project repo (read-only for you): {p / 'repo'}. Integration branch {gitops.int_branch(mid)} is checked out "
                 f"at {p / 'wt' / ('_int-' + mid)}.\n"
@@ -494,7 +494,7 @@ class Engine:
         if streak <= 2:
             self.db.push_inbox(ws, mid, "system", {"text": (
                 "[System] No workers are running and the mission is still open. Dispatch work, or call "
-                "`loop done` if the DoD is met, progress has stalled, or you need the human.")})
+                "`loop done` if the goal is met, progress has stalled, or you need the human.")})
         else:
             await self.stop_mission(ws, mid, status="paused")
             self.publish("alert", ws=ws, mission=mid, text="Meta-work went idle; mission paused.")
@@ -728,12 +728,12 @@ class Engine:
         if status not in ("success", "partial", "blocked"):
             raise AgentError("status must be success, partial or blocked")
         if not report.strip():
-            raise AgentError("a report is required (map each DoD criterion to evidence and a verdict)")
+            raise AgentError("a report is required (map each goal criterion to evidence and a verdict)")
         ws, mid = caller["ws"], caller["mission"]
         p, results = self.wsp(ws), []
         if status == "success":
             wt = p / "wt" / f"_int-{mid}"
-            for cmd in digest.verify_commands((self.mdir(ws, mid) / "dod.md").read_text()):
+            for cmd in digest.verify_commands((self.mdir(ws, mid) / "goal.md").read_text()):
                 proc = await asyncio.create_subprocess_shell(
                     cmd, cwd=wt, env=child_env({}), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                     start_new_session=True)

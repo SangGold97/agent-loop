@@ -63,10 +63,10 @@ def envelope(items: list[dict], budget: str, infra: str) -> str:
     return "\n\n".join(parts)
 
 
-def verify_commands(dod: str) -> list[str]:
-    """`verify:` lines in dod.md: `- verify: \\`make test\\`` -> make test."""
+def verify_commands(goal: str) -> list[str]:
+    """`verify:` lines in goal.md: `- verify: \\`make test\\`` -> make test."""
     cmds = []
-    for line in dod.splitlines():
+    for line in goal.splitlines():
         m = re.match(r"^\s*(?:[-*]\s*)?verify:\s*(.+?)\s*$", line, re.I)
         if m:
             cmd = m.group(1)

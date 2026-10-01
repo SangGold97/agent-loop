@@ -6,14 +6,14 @@ sessions) do. Workspace map: `../PLATFORM.md`. Your mode is stated at the top of
 
 ## MODE: META-WORK
 
-You own one mission until its Definition of Done (DoD) is met or you decide to stop.
-Each turn is triggered by events: kickoff, a worker finished, a human note, the DoD changed, a
+You own one mission until its goal is met or you decide to stop.
+Each turn is triggered by events: kickoff, a worker finished, a human note, the goal changed, a
 budget or system notice. A turn is: read events, think, update the plan, act, end the turn.
 Never wait for or poll workers; you are resumed when they report.
 
 ### Files (in the mission dir)
-- `spec.md`, `dod.md`: read-only. If you think they are wrong, say so in `journal.md` and in your report.
-- `plan.md`: your current strategy and a checklist (`- [ ]` / `- [x]`) mapped to DoD criteria.
+- `spec.md`, `goal.md`: read-only. If you think they are wrong, say so in `journal.md` and in your report.
+- `plan.md`: your current strategy and a checklist (`- [ ]` / `- [x]`) mapped to goal criteria.
   Keep it short and current; rewrite it freely.
 - `journal.md`: append one short entry per turn: what happened, what you decided, why.
 - Human notes arrive as events (also stored in `notes.md`). They override your plan; acknowledge each in the journal.
@@ -28,8 +28,8 @@ Never wait for or poll workers; you are resumed when they report.
 
 ### Delegation
 Workers know nothing except what you tell them and what they can read. A good prompt states the
-objective and how it serves the DoD, the relevant context and paths, constraints, the evidence to
-produce, and resource limits. Workers can read the mission's `spec.md`/`dod.md`.
+objective and how it serves the goal, the relevant context and paths, constraints, the evidence to
+produce, and resource limits. Workers can read the mission's `spec.md`/`goal.md`.
 - Spawn a new session for a new thread of work, when a worker's context is heavy (`loop ls`), or when you need independent eyes (review, judging).
 - `send` to a worker when the work continues the same thread and its context is still valuable.
 - Run independent threads in parallel within the budget (for example research next to a prototype).
@@ -45,11 +45,11 @@ Workers branch from `loop/<mission>/integration`. Merge accepted work with `loop
 worker to merge `loop/<mission>/integration` into its branch and resolve.
 
 ### Stopping
-Call `loop done` when every DoD criterion is met with evidence (`success`), when progress has
+Call `loop done` when every goal criterion is met with evidence (`success`), when progress has
 stalled and more budget is unlikely to help (`partial`), or when a human decision is needed
 (`blocked`). Qualitative criteria are your judgment; for important ones consider an independent
-judge worker first. The report maps each DoD criterion to evidence and a verdict, then lists open
-issues. `verify:` lines in `dod.md` are run by the platform on the integration branch, and
+judge worker first. The report maps each goal criterion to evidence and a verdict, then lists open
+issues. `verify:` lines in `goal.md` are run by the platform on the integration branch, and
 `success` is rejected while any of them fails.
 
 ### Resources
@@ -67,4 +67,4 @@ Record durable insights from the human in `memory/`.
 ## Improving the harness
 
 When a pattern repeats, you may improve `memory/`, `docs/`, `skills/` here and in `../worker/`.
-Record why in the journal. Never edit `hooks.json`, `loop.yaml`, `spec.md`, `dod.md` or `mission.yaml`.
+Record why in the journal. Never edit `hooks.json`, `loop.yaml`, `spec.md`, `goal.md` or `mission.yaml`.

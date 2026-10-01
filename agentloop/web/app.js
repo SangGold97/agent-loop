@@ -190,7 +190,7 @@ function renderSidebar() {
 }
 $('#new-ws').onclick = () => newWorkspaceModal();
 
-const TABS = [['overview', 'Overview'], ['plan', 'Plan & journal'], ['notes', 'Notes'], ['git', 'Git']];
+const TABS = [['overview', 'Overview'], ['config', 'Config'], ['plan', 'Plan & journal'], ['notes', 'Notes'], ['git', 'Git']];
 function parseHash() {
   const p = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   if (p[0] === 'ws' && p[2] === 'm') {
@@ -226,8 +226,8 @@ window.addEventListener('hashchange', () => { closeModal(); render(); });
 function renderHome() {
   main.innerHTML = `<div class="hero">
     <h1>$ human on the loop</h1>
-    <p class="muted" style="max-width:760px">Write a spec and a Definition of Done. A meta-work agent plans, delegates to Claude Code / Codex
-      workers, evaluates evidence and iterates until the DoD is met. You steer with notes and meta-chat, review the report, and merge.</p>
+    <p class="muted" style="max-width:760px">Write a spec and a goal. A meta-work agent plans, delegates to Claude Code / Codex
+      workers, evaluates evidence and iterates until the goal is met. You steer with notes and meta-chat, review the report, and merge.</p>
     <div class="row" style="margin-top:14px"><button class="btn primary" id="h-new-ws">new workspace</button></div>
     <div class="ws-cards">${S.workspaces.map(w => {
       const counts = w.missions.reduce((a, m) => (a[m.status] = (a[m.status] || 0) + 1, a), {});
@@ -321,7 +321,7 @@ async function newMissionModal(ws) {
       <label class="f">title<input type="text" id="nm-title" placeholder="e.g. Add OAuth login"></label>
       <div class="grid cols-2">
         <label class="f">spec: goal, context, inputs, constraints<textarea id="nm-spec" style="min-height:190px"></textarea></label>
-        <label class="f">definition of done<textarea id="nm-dod" style="min-height:190px" placeholder="- criterion (qualitative ones are judged by the meta-work)&#10;- verify: \`pytest -q\`   (optional command run on the integration branch)"></textarea></label>
+        <label class="f">goal<textarea id="nm-goal" style="min-height:190px" placeholder="- criterion (qualitative ones are judged by the meta-work)&#10;- verify: \`pytest -q\`   (optional command run on the integration branch)"></textarea></label>
       </div>
       <div id="nm-conf">${configForm(info.config.defaults)}</div>
       <div class="row"><label class="inline"><input type="checkbox" id="nm-start" checked> start right away</label><span class="spacer"></span>
@@ -330,7 +330,7 @@ async function newMissionModal(ws) {
   $('#nm-title', m).focus();
   $('#nm-ok', m).onclick = () => act(async () => {
     const config = readConfigForm($('#nm-conf', m));
-    const r = await api(`/api/workspaces/${ws}/missions`, { body: { title: $('#nm-title', m).value, spec: $('#nm-spec', m).value, dod: $('#nm-dod', m).value, config } });
+    const r = await api(`/api/workspaces/${ws}/missions`, { body: { title: $('#nm-title', m).value, spec: $('#nm-spec', m).value, goal: $('#nm-goal', m).value, config } });
     if ($('#nm-start', m).checked) await api(`/api/missions/${ws}/${r.id}/start`, { body: {} });
     closeModal(); await loadState(); location.hash = `#/ws/${ws}/m/${r.id}`;
   }, 'Mission created');
@@ -389,6 +389,7 @@ function renderTabs() {
 async function renderTab() {
   const t = S.route.tab;
   if (t === 'overview') renderOverview();
+  else if (t === 'config') { $('#m-tab').innerHTML = '<div id="cfg-tab" style="margin-top:18px"></div>'; renderConfigTab(true); }
   else if (t === 'plan') $('#m-tab').innerHTML = planHtml();
   else if (t === 'notes') renderNotes();
   else if (t === 'git') await renderGit();
@@ -403,6 +404,7 @@ async function refreshMission(force) {
   renderMissionHead(); renderTabs();
   const t = S.route.tab;
   if (t === 'overview') return updateOverview(force);
+  if (t === 'config') return renderConfigTab(force);
   if (t === 'notes') return renderNotes(true);
   if (t === 'git' && !force) return;
   await renderTab();
@@ -411,15 +413,15 @@ async function refreshMission(force) {
 // ---------- overview: stats, then HUMAN / META-AGENTS / WORKER-AGENTS layers ----------
 function renderOverview() {
   $('#m-tab').innerHTML = `<div id="ov-stats" class="stats"></div>
-    <div class="layer human"><div class="lt">human</div><div id="ov-report"></div><div id="ov-human"></div></div>
+    <div class="layer human" id="ov-human" hidden><div class="lt">human</div><div id="ov-report"></div></div>
     <div class="layer"><div class="lt">meta-agents</div><div class="meta-grid">
       <div class="box" id="ov-mw"></div><div class="box" id="ov-chat"></div></div></div>
     <div class="layer"><div class="lt">worker-agents <span class="x faint" id="ov-wcount"></span></div><div id="ov-workers"></div></div>`;
-  renderStats(); renderReport(); renderHuman(); renderMetaWork(); renderChat(); renderWorkers();
+  renderStats(); renderReport(); renderMetaWork(); renderChat(); renderWorkers();
 }
 function updateOverview(force) {
   if (!$('#ov-stats')) return renderOverview();
-  renderStats(); renderReport(); renderHuman(force); renderMetaWorkHead(); renderChatBar(); renderWorkers();
+  renderStats(); renderReport(); renderMetaWorkHead(); renderChatBar(); renderWorkers();
   // A rotated meta-work session joins the same feed
   const fresh = S.mission.sessions.filter(s => s.kind === 'meta-work' && !S.feeds[s.id]);
   if (fresh.length) Promise.all(fresh.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
@@ -443,20 +445,22 @@ function renderStats() {
 function renderReport() {
   const M = S.mission, report = M.files['report.md'], el = $('#ov-report');
   const review = M.row.status === 'awaiting_review';
+  $('#ov-human').hidden = !report;
   if (!report) { el.innerHTML = ''; return; }
   if (el.dataset.report === report + review) return;
   el.dataset.report = report + review;
-  el.innerHTML = `<div class="box report" style="margin-bottom:18px"><div class="lt">report${review ? ' · awaiting your review' : ''}</div>
+  el.innerHTML = `<div class="box report"><div class="lt">report${review ? ' · awaiting your review' : ''}</div>
     <div class="md">${md(report.replace(/^# Completion report\s*\n/, ''))}</div>
     ${review ? `<div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn" id="ov-reopen">reopen with note</button>
       <button class="btn primary" id="ov-accept">accept</button></div>` : ''}</div>`;
   if (review) { $('#ov-accept').onclick = () => missionAction('accept'); $('#ov-reopen').onclick = () => reopenModal(); }
 }
-function renderHuman(force) {
-  const M = S.mission, el = $('#ov-human');
+function renderConfigTab(force) {
+  const M = S.mission, el = $('#cfg-tab');
+  if (!el) return;
   // Never overwrite what the human is typing, and skip repaints when nothing changed
-  if (!force && (S.edit.spec || S.edit.dod || S.cfgDirty) && el.innerHTML) return;
-  const key = JSON.stringify([M.files['spec.md'], M.files['dod.md'], M.config, S.edit, Object.keys(S.models)]);
+  if (!force && (S.edit.spec || S.edit.goal || S.cfgDirty) && el.innerHTML) return;
+  const key = JSON.stringify([M.files['spec.md'], M.files['goal.md'], M.config, S.edit, Object.keys(S.models)]);
   if (!force && el.dataset.key === key) return;
   el.dataset.key = key;
   const doc = (name, title, hint) => {
@@ -470,7 +474,7 @@ function renderHuman(force) {
   const verify = M.verify.length ? `${M.verify.length} verify command${M.verify.length > 1 ? 's' : ''} run on the integration branch before a success close`
     : 'no verify: commands; the meta-work judges completion';
   el.innerHTML = `<div class="grid cols-2">${doc('spec', 'spec', 'read-only for agents; a running meta-work is notified with the diff')}
-      ${doc('dod', `definition of done <span class="x">${esc(verify)}</span>`, 'lines like - verify: `pytest -q` are executed by the platform')}</div>
+      ${doc('goal', `goal <span class="x">${esc(verify)}</span>`, 'lines like - verify: `pytest -q` are executed by the platform')}</div>
     <div style="margin-top:18px">${box('agents · budget · git <span class="dirty" id="cfg-dirty"></span>', `<div id="ov-cfg">${configForm(M.config)}</div>
       <div class="row" style="margin-top:8px"><span class="hint">Applies from the next turn. Changing the meta-work agent starts a fresh meta-work session (plan and journal carry over).</span>
         <span class="spacer"></span><button class="btn small primary" id="cfg-save">save config</button></div>`)}</div>`;
@@ -481,14 +485,14 @@ function renderHuman(force) {
     const created = (M.files['mission.yaml'].match(/^created:\s*(.+)$/m) || [])[1];
     const obj = { title: M.config.title, ...(created ? { created: created.replace(/^['"]|['"]$/g, '') } : {}), ...readConfigForm($('#ov-cfg')) };
     await api(`/api/missions/${ws}/${mid}/files/mission.yaml`, { method: 'PUT', body: { text: toYaml(obj) } });
-    S.cfgDirty = false; await loadMission(); renderHuman(true);
+    S.cfgDirty = false; await loadMission(); renderConfigTab(true);
   }, 'Configuration saved');
-  $$('[data-edit]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.edit] = true; renderHuman(true); });
-  $$('[data-cancel]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.cancel] = false; renderHuman(true); });
+  $$('[data-edit]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.edit] = true; renderConfigTab(true); });
+  $$('[data-cancel]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.cancel] = false; renderConfigTab(true); });
   $$('[data-save-doc]', el).forEach(b => b.onclick = () => act(async () => {
     const name = b.dataset.saveDoc, { ws, mid } = S.route;
     await api(`/api/missions/${ws}/${mid}/files/${name}.md`, { method: 'PUT', body: { text: $(`[data-doc="${name}"]`, el).value } });
-    S.edit[name] = false; await loadMission(); renderHuman(true);
+    S.edit[name] = false; await loadMission(); renderConfigTab(true);
   }, `${b.dataset.saveDoc}.md saved`));
 }
 
@@ -620,7 +624,7 @@ async function loadChatMessages() {
     : `<div class="fr reply"><div class="fl"><span>◀ meta-chat</span><span class="spacer"></span><button class="btn small" data-save-note="${i}">save as note</button></div>
         <div class="md">${md(m.text)}</div></div>`).join('')
     + (r.busy ? '<div class="fe"><span class="thinking">thinking</span></div>' : '')
-    || '<div class="empty">Ask anything, e.g. what is blocking the DoD right now?</div>';
+    || '<div class="empty">Ask anything, e.g. what is blocking the goal right now?</div>';
   feed.scrollTop = feed.scrollHeight;
   $('#chat-live').textContent = r.busy ? S.chat.live : '';
   setComposer(!r.busy);
@@ -856,8 +860,6 @@ function handle(evt) {
   switch (evt.type) {
     case 'infra':
       S.infra = evt.data; S.history.push(evt.data); if (S.history.length > 600) S.history.shift();
-      $('#mini-cpu').style.setProperty('--v', evt.data.cpu_pct + '%');
-      $('#mini-ram').style.setProperty('--v', evt.data.ram_pct + '%');
       $('#nav-infra').title = `CPU ${evt.data.cpu_pct.toFixed(0)}% · RAM ${evt.data.ram_pct}%`;
       if (r.view === 'infra') renderInfra();
       break;

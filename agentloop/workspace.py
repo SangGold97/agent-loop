@@ -17,8 +17,8 @@ from .config import MISSION_KEYS, PYTHON, TEMPLATES, workspace_config, workspace
 from .guard import PROTECTED_RE
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
-HUMAN_FILES = {"spec.md", "dod.md", "mission.yaml"}
-MISSION_FILES = ("spec.md", "dod.md", "plan.md", "journal.md", "notes.md", "report.md", "mission.yaml")
+HUMAN_FILES = {"spec.md", "goal.md", "mission.yaml"}
+MISSION_FILES = ("spec.md", "goal.md", "plan.md", "journal.md", "notes.md", "report.md", "mission.yaml")
 _locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 PRE_COMMIT = """#!/bin/sh
@@ -142,7 +142,7 @@ def create_workspace(name: str, repo: str | None = None, base_branch: str | None
     return ws
 
 
-def create_mission(ws: Path, title: str, spec: str, dod: str, config: dict | None = None) -> str:
+def create_mission(ws: Path, title: str, spec: str, goal: str, config: dict | None = None) -> str:
     title = (title or "").strip()
     if not title:
         raise ValueError("mission title is required")
@@ -154,7 +154,7 @@ def create_mission(ws: Path, title: str, spec: str, dod: str, config: dict | Non
     shutil.copytree(TEMPLATES / "mission", mdir)
     (mdir / "runs").mkdir()
     (mdir / "spec.md").write_text(spec.strip() + "\n" if spec.strip() else (mdir / "spec.md").read_text())
-    (mdir / "dod.md").write_text(dod.strip() + "\n" if dod.strip() else (mdir / "dod.md").read_text())
+    (mdir / "goal.md").write_text(goal.strip() + "\n" if goal.strip() else (mdir / "goal.md").read_text())
     defaults = workspace_config(ws)["defaults"]
     doc = {"title": title, "created": time.strftime("%Y-%m-%d %H:%M")}
     for key in MISSION_KEYS:

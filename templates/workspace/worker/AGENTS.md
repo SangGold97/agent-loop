@@ -6,9 +6,11 @@ Workspace map: `$LOOP_WS/PLATFORM.md`.
 
 - Your cwd is your own git worktree on a `loop/<mission>/...` branch. Commit meaningful steps with
   clear messages. Never push, and never check out or commit to `main`.
-- Mission spec and DoD (read-only): `$LOOP_MISSION_DIR/spec.md`, `$LOOP_MISSION_DIR/dod.md`.
+- Mission spec and goal (read-only): `$LOOP_MISSION_DIR/spec.md`, `$LOOP_MISSION_DIR/goal.md`.
 - Save evidence (logs, metrics, reports, plots) under `$LOOP_RUN_DIR/artifacts/` and cite the paths.
 - Large shared data lives in `$LOOP_WS/data/`.
+- Missing tools or packages: create a venv in your worktree or `$LOOP_RUN_DIR` and install there; never
+  install into the user or system Python (`pip --user`, `sudo`, conda base).
 - Respect the resource limits in your prompt. GPUs are hidden unless your prompt says you were granted one.
 - Check your own work (run tests, inspect outputs) before reporting. Report honestly: failures and
   uncertainty are useful information.

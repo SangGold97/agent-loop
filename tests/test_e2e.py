@@ -22,7 +22,7 @@ def test_full_mission(server):
     assert (ws / "meta/.claude/skills").is_symlink() and "{{PY}}" not in (ws / "meta/hooks.json").read_text()
 
     r = client.post("/api/workspaces/demo/missions", json={
-        "title": "Hello world", "spec": "Create hello.py", "dod": "- hello.py exists\n- verify: `test -f hello.py`",
+        "title": "Hello world", "spec": "Create hello.py", "goal": "- hello.py exists\n- verify: `test -f hello.py`",
         "config": mission_config()})
     mid = r.json()["id"]
     assert client.post(f"/api/missions/demo/{mid}/start").json() == {"ok": True}
@@ -40,8 +40,8 @@ def test_full_mission(server):
     authors = subprocess.run(["git", "log", "--format=%an"], cwd=ws, capture_output=True, text=True).stdout
     assert "control-plane" in authors and "meta-work(" in authors
 
-    # Human edits of DoD are committed as human; agents cannot touch it
-    client.put(f"/api/missions/demo/{mid}/files/dod.md", json={"text": "- hello.py exists\n"})
+    # Human edits of goal are committed as human; agents cannot touch it
+    client.put(f"/api/missions/demo/{mid}/files/goal.md", json={"text": "- hello.py exists\n"})
     assert subprocess.run(["git", "log", "-1", "--format=%an"], cwd=ws, capture_output=True,
                           text=True).stdout.strip() == "human"
 
@@ -75,7 +75,7 @@ def test_budget_final_turn(server):
     cfg = mission_config()
     cfg["budget"]["max_meta_turns"] = 1
     mid = client.post("/api/workspaces/budget/missions", json={
-        "title": "Tight budget", "spec": "x", "dod": "- verify: `test -f nope.txt`", "config": cfg}).json()["id"]
+        "title": "Tight budget", "spec": "x", "goal": "- verify: `test -f nope.txt`", "config": cfg}).json()["id"]
     client.post(f"/api/missions/budget/{mid}/start")
     view = wait_for(lambda: (v := client.get(f"/api/missions/budget/{mid}").json())["row"]["status"]
                     == "awaiting_review" and v)
@@ -114,7 +114,7 @@ def test_worker_platform_failure_reaches_meta_work(server, monkeypatch):
 
     monkeypatch.setattr("agentloop.engine.gitops.diff", broken_diff)
     mid = client.post("/api/workspaces/broken/missions", json={
-        "title": "Broken git", "spec": "x", "dod": "- x", "config": mission_config()}).json()["id"]
+        "title": "Broken git", "spec": "x", "goal": "- x", "config": mission_config()}).json()["id"]
     client.post(f"/api/missions/broken/{mid}/start")
     wait_for(lambda: engine.db.one("SELECT id FROM inbox WHERE ws='broken' AND kind='worker_done' "
                                    "AND payload LIKE '%failed inside the platform%'"))
@@ -164,7 +164,7 @@ def test_fixed_agent_settings(server):
     client.post("/api/workspaces", json={"name": "fixed"})
     cfg = mission_config()
     mid = client.post("/api/workspaces/fixed/missions", json={
-        "title": "Fixed", "spec": "x", "dod": "- x", "config": cfg}).json()["id"]
+        "title": "Fixed", "spec": "x", "goal": "- x", "config": cfg}).json()["id"]
     client.post(f"/api/missions/fixed/{mid}/start")
     worker = wait_for(lambda: next((s for s in client.get(f"/api/missions/fixed/{mid}").json()["sessions"]
                                     if s["kind"] == "worker"), None))

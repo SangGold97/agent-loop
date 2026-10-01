@@ -110,7 +110,7 @@ def create_app(api_url: str) -> FastAPI:
         if errors:
             raise AgentError("; ".join(errors))
         mid = workspace.create_mission(workspace.ws_path(ws), b.get("title", ""), b.get("spec", ""),
-                                       b.get("dod", ""), config)
+                                       b.get("goal", ""), config)
         engine.mission_row(ws, mid)
         return {"id": mid}
 
@@ -129,7 +129,7 @@ def create_app(api_url: str) -> FastAPI:
                 "budget": engine.budget(ws, mid), "checklist": {"done": done, "total": total},
                 "sessions": sessions,
                 "notes": engine.db.q("SELECT * FROM notes WHERE ws=? AND mission=? ORDER BY id DESC", ws, mid),
-                "verify": digest.verify_commands(files["dod.md"]), "meta_active": (ws, mid) in engine.meta_active}
+                "verify": digest.verify_commands(files["goal.md"]), "meta_active": (ws, mid) in engine.meta_active}
 
     @app.put("/api/missions/{ws}/{mid}/files/{name}")
     async def put_file(ws: str, mid: str, name: str, req: Request):

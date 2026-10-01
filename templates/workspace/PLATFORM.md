@@ -8,7 +8,7 @@ This workspace is run by agent-loop. The workspace root is `$LOOP_WS`; paths bel
 | `meta/` | Meta-agent harness: `AGENTS.md`, `skills/`, `memory/`, `docs/` | human; meta may improve memory/docs/skills |
 | `worker/` | Worker harness: `AGENTS.md`, `skills/`, `memory/`, `docs/`, `claude-plugin/` | human; meta may improve memory/docs/skills |
 | `*/hooks.json` | Guard hooks (Claude Code and Codex share the format) | human only |
-| `missions/<id>/spec.md`, `dod.md`, `mission.yaml` | Goal, Definition of Done, mission config | human only |
+| `missions/<id>/spec.md`, `goal.md`, `mission.yaml` | Context and requirements, goal, mission config | human only |
 | `missions/<id>/plan.md` | Current strategy and checklist | meta-work |
 | `missions/<id>/journal.md` | Append-only decision log | meta-work |
 | `missions/<id>/notes.md` | Human guidance for the meta-work | platform (from the human) |

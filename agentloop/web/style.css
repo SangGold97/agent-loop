@@ -45,12 +45,11 @@ h3 { font-size: 13px; }
 .dot { width: 7px; height: 7px; flex: none; background: var(--faint); }
 .dot.running { background: var(--run); } .dot.awaiting_review { background: var(--warn); } .dot.done { background: var(--ok); }
 .dot.paused, .dot.stopped { background: var(--bad); }
-.side-foot { border-top: 1px solid var(--border); padding: 6px; }
-.nav-link { display: flex; justify-content: space-between; padding: 4px 8px; color: var(--muted); }
-.nav-link.active { background: var(--panel-2); color: var(--fg); }
-.mini-meters { display: flex; gap: 3px; align-items: center; }
-.mini-meters i { display: block; width: 36px; height: 5px; background: linear-gradient(90deg, var(--accent) var(--v, 0%), var(--border) var(--v, 0%)); }
-.conn { display: block; margin: 4px 8px; width: 7px; height: 7px; background: var(--bad); }
+.side-foot { border-top: 1px solid var(--border); padding: 8px; display: flex; gap: 6px; align-items: center; }
+.side-btn { flex: 1; text-align: center; color: var(--muted); }
+.side-btn:hover { text-decoration: none; }
+.side-btn.active { border-color: var(--accent); color: var(--accent); }
+.conn { display: block; width: 7px; height: 7px; flex: none; background: var(--bad); }
 .conn.on { background: var(--ok); }
 .main { overflow: auto; min-width: 0; }
 .page { padding: 16px 22px 40px; max-width: 1500px; }

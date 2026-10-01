@@ -60,8 +60,8 @@ def test_claude_parse_result():
 
 
 def test_verify_and_checklist():
-    dod = "- tests pass\n- verify: `make test`\nverify: python -c 'print(1)'\n"
-    assert digest.verify_commands(dod) == ["make test", "python -c 'print(1)'"]
+    goal = "- tests pass\n- verify: `make test`\nverify: python -c 'print(1)'\n"
+    assert digest.verify_commands(goal) == ["make test", "python -c 'print(1)'"]
     assert digest.checklist("- [x] a\n- [ ] b\n* [X] c") == (2, 3)
 
 
@@ -82,7 +82,7 @@ def test_guard_rules(tmp_path):
     ev = lambda tool, **inp: {"tool_name": tool, "tool_input": inp, "cwd": str(tmp_path / "wt/w-1")}
     assert guard.check(ev("Bash", command="git push origin main"), w)
     assert guard.check(ev("Bash", command="aws s3 ls --profile prod"), w)
-    assert guard.check(ev("Bash", command="echo x > $LOOP_MISSION_DIR/dod.md"), w)
+    assert guard.check(ev("Bash", command="echo x > $LOOP_MISSION_DIR/goal.md"), w)
     assert guard.check(ev("Write", file_path=str(tmp_path / "missions/m1/spec.md")), w)
     assert guard.check(ev("Write", file_path=str(tmp_path / "meta/AGENTS.md")), w)
     assert guard.check(ev("Bash", command="rm -rf /"), w)
@@ -93,7 +93,7 @@ def test_guard_rules(tmp_path):
     assert guard.check(ev("Edit", file_path=str(tmp_path / "repo/app.py")), m)
     assert guard.check(ev("Bash", command="git -C ../repo commit -am x"), m)
     assert not guard.check(ev("Write", file_path=str(tmp_path / "missions/m1/plan.md")), m)
-    patch = "*** Begin Patch\n*** Update File: " + str(tmp_path / "missions/m1/dod.md") + "\n@@\n*** End Patch"
+    patch = "*** Begin Patch\n*** Update File: " + str(tmp_path / "missions/m1/goal.md") + "\n@@\n*** End Patch"
     assert guard.check(ev("apply_patch", command=patch), w)
     assert guard.check(ev("Bash", command="ls"), {}) is None
 
@@ -102,12 +102,12 @@ def test_guard_ignores_prompt_text(tmp_path):
     (tmp_path / "wt/w-1").mkdir(parents=True)
     m = guard_env(tmp_path, "meta-work")
     ev = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path)}
-    spawn = "loop spawn --role coder <<'EOF'\nImplement X, git commit your work, never git push.\nRead $LOOP_MISSION_DIR/dod.md > notes\nEOF"
+    spawn = "loop spawn --role coder <<'EOF'\nImplement X, git commit your work, never git push.\nRead $LOOP_MISSION_DIR/goal.md > notes\nEOF"
     assert guard.check(ev(spawn), m) is None
     assert guard.check(ev('loop note "please git commit more often"'), m) is None
     assert guard.check(ev("cd ../repo && git commit -m 'x'"), m)
     assert guard.check(ev("git push origin HEAD"), guard_env(tmp_path, "worker"))
-    assert guard.check(ev("cat <<EOF > $LOOP_MISSION_DIR/dod.md\nx\nEOF"), m)
+    assert guard.check(ev("cat <<EOF > $LOOP_MISSION_DIR/goal.md\nx\nEOF"), m)
 
 
 def test_guard_rm_edge_cases(tmp_path):
@@ -162,3 +162,15 @@ def test_slug_transliterates():
     from agentloop.gitops import slug
     assert slug("Lọc từ theo số lần xuất hiện", 40) == "loc-tu-theo-so-lan-xuat-hien"
     assert slug("Đường dẫn") == "duong-dan" and slug("!!!") == "w"
+
+
+def test_guard_blocks_global_installs(tmp_path):
+    (tmp_path / "wt/w-1").mkdir(parents=True)
+    w = guard_env(tmp_path, "worker")
+    ev = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path / "wt/w-1")}
+    assert guard.check(ev("python -m pip install --user pytest==8.4.2"), w)
+    assert guard.check(ev("pip install --break-system-packages x"), w)
+    assert guard.check(ev("sudo apt install jq"), w)
+    assert guard.check(ev("conda install numpy"), w)
+    assert not guard.check(ev("python -m venv .venv && .venv/bin/pip install pytest"), w)
+    assert not guard.check(ev("conda install -p ./env numpy"), w)

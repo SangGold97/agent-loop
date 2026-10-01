@@ -13,11 +13,14 @@ import sys
 from pathlib import Path
 
 PROTECTED_RE = re.compile(
-    r"^(missions/[^/]+/(spec\.md|dod\.md|mission\.yaml)|loop\.yaml|(meta|worker)/hooks\.json)$")
+    r"^(missions/[^/]+/(spec\.md|goal\.md|mission\.yaml)|loop\.yaml|(meta|worker)/hooks\.json)$")
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "shell", "exec_command", "local_shell"}
 WRITE_OPS = r"(>|\btee\b|\bsed\s+-i|\bmv\b|\brm\b|\bcp\b|\btruncate\b|\bchmod\b|\bln\b)"
-PROTECTED_IN_CMD = r"(missions/\S*(spec|dod)\.md|mission\.yaml|LOOP_MISSION_DIR\S*(spec|dod)\.md|hooks\.json|loop\.yaml)"
+PROTECTED_IN_CMD = r"(missions/\S*(spec|goal)\.md|mission\.yaml|LOOP_MISSION_DIR\S*(spec|goal)\.md|hooks\.json|loop\.yaml)"
+# Package installs that change the human's own Python instead of a project venv
+GLOBAL_INSTALL = re.compile(r"\bsudo\b|\bpip3?\b[^|;&\n]*\binstall\b[^|;&\n]*(--user|--break-system-packages)\b"
+                            r"|\bconda\s+install\b(?![^|;&\n]*(-p|--prefix)\s)")
 META_GIT_WRITES = re.compile(r"\bgit\b[^|;&\n]*\b(commit|merge|rebase|reset|cherry-pick|am|revert|stash|worktree|branch\s+-[dDmM])\b")
 
 
@@ -82,7 +85,10 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
     if re.search(r"\bgit\b[^|;&\n]*\bpush\b", bare):
         return "agents never push; the human (or the mission push policy) handles remotes"
     if re.search(WRITE_OPS, code) and re.search(PROTECTED_IN_CMD, code):
-        return "this command would modify a human-owned file (spec/dod/mission.yaml/loop.yaml/hooks.json)"
+        return "this command would modify a human-owned file (spec/goal/mission.yaml/loop.yaml/hooks.json)"
+    if GLOBAL_INSTALL.search(bare):
+        return ("do not install into the user or system Python; create a venv in your worktree or "
+                "$LOOP_RUN_DIR (python -m venv .venv) and install there")
     if env.get("LOOP_ROLE") in ("meta-work", "meta-chat") and META_GIT_WRITES.search(bare):
         return "meta-agents do not change git state; use `loop merge` or delegate to a worker"
     cmd = code
