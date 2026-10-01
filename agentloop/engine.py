@@ -251,18 +251,18 @@ class Engine:
 
     # ---------- running one turn of any session ----------
     @staticmethod
-    def language_rule(lang: str, meta: bool) -> str:
+    def language_rule(lang: str) -> str:
+        """Meta-only rule: human-facing text in the mission language, agent-to-agent text in English."""
         if not lang or lang.lower() == "english":
             return ""
-        scope = ("plan.md, journal.md, notes, reports, chat replies and the prompts you write for workers"
-                 if meta else "your messages and your final report")
-        return (f" LANGUAGE: the human reads {lang}. Write {scope} in {lang}; keep code, identifiers, commands "
-                "and commit messages in the project's usual language.")
+        return (f" LANGUAGE: the human reads {lang}. Write plan.md, journal.md, notes, reports and chat replies "
+                f"in {lang}. Write worker prompts in English (workers report in English); keep code, identifiers, "
+                "commands and commit messages in the project's usual language.")
 
     def mode_text(self, sess: dict) -> str:
         ws, mid = sess["ws"], sess["mission"]
         p, mdir = self.wsp(ws), self.mdir(ws, mid)
-        lang = self.language_rule(mission_config(p, mid)["mission"].get("language"), meta=True)
+        lang = self.language_rule(mission_config(p, mid)["mission"].get("language"))
         if sess["kind"] == "meta-work":
             return (f"MODE: META-WORK for mission {mid} in workspace {ws}. Mission dir: {mdir}. "
                     f"Workspace root: {p}. Follow the META-WORK section of your AGENTS.md.{lang}")
@@ -689,8 +689,7 @@ class Engine:
         digest.write_text(rd / f"t{n}.prompt.md", prompt)
         header = (f"[agent-loop] mission {mid} · role {sess['role']} · worktree {wt} (branch {sess['branch']}) · "
                   f"run dir {rd} · memory limit {cfg['infra']['worker_memory_max_gb']} GB · GPU "
-                  f"{'granted' if sess['gpu'] else 'not granted'}"
-                  + self.language_rule(cfg["mission"].get("language"), meta=False))
+                  f"{'granted' if sess['gpu'] else 'not granted'}")
         start = gitops.head(wt)
         res, n = await self.run_turn(sess, f"{header}\n\n{prompt}", start_commit=start)
         try:
