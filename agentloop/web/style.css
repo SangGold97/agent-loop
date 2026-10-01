@@ -188,6 +188,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .stream { white-space: pre-wrap; }
 .cursor { display: inline-block; width: 7px; height: 12px; background: var(--reply); vertical-align: text-bottom; margin-left: 1px; animation: blink 1s steps(1) infinite; }
 .modal-feed { display: flex; height: 62vh; margin-top: 10px; }
+.chat-pop { display: flex; flex-direction: column; height: 78vh; }
 .turns summary { cursor: pointer; color: var(--muted); }
 .fr { border: 1px solid; margin: 8px 0; padding: 6px 8px 6px; position: relative; }
 .fr > .fl { font-size: 11px; margin-bottom: 2px; display: flex; gap: 8px; }

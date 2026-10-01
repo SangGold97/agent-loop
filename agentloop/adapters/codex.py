@@ -65,7 +65,8 @@ class CodexAdapter(Adapter):
                 out.append({"type": "error", "text": short(item.get("message", ""), 400)})
         elif kind == "turn.completed":
             u = o.get("usage") or {}
-            st.tokens += (u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)
+            # Same figure as the CLI's "tokens used": cached input is not counted
+            st.tokens += (u.get("input_tokens") or 0) - (u.get("cached_input_tokens") or 0) + (u.get("output_tokens") or 0)
             st.context = u.get("input_tokens") or st.context
             out.append({"type": "usage", "context": st.context})
         elif kind == "turn.failed":

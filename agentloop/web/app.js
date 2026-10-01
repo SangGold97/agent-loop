@@ -3,7 +3,7 @@
 
 const S = { workspaces: [], route: {}, goal: null, feeds: {}, infra: null, history: [], agents: null, models: {},
   chat: { sid: null, messages: [], busy: false, liveEvs: [], creating: false }, edit: {}, cfgDirty: false,
-  partial: {}, modal: null, open: {} };
+  partial: {}, modal: null, open: {}, chatOut: false };
 const main = document.getElementById('main');
 const AGENTS = ['claude', 'codex'];
 const FEED_TYPES = ['turn', 'text', 'tool', 'tool_result', 'thinking', 'turn_end', 'error'];
@@ -49,7 +49,16 @@ function modal(html, wide = false) {
   $$('[data-close]', root).forEach(b => b.onclick = closeModal);
   return $('.modal', root);
 }
-function closeModal() { $('#modal-root').innerHTML = ''; S.modal = null; }
+function closeModal() {
+  // An expanded meta-chat goes back to its overview pane before the window is cleared
+  if (S.chatOut) {
+    const box = $('#ov-chat'), pop = $('#chat-pop');
+    if (box && pop) [...pop.children].forEach(c => box.appendChild(c));
+    S.chatOut = false;
+    renderChatBar(); if ($('#chat-feed')) stick($('#chat-feed'));
+  }
+  $('#modal-root').innerHTML = ''; S.modal = null;
+}
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 function pill(status, text) { return `<span class="pill ${esc(status)}">${esc(label(text || status))}</span>`; }
 function meter(used, max, progress = false) {
@@ -412,6 +421,7 @@ async function refreshGoal(force) {
 
 // ---------- overview: stats + infra, then META-AGENTS (left) and WORKER-AGENTS (right) ----------
 function renderOverview() {
+  if (S.chatOut) closeModal();
   $('#m-tab').innerHTML = `<div class="ov-top"><div id="ov-stats" class="stats"></div><div class="box infra-box" id="ov-infra"></div></div>
     <div class="ov-main" id="ov-main">
       <div class="layer col"><div class="lt">meta-agents</div>
@@ -561,6 +571,8 @@ function feedSource(key) {
 }
 const liveKeys = () => ['meta-work', ...S.goal.sessions.filter(s => s.kind === 'worker').map(s => s.id), ...(S.modal ? ['modal'] : [])];
 const stick = el => { if (!el.dataset.free) el.scrollTop = el.scrollHeight; };
+// Long prompts scroll inside their frame; show their last lines first
+const bottomPrompts = root => $$('.fr.prompt pre', root).forEach(p => { if (!p.dataset.read) p.scrollTop = p.scrollHeight; });
 // Coalesce bursts of streamed events into one paint per frame
 const queued = new Map();
 function schedule(kind, key, fn) {
@@ -581,6 +593,7 @@ function renderFeed(key) {
   }
   const html = evs.slice(from).map(e => tuiEvent(e, who)).join('');
   if (html) { $('.empty', fs)?.remove(); fs.insertAdjacentHTML('beforeend', html); }
+  bottomPrompts(fs);
   while (fs.childElementCount > FEED_TAIL) fs.firstElementChild.remove();
   if (!fs.childElementCount) fs.innerHTML = '<div class="empty">no activity yet</div>';
   el.dataset.n = evs.length;
@@ -602,6 +615,7 @@ function renderLive(key) {
 // Scrolling up pauses following; the button (or scrolling back down) resumes it
 document.addEventListener('scroll', e => {
   const el = e.target;
+  if (el.matches?.('.fr.prompt pre')) { el.dataset.read = el.scrollHeight - el.scrollTop - el.clientHeight > 4 ? '1' : ''; return; }
   if (!el.classList?.contains('feed')) return;
   const free = el.scrollHeight - el.scrollTop - el.clientHeight > 40;
   el.dataset.free = free ? '1' : '';
@@ -633,8 +647,8 @@ function renderMetaWorkHead() {
   if (!cur) { el.innerHTML = `<span class="muted">${agentLine({ agent: S.goal.config.meta_work.agent, ...S.goal.config.meta_work })}</span>`; return; }
   const tokens = sessions.reduce((a, s) => a + (s.tokens || 0), 0);
   el.innerHTML = `<span class="muted">${agentLine(cur, tokens)}</span>
-    <span class="spacer"></span>${pill(simpleStatus(cur))}<a href="#" data-log="${cur.id}" class="small">log</a>`;
-  $('[data-log]', el).onclick = e => { e.preventDefault(); sessionModal(cur.id); };
+    <span class="spacer"></span>${pill(simpleStatus(cur))}<button class="btn small" data-log="${cur.id}">expand</button>`;
+  $('[data-log]', el).onclick = () => sessionModal(cur.id);
 }
 
 // META-CHAT: chats bound to this goal; agent/model/effort chosen per chat
@@ -661,7 +675,9 @@ function renderChatBar() {
   const cur = chats.find(c => c.id === S.chat.sid);
   bar.innerHTML = `<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
       chat ${i + 1} · ${agentLine(c, c.tokens)}</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
-    ${cur ? pill(simpleStatus(cur)) : ''}<button class="btn small" id="chat-new-btn">+ new chat</button>`;
+    ${cur ? pill(simpleStatus(cur)) : ''}<button class="btn small" id="chat-new-btn">+ new chat</button>
+    <button class="btn small" id="chat-expand">${S.chatOut ? 'collapse' : 'expand'}</button>`;
+  $('#chat-expand').onclick = () => S.chatOut ? closeModal() : expandChat();
   $('#chat-sel').onchange = e => { S.chat.sid = e.target.value; S.chat.liveEvs = []; loadChatMessages(); };
   $('#chat-new-btn').onclick = () => { S.chat.creating = !S.chat.creating; renderNewChat(); };
   renderNewChat();
@@ -682,6 +698,15 @@ function renderNewChat() {
     await loadGoal(); renderChatBar(); await loadChatMessages();
   }, 'Meta-chat created');
 }
+// META-CHAT expand: the chat pane itself (feed, live turn, composer) moves into a large window
+function expandChat() {
+  const box = $('#ov-chat');
+  if (!box || S.chatOut) return;
+  const m = modal('<div class="modal-head"><h2>meta-chat</h2><button class="icon-btn" data-close>×</button></div><div class="chat-pop" id="chat-pop"></div>', true);
+  [...box.children].filter(c => !c.classList.contains('lt')).forEach(c => $('#chat-pop', m).appendChild(c));
+  S.chatOut = true;
+  renderChatBar(); stick($('#chat-feed')); $('#chat-input')?.focus();
+}
 async function loadChatMessages() {
   const feed = $('#chat-feed');
   if (!feed) return;
@@ -695,6 +720,7 @@ async function loadChatMessages() {
         <div class="md">${md(m.text)}</div></div>`).join('')
     || '<div class="empty">Ask anything, e.g. what is blocking the goal right now?</div>') + '<div id="chat-live"></div>';
   feed.dataset.free = '';
+  bottomPrompts(feed);
   paintChatLive();
   setComposer(!r.busy);
 }
@@ -741,7 +767,7 @@ function workerHead(w) {
   const st = simpleStatus(w);
   return `<span class="fold">${workerOpen(w) ? '▾' : '▸'}</span><span class="role">${esc(w.role)}</span><span class="faint">·</span><span class="wlabel">${esc(w.label)}</span>${pill(st)}
     <span class="spacer"></span><span class="faint">${agentLine(w, w.tokens)}</span>
-    <a href="#" data-log="${w.id}">log</a>${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}`;
+    <button class="btn small" data-log="${w.id}">expand</button>${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}`;
 }
 function renderWorkers() {
   const el = $('#ov-workers');
@@ -757,7 +783,7 @@ function renderWorkers() {
       || '<div class="empty">No workers yet. The meta-work spawns them as it needs them.</div>';
     el.onclick = e => {
       const log = e.target.closest('[data-log]'), stop = e.target.closest('[data-stop]'), head = e.target.closest('.wh');
-      if (log) { e.preventDefault(); sessionModal(log.dataset.log); }
+      if (log) sessionModal(log.dataset.log);
       else if (stop) act(() => api(`/api/sessions/${stop.dataset.stop}/stop`, { body: {} }), 'Stop requested');
       else if (head) toggleWorker(head.parentElement.id.slice(2));
     };
@@ -768,7 +794,7 @@ function renderWorkers() {
     const row = $(`#w-${w.id}`), was = row.classList.contains('open');
     row.className = workerClass(w);
     $('.wh', row).innerHTML = workerHead(w);
-    if (!was && workerOpen(w)) renderLive(w.id);  // just opened: jump to the live end
+    if (!was && workerOpen(w)) { renderLive(w.id); bottomPrompts(row); }  // just opened: jump to the live end
   });
 }
 function workerClass(w) {

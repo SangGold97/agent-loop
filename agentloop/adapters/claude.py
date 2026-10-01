@@ -81,8 +81,8 @@ class ClaudeAdapter(Adapter):
             st.final = o.get("result") if o.get("result") is not None else st.last_text
             st.cost = float(o.get("total_cost_usd") or 0)
             u = o.get("usage") or {}
-            st.tokens = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens",
-                                                     "cache_read_input_tokens", "output_tokens"))
+            # Like Codex's "tokens used": everything except input served from the prompt cache
+            st.tokens = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "output_tokens"))
             st.is_error = bool(o.get("is_error")) or o.get("subtype") not in (None, "success")
             if st.is_error:
                 st.error = str(o.get("subtype") or "error")

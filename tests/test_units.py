@@ -43,9 +43,9 @@ def test_codex_parse_stream():
              {"type": "item.started", "item": {"type": "command_execution", "command": "ls"}},
              {"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": "a", "exit_code": 0}},
              {"type": "item.completed", "item": {"type": "agent_message", "text": "DONE"}},
-             {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 5}}]
+             {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 5}}]
     events = [e for obj in lines for e in ad.parse(obj, st)]
-    assert st.vendor_id == "T" and st.last_text == "DONE" and st.tokens == 105
+    assert st.vendor_id == "T" and st.last_text == "DONE" and st.tokens == 45
     assert [e["type"] for e in events] == ["init", "tool", "tool_result", "text", "usage"]
 
 
@@ -61,8 +61,8 @@ def test_claude_parse_result():
     ad.parse({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash",
                                                               "input": {"command": "ls"}}]}}, st)
     ad.parse({"type": "result", "subtype": "success", "result": "ok", "session_id": "S", "total_cost_usd": 0.5,
-              "usage": {"input_tokens": 1, "output_tokens": 2}}, st)
-    assert (st.vendor_id, st.final, st.cost, st.tokens, st.is_error) == ("S", "ok", 0.5, 3, False)
+              "usage": {"input_tokens": 1, "cache_creation_input_tokens": 4, "cache_read_input_tokens": 90, "output_tokens": 2}}, st)
+    assert (st.vendor_id, st.final, st.cost, st.tokens, st.is_error) == ("S", "ok", 0.5, 7, False)
 
 
 
