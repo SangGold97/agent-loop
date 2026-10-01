@@ -269,7 +269,7 @@ class Engine:
         orch = self.goal_row(ws, gid)["meta_work"] or "not started"
         return (f"MODE: META-CHAT for goal {gid} in workspace {ws}. Goal dir: {gdir}. Workspace root: {p}. "
                 f"Meta-work session: {orch}. Follow the META-CHAT section of your AGENTS.md; "
-                f"you cannot dispatch workers.{lang}")
+                f"worker coordination belongs to the meta-work, steer it with `loop note`.{lang}")
 
     def session_conf(self, sess: dict) -> dict:
         """Agent settings for the next turn: fixed by the human config for meta-work and workers,
@@ -309,7 +309,6 @@ class Engine:
             spec.system_text = self.mode_text(sess)
             if sess["agent"] == "codex":
                 spec.codex_home = workspace.codex_home(p, "meta")
-                spec.add_dirs = [gdir, p / "worker"]
             else:
                 spec.settings_file, spec.add_dirs = p / "meta" / "hooks.json", [p]
         if sess["agent"] == "codex":
@@ -362,9 +361,9 @@ class Engine:
         agents = "\n".join(f"  - `--agent {a}`: {c.get('model') or 'default model'} / effort {c.get('effort') or 'default'}"
                            for a, c in mc["workers"].items() if c.get("enabled", True))
         return (f"[Kickoff] Goal \"{mc['title']}\" ({gid}) in workspace {ws}.\n"
-                f"- Goal dir: {gdir}. Read spec.md and goal.md first (read-only for you). "
+                f"- Goal dir: {gdir}. Read spec.md and goal.md first (human-owned, do not edit). "
                 "You own plan.md and journal.md there.\n"
-                f"- Project repo (read-only for you): {p / 'repo'}. Integration branch {gitops.int_branch(gid)} is checked out "
+                f"- Project repo: {p / 'repo'} (its base branch is protected; work lands via the integration branch). Integration branch {gitops.int_branch(gid)} is checked out "
                 f"at {p / 'wt' / ('_int-' + gid)}.\n"
                 f"- Worker agents (the human fixed model and effort; you pick the CLI and name the role):\n{agents}\n"
                 f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.\n"

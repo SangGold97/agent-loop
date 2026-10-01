@@ -30,11 +30,11 @@ def test_claude_argv_worker(tmp_path):
 
 def test_codex_argv_meta_resume(tmp_path):
     s = RunSpec(agent="codex", kind="meta", cwd=tmp_path, prompt="x", model="m", effort="max", resume_id="t1",
-                add_dirs=[tmp_path / "goal"], system_text="MODE", last_message_file=tmp_path / "l.txt")
+                system_text="MODE", last_message_file=tmp_path / "l.txt")
     a = CodexAdapter().argv(s)
     assert a[:4] == ["codex", "exec", "resume", "t1"] and a[-1] == "-"
     assert 'model_reasoning_effort="max"' in a and "-C" not in a
-    assert any("writable_roots" in x for x in a) and "--dangerously-bypass-approvals-and-sandbox" not in a
+    assert "--dangerously-bypass-approvals-and-sandbox" in a and not any("sandbox_mode" in x for x in a)
 
 
 def test_codex_parse_stream():
@@ -95,8 +95,11 @@ def test_guard_rules(tmp_path):
     assert not guard.check(ev("Write", file_path="hello.py"), w)
     assert not guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/runs/w-1/artifacts/a.txt")), w)
     assert not guard.check(ev("Bash", command="rm -rf build && pytest -q"), w)
-    assert guard.check(ev("Edit", file_path=str(tmp_path / "repo/app.py")), m)
-    assert guard.check(ev("Bash", command="git -C ../repo commit -am x"), m)
+    # Meta-agents may change code and git state; push and human-owned files stay blocked
+    assert not guard.check(ev("Edit", file_path=str(tmp_path / "repo/app.py")), m)
+    assert not guard.check(ev("Bash", command="git -C ../repo commit -am x"), m)
+    assert guard.check(ev("Bash", command="git push"), m)
+    assert guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/goal.md")), m)
     assert not guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/plan.md")), m)
     patch = "*** Begin Patch\n*** Update File: " + str(tmp_path / "goals/m1/goal.md") + "\n@@\n*** End Patch"
     assert guard.check(ev("apply_patch", command=patch), w)
@@ -110,7 +113,7 @@ def test_guard_ignores_prompt_text(tmp_path):
     spawn = "loop spawn --role coder <<'EOF'\nImplement X, git commit your work, never git push.\nRead $LOOP_GOAL_DIR/goal.md > notes\nEOF"
     assert guard.check(ev(spawn), m) is None
     assert guard.check(ev('loop note "please git commit more often"'), m) is None
-    assert guard.check(ev("cd ../repo && git commit -m 'x'"), m)
+    assert guard.check(ev("cd ../repo && git push"), m)
     assert guard.check(ev("git push origin HEAD"), guard_env(tmp_path, "worker"))
     assert guard.check(ev("cat <<EOF > $LOOP_GOAL_DIR/goal.md\nx\nEOF"), m)
 

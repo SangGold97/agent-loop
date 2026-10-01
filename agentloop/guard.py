@@ -1,7 +1,7 @@
 """PreToolUse guard shared by Claude Code and Codex (same hook protocol): exit code 2 blocks a call.
 
-Guards against mistakes, not adversaries: agents never push, never touch human-owned files,
-meta-agents stay read-only on project code, and workers stay inside their own worktree.
+Guards against mistakes, not adversaries: agents never push, never touch human-owned files or
+the user's Python, and workers stay inside their own worktree.
 """
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ PROTECTED_IN_CMD = r"(goals/\S*(spec|goal)\.md|goal\.yaml|LOOP_GOAL_DIR\S*(spec|
 # Package installs that change the human's own Python instead of a project venv
 GLOBAL_INSTALL = re.compile(r"\bsudo\b|\bpip3?\b[^|;&\n]*\binstall\b[^|;&\n]*(--user|--break-system-packages)\b"
                             r"|\bconda\s+install\b(?![^|;&\n]*(-p|--prefix)\s)")
-META_GIT_WRITES = re.compile(r"\bgit\b[^|;&\n]*\b(commit|merge|rebase|reset|cherry-pick|am|revert|stash|worktree|branch\s+-[dDmM])\b")
 
 
 def _patch_paths(text: str) -> list[str]:
@@ -45,12 +44,9 @@ def check_path(path: Path, env: dict) -> str | None:
     if not path.is_relative_to(ws):
         return None
     rel = path.relative_to(ws)
-    top = rel.parts[0] if rel.parts else ""
     if PROTECTED_RE.match(rel.as_posix()):
         return f"{rel} is human-owned; propose changes in your journal/report instead"
     role = env.get("LOOP_ROLE")
-    if role in ("meta-work", "meta-chat") and top in ("repo", "wt", "data"):
-        return "meta-agents are read-only on project code; delegate the change to a worker"
     if role == "worker":
         own = [ws / "wt" / env.get("LOOP_SESSION", "?"), ws / "data"]
         if env.get("LOOP_RUN_DIR"):
@@ -89,8 +85,6 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
     if GLOBAL_INSTALL.search(bare):
         return ("do not install into the user or system Python; create a venv in your worktree or "
                 "$LOOP_RUN_DIR (python -m venv .venv) and install there")
-    if env.get("LOOP_ROLE") in ("meta-work", "meta-chat") and META_GIT_WRITES.search(bare):
-        return "meta-agents do not change git state; use `loop merge` or delegate to a worker"
     cmd = code
     for match in re.finditer(r"\brm\s+((?:-\S+\s+)*)(.+?)(?:$|[;&|])", cmd, re.M):
         if "r" not in match.group(1) and "f" not in match.group(1):
