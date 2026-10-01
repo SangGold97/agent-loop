@@ -181,7 +181,7 @@ class Engine:
                 self.publish("infra", data=snap)
             except Exception:
                 log.exception("infra sample failed")
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
 
     async def shutdown(self) -> None:
         for key in list(self.runner.procs):

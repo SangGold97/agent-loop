@@ -106,17 +106,21 @@ class Runner:
         async def read_stdout():
             with raw_log.open("a") as raw, event_log.open("a") as evl:
                 async for line in proc.stdout:
-                    raw.write(line.decode(errors="replace"))
                     try:
                         obj = json.loads(line)
                         events = adapter.parse(obj, st) if isinstance(obj, dict) else []
                     except Exception:  # one odd line must not kill the turn
+                        raw.write(line.decode(errors="replace"))
                         log.warning("unparsed %s line: %.200s", spec.agent, line)
                         continue
+                    # Partial-message deltas are only streamed to the UI; the complete message is logged
+                    if not (isinstance(obj, dict) and obj.get("type") == "stream_event"):
+                        raw.write(line.decode(errors="replace"))
                     for evt in events:
                         evt["ts"] = time.time()
-                        evl.write(json.dumps(evt, ensure_ascii=False) + "\n")
-                        evl.flush()
+                        if evt["type"] != "delta":
+                            evl.write(json.dumps(evt, ensure_ascii=False) + "\n")
+                            evl.flush()
                         await on_event(evt)
 
         # Readers run to EOF even if the CLI exits before reading its prompt, so stderr is complete

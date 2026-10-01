@@ -2,10 +2,11 @@
 /* agent-loop web UI: vanilla JS, hash routing, live updates over SSE. */
 
 const S = { workspaces: [], route: {}, goal: null, feeds: {}, infra: null, history: [], agents: null, models: {},
-  chat: { sid: null, messages: [], busy: false, live: '', creating: false }, edit: {}, cfgDirty: false };
+  chat: { sid: null, messages: [], busy: false, liveEvs: [], creating: false }, edit: {}, cfgDirty: false,
+  partial: {}, modal: null };
 const main = document.getElementById('main');
 const AGENTS = ['claude', 'codex'];
-const FEED_TYPES = ['turn', 'text', 'tool', 'turn_end', 'error'];
+const FEED_TYPES = ['turn', 'text', 'tool', 'tool_result', 'thinking', 'turn_end', 'error'];
 
 // ---------- helpers ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -48,7 +49,7 @@ function modal(html, wide = false) {
   $$('[data-close]', root).forEach(b => b.onclick = closeModal);
   return $('.modal', root);
 }
-function closeModal() { $('#modal-root').innerHTML = ''; }
+function closeModal() { $('#modal-root').innerHTML = ''; S.modal = null; }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 function pill(status, text) { return `<span class="pill ${esc(status)}">${esc(label(text || status))}</span>`; }
 function meter(used, max, progress = false) {
@@ -354,8 +355,7 @@ function renderGoalHead() {
   if (st === 'awaiting_review') buttons.push('<button class="btn" data-act="reopen">reopen with note</button><button class="btn primary" data-act="accept">accept</button>');
   $('#m-head').innerHTML = `<div class="page-head"><div>
       <div class="crumbs"><a href="#/ws/${ws}">${esc(ws)}</a> / ${esc(gid)}</div>
-      <h1>${esc(M.config.title)}</h1>
-      <div class="row" style="margin-top:4px">${pill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''}
+      <div class="row"><h1>${esc(M.config.title)}</h1>${pill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''}
         ${M.meta_active ? '<span class="thinking">meta-work is thinking</span>' : ''}</div></div>
     <div class="actions">${buttons.join('')}</div></div>`;
   $$('[data-act]', $('#m-head')).forEach(b => b.onclick = () => goalAction(b.dataset.act));
@@ -410,13 +410,21 @@ async function refreshGoal(force) {
   await renderTab();
 }
 
-// ---------- overview: stats, then META-AGENTS / WORKER-AGENTS layers ----------
+// ---------- overview: stats + infra, then META-AGENTS (left) and WORKER-AGENTS (right) ----------
 function renderOverview() {
-  $('#m-tab').innerHTML = `<div id="ov-stats" class="stats"></div>
-    <div class="layer"><div class="lt">meta-agents</div><div class="meta-grid">
-      <div class="box" id="ov-mw"></div><div class="box" id="ov-chat"></div></div></div>
-    <div class="layer"><div class="lt">worker-agents <span class="x faint" id="ov-wcount"></span></div><div id="ov-workers"></div></div>`;
-  renderStats(); renderMetaWork(); renderChat(); renderWorkers();
+  $('#m-tab').innerHTML = `<div class="ov-top"><div id="ov-stats" class="stats"></div><div class="box infra-box" id="ov-infra"></div></div>
+    <div class="ov-main" id="ov-main">
+      <div class="layer col"><div class="lt">meta-agents</div>
+        <div class="box mw" id="ov-mw"></div><div class="box chat" id="ov-chat"></div></div>
+      <div class="layer col"><div class="lt">worker-agents <span class="x faint" id="ov-wcount"></span></div>
+        <div id="ov-workers" class="wlist"></div></div></div>`;
+  renderStats(); renderOvInfra(); renderMetaWork(); renderChat(); renderWorkers();
+  fitOverview();
+}
+// The overview fills the window; each pane scrolls on its own
+function fitOverview() {
+  const el = $('#ov-main');
+  if (el) el.style.height = window.innerWidth <= 1000 ? '' : Math.max(380, window.innerHeight - el.getBoundingClientRect().top - 12) + 'px';
 }
 function updateOverview(force) {
   if (!$('#ov-stats')) return renderOverview();
@@ -424,6 +432,7 @@ function updateOverview(force) {
   // A rotated meta-work session joins the same feed
   const fresh = S.goal.sessions.filter(s => s.kind === 'meta-work' && !S.feeds[s.id]);
   if (fresh.length) Promise.all(fresh.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
+  liveKeys().forEach(paintLive);
 }
 function renderStats() {
   const M = S.goal, b = M.budget, c = M.checklist;
@@ -437,9 +446,26 @@ function renderStats() {
       <div class="sub">${workers.length} sessions · max ${lim(b.max_concurrent_workers)} at once</div></div>
     <div class="card stat"><div class="label">turns</div><div class="value">worker ${b.worker_turns}/${lim(b.max_worker_turns)}</div>
       <div class="sub">meta-work ${b.meta_turns}/${lim(b.max_meta_turns)}</div></div>
-    <div class="card stat"><div class="label">time</div>
-      <div class="sub">From ${fmtTime(b.from)} To ${b.from ? (b.to ? fmtTime(b.to) : 'now') : '–'}</div>
-      <div class="value">Total: ${fmtDur(b.hours)}</div></div>`;
+    <div class="card stat"><div class="label">time</div><div class="value">${fmtDur(b.hours)}</div>
+      <div class="sub">From ${fmtTime(b.from)}\nTo ${b.from ? (b.to ? fmtTime(b.to) : 'now') : '–'}</div></div>`;
+}
+// INFRA: the host's last two minutes, redrawn with every 1 s sample
+function renderOvInfra() {
+  const el = $('#ov-infra'), s = S.infra;
+  if (!el) return;
+  if (!el.dataset.ready) {
+    el.dataset.ready = '1';
+    el.innerHTML = `<div class="lt">infra <span class="x" id="oi-ts"></span></div><div class="legend" id="oi-legend"></div>
+      <canvas class="chart mini" id="ov-chart"></canvas>`;
+  }
+  if (!s) return;
+  const gpu = s.gpus[0];
+  $('#oi-ts').textContent = hhmm(s.ts);
+  $('#oi-legend').innerHTML = `<span><i style="background:var(--accent)"></i>cpu ${s.cpu_pct.toFixed(0)}%</span>
+    <span><i style="background:var(--reply)"></i>ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb} GB</span>
+    ${gpu ? `<span><i style="background:var(--warn)"></i>vram ${gpu.mem_used_gb}/${gpu.mem_total_gb} GB</span>` : ''}
+    <span class="faint">${s.sessions?.length || 0} sessions · ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB</span>`;
+  drawChart($('#ov-chart'), 120);
 }
 function renderReport() {
   const M = S.goal, report = M.files['report.md'], el = $('#nt-report');
@@ -496,63 +522,103 @@ function renderConfigTab(force) {
   }, `${b.dataset.saveDoc}.md saved`));
 }
 
-// feeds: one frame colour for prompts sent to a session, another for what the session answers
-function feedHtml(evs, who) {
-  const out = [];
-  let tools = 0, lastTool = '', reply = [];
-  const flushTools = () => {
-    if (tools) out.push(`<div class="fe tools">${tools} tool call${tools > 1 ? 's' : ''} · last: ${esc(lastTool)}</div>`);
-    tools = 0;
-  };
-  const flushReply = () => {
-    if (reply.length) out.push(`<div class="fr reply"><div class="fl">◀ ${esc(who.reply)}</div><div class="md">${md(reply.join('\n\n'))}</div></div>`);
-    reply = [];
-  };
-  for (const e of evs) {
-    if (e.type === 'turn') {
-      flushTools(); flushReply();
-      out.push(`<div class="fr prompt"><div class="fl"><span>▶ ${esc(who.prompt)}</span><span class="faint">turn ${e.n} · ${hhmm(e.ts)}</span></div><pre>${esc(e.prompt)}</pre></div>`);
-    } else if (e.type === 'text') { flushTools(); reply.push(e.text); }
-    else if (e.type === 'tool') { flushReply(); tools++; lastTool = `${e.name} ${e.detail || ''}`.slice(0, 100); }
-    else if (e.type === 'error') { flushTools(); flushReply(); out.push(`<div class="fe err">! ${esc(e.text)}</div>`); }
-    else if (e.type === 'turn_end') {
-      flushTools(); flushReply();
-      out.push(`<div class="fe ${e.status === 'failed' ? 'err' : ''}">└ turn ${e.n} ${esc(e.status)}${e.tokens ? ' · ' + fmtTok(e.tokens) + ' tokens' : ''}${e.status === 'failed' && e.error ? ' · ' + esc(e.error) : ''}</div>`);
-    }
+// ---------- live feeds: TUI-like stream of prompts, replies, tool calls; follows the bottom ----------
+const FEED_TAIL = 400;  // events kept per overview pane; the log window shows the whole session
+const cliName = a => a === 'claude' ? 'claude code' : a;
+const firstLines = (s, n) => String(s || '').split('\n').filter(l => l.trim()).slice(0, n).join('\n').slice(0, 400);
+function tuiEvent(e, who) {
+  switch (e.type) {
+    case 'turn': return `<div class="fr prompt"><div class="fl"><span>▶ ${esc(who.prompt)}</span><span class="faint">turn ${e.n} · ${hhmm(e.ts)}</span></div><pre>${esc(e.prompt)}</pre></div>`;
+    case 'text': return `<div class="fr reply"><div class="fl">◀ ${esc(e.sub ? 'subagent' : who.reply)}</div><div class="md">${md(e.text)}</div></div>`;
+    case 'tool': return `<div class="tl"><span class="dotc">⏺</span><b>${esc(e.name)}</b> ${esc(e.detail || '')}</div>`;
+    case 'tool_result': return e.text ? `<div class="tres ${e.error ? 'err' : ''}">⎿ ${esc(firstLines(e.text, 3))}</div>` : '';
+    case 'thinking': return `<div class="think">✻ ${esc(firstLine(e.text))}</div>`;
+    case 'error': return `<div class="fe err">! ${esc(e.text)}</div>`;
+    case 'turn_end': return `<div class="fe ${e.status === 'failed' ? 'err' : ''}">└ turn ${e.n} ${esc(e.status)}${e.tokens ? ' · ' + fmtTok(e.tokens) + ' tokens' : ''}${e.status === 'failed' && e.error ? ' · ' + esc(e.error) : ''}</div>`;
+    default: return '';
   }
-  flushTools(); flushReply();
-  return out.join('') || '<div class="empty">no activity yet</div>';
+}
+function feedShell(key) {
+  return `<div class="feed-wrap"><div class="feed" data-feed="${key}"><div class="fs"></div><div class="fp"></div></div>
+    <button class="follow" hidden>▼ follow live</button></div>`;
 }
 async function loadFeed(sid) {
   if (!S.feeds[sid]) S.feeds[sid] = (await api(`/api/sessions/${sid}/events?limit=4000&types=${FEED_TYPES.join(',')}`)).events;
 }
-const painting = new Set();
-function paintFeed(key) {
-  // Coalesce bursts of streamed events into one repaint per frame
-  if (painting.has(key)) return;
-  painting.add(key);
-  requestAnimationFrame(() => {
-    painting.delete(key);
-    const el = $(`[data-feed="${key}"]`);
-    if (!el) return;
-    const atBottom = !el.dataset.painted || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (key === 'meta-work') {
-      const sessions = S.goal.sessions.filter(s => s.kind === 'meta-work');
-      el.innerHTML = feedHtml(sessions.flatMap(s => S.feeds[s.id] || []), { prompt: 'platform → meta-work', reply: 'meta-work' });
-    } else {
-      const s = S.goal.sessions.find(x => x.id === key);
-      if (s) el.innerHTML = feedHtml(S.feeds[key] || [], { prompt: 'meta-work → worker', reply: s.agent });
-    }
-    el.dataset.painted = '1';
-    if (atBottom) el.scrollTop = el.scrollHeight;
-  });
+// Which sessions a pane shows, and how prompts/replies are labelled
+function feedSource(key) {
+  if (key === 'modal') {
+    const s = S.goal?.sessions.find(x => x.id === S.modal.sid) || {};
+    return { evs: S.modal.evs, sids: [S.modal.sid], sig: S.modal.sid, who: s.kind === 'worker'
+      ? { prompt: 'meta-work → worker', reply: cliName(s.agent) } : { prompt: `→ ${s.kind || 'session'}`, reply: s.kind || 'session' } };
+  }
+  if (key === 'meta-work') {
+    const ids = S.goal.sessions.filter(s => s.kind === 'meta-work' && S.feeds[s.id]).map(s => s.id);
+    return { evs: ids.flatMap(id => S.feeds[id]), sids: ids, sig: ids.join(), who: { prompt: 'platform → meta-work', reply: 'meta-work' } };
+  }
+  const s = S.goal.sessions.find(x => x.id === key);
+  return { evs: S.feeds[key] || [], sids: [key], sig: key, who: { prompt: 'meta-work → worker', reply: cliName(s?.agent) } };
 }
+const liveKeys = () => ['meta-work', ...S.goal.sessions.filter(s => s.kind === 'worker').map(s => s.id), ...(S.modal ? ['modal'] : [])];
+const stick = el => { if (!el.dataset.free) el.scrollTop = el.scrollHeight; };
+// Coalesce bursts of streamed events into one paint per frame
+const queued = new Map();
+function schedule(kind, key, fn) {
+  const id = kind + key;
+  if (queued.has(id)) return;
+  queued.set(id, requestAnimationFrame(() => { queued.delete(id); fn(key); }));
+}
+const paintFeed = key => schedule('f', key, renderFeed);
+const paintLive = key => schedule('l', key, renderLive);
+function renderFeed(key) {
+  const el = $(`[data-feed="${key}"]`);
+  if (!el || (key === 'modal' && !S.modal)) return;
+  const { evs, who, sig } = feedSource(key), fs = $('.fs', el);
+  let from = Number(el.dataset.n || 0);
+  // Append only what is new; repaint when the set of sessions changed
+  if (el.dataset.sig !== sig || from > evs.length) {
+    fs.innerHTML = ''; el.dataset.sig = sig; from = Math.max(0, evs.length - FEED_TAIL);
+  }
+  const html = evs.slice(from).map(e => tuiEvent(e, who)).join('');
+  if (html) { $('.empty', fs)?.remove(); fs.insertAdjacentHTML('beforeend', html); }
+  while (fs.childElementCount > FEED_TAIL) fs.firstElementChild.remove();
+  if (!fs.childElementCount) fs.innerHTML = '<div class="empty">no activity yet</div>';
+  el.dataset.n = evs.length;
+  renderLive(key);
+}
+// The reply being typed right now (Claude streams tokens; Codex shows each step as it completes)
+function renderLive(key) {
+  const el = $(`[data-feed="${key}"]`);
+  if (!el || (key === 'modal' && !S.modal)) return;
+  const { sids, who } = feedSource(key);
+  const text = sids.map(id => S.partial[id]).find(Boolean);
+  const running = sids.some(id => { const s = S.goal?.sessions.find(x => x.id === id); return s && simpleStatus(s) === 'running'; });
+  const html = text ? `<div class="fr reply live"><div class="fl">◀ ${esc(who.reply)}</div><pre class="stream">${esc(text)}<span class="cursor"></span></pre></div>`
+    : running ? '<div class="fe"><span class="thinking">working</span></div>' : '';
+  const fp = $('.fp', el);
+  if (fp.innerHTML !== html) fp.innerHTML = html;
+  stick(el);
+}
+// Scrolling up pauses following; the button (or scrolling back down) resumes it
+document.addEventListener('scroll', e => {
+  const el = e.target;
+  if (!el.classList?.contains('feed')) return;
+  const free = el.scrollHeight - el.scrollTop - el.clientHeight > 40;
+  el.dataset.free = free ? '1' : '';
+  const btn = $('.follow', el.parentElement);
+  if (btn) btn.hidden = !free;
+}, true);
+document.addEventListener('click', e => {
+  const b = e.target.closest('.follow');
+  if (!b) return;
+  const el = $('.feed', b.parentElement);
+  el.dataset.free = ''; b.hidden = true; el.scrollTop = el.scrollHeight;
+});
 function agentLine(s) { return `${esc(s.agent)} · ${esc(s.model || 'default')} · ${esc(s.effort || 'default')}`; }
 
 // META-WORK: every meta-work session of the goal, oldest first, as one continuous feed
 function renderMetaWork() {
-  $('#ov-mw').innerHTML = `<div class="lt">meta-work</div><div id="mw-head" class="row small" style="margin-bottom:4px"></div>
-    <div class="feed" data-feed="meta-work"></div>`;
+  $('#ov-mw').innerHTML = `<div class="lt">meta-work</div><div id="mw-head" class="row small pane-head"></div>${feedShell('meta-work')}`;
   renderMetaWorkHead();
   const sessions = S.goal.sessions.filter(s => s.kind === 'meta-work');
   Promise.all(sessions.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
@@ -573,7 +639,7 @@ function renderMetaWorkHead() {
 function renderChat() {
   $('#ov-chat').innerHTML = `<div class="lt">meta-chat</div>
     <div class="chat-bar" id="chat-bar"></div><div id="chat-new"></div>
-    <div class="feed" id="chat-feed" style="min-height:120px"></div><div class="live-strip" id="chat-live"></div>
+    <div class="feed-wrap"><div class="feed" id="chat-feed"></div><button class="follow" hidden>▼ follow live</button></div>
     <div class="composer"><textarea id="chat-input" placeholder="ask about progress or risks, or propose a change… (ctrl+enter)"></textarea>
       <button class="btn primary" id="chat-send">send</button></div>`;
   renderChatBar();
@@ -593,7 +659,7 @@ function renderChatBar() {
   bar.innerHTML = `<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
       chat ${i + 1} · ${esc(c.agent)}/${esc(c.model || 'default')}/${esc(c.effort || 'default')} · ${c.turns} turns</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
     <button class="btn small" id="chat-new-btn">+ new chat</button>`;
-  $('#chat-sel').onchange = e => { S.chat.sid = e.target.value; S.chat.live = ''; loadChatMessages(); };
+  $('#chat-sel').onchange = e => { S.chat.sid = e.target.value; S.chat.liveEvs = []; loadChatMessages(); };
   $('#chat-new-btn').onclick = () => { S.chat.creating = !S.chat.creating; renderNewChat(); };
   renderNewChat();
 }
@@ -602,7 +668,7 @@ function renderNewChat() {
   if (!S.chat.creating) { el.innerHTML = ''; return; }
   if (el.innerHTML) return;
   el.innerHTML = `<div class="new-chat">${agentHeader()}${agentRow('meta_chat', S.goal.config.meta_work, { title: 'meta-chat', noAutocompact: true })}
-    <div class="row" style="margin-top:6px"><span class="hint">Read-only on the goal; proposes notes you approve.</span><span class="spacer"></span>
+    <div class="row" style="margin-top:6px"><span class="hint">Runs commands and tools; steers the meta-work through notes you approve.</span><span class="spacer"></span>
       <button class="btn small" id="nc-cancel">cancel</button><button class="btn small primary" id="nc-ok">create</button></div></div>`;
   wireAgentRows(el);
   $('#nc-cancel').onclick = () => { S.chat.creating = false; renderNewChat(); };
@@ -619,15 +685,25 @@ async function loadChatMessages() {
   if (!S.chat.sid) { feed.innerHTML = '<div class="empty">Create a chat to talk with a meta-agent about this goal.</div>'; setComposer(false); return; }
   const r = await api(`/api/meta-chats/${S.chat.sid}/messages`);
   S.chat.messages = r.messages; S.chat.busy = r.busy;
-  feed.innerHTML = r.messages.map((m, i) => m.role === 'user'
+  if (!r.busy) S.chat.liveEvs = [];
+  feed.innerHTML = (r.messages.map((m, i) => m.role === 'user'
     ? `<div class="fr prompt"><div class="fl"><span>▶ human</span><span class="faint">${hhmm(m.ts)}</span></div><pre>${esc(m.text)}</pre></div>`
     : `<div class="fr reply"><div class="fl"><span>◀ meta-chat</span><span class="spacer"></span><button class="btn small" data-save-note="${i}">save as note</button></div>
         <div class="md">${md(m.text)}</div></div>`).join('')
-    + (r.busy ? '<div class="fe"><span class="thinking">thinking</span></div>' : '')
-    || '<div class="empty">Ask anything, e.g. what is blocking the goal right now?</div>';
-  feed.scrollTop = feed.scrollHeight;
-  $('#chat-live').textContent = r.busy ? S.chat.live : '';
+    || '<div class="empty">Ask anything, e.g. what is blocking the goal right now?</div>') + '<div id="chat-live"></div>';
+  feed.dataset.free = '';
+  paintChatLive();
   setComposer(!r.busy);
+}
+// The meta-chat's current turn, streamed like the other panes
+function paintChatLive() {
+  const el = $('#chat-live');
+  if (!el) return;
+  const text = S.partial[S.chat.sid];
+  el.innerHTML = S.chat.busy ? S.chat.liveEvs.filter(e => e.type !== 'text').map(e => tuiEvent(e, { prompt: '', reply: 'meta-chat' })).join('')
+    + (text ? `<div class="fr reply live"><div class="fl">◀ meta-chat</div><pre class="stream">${esc(text)}<span class="cursor"></span></pre></div>`
+      : '<div class="fe"><span class="thinking">thinking</span></div>') : '';
+  stick($('#chat-feed'));
 }
 function setComposer(enabled) {
   if (!$('#chat-send')) return;
@@ -639,7 +715,7 @@ async function sendChat() {
   if (!text || !S.chat.sid) return;
   await act(async () => {
     await api(`/api/meta-chats/${S.chat.sid}/messages`, { body: { text } });
-    $('#chat-input').value = ''; S.chat.live = '';
+    $('#chat-input').value = ''; S.chat.liveEvs = [];
     await loadChatMessages();
   });
 }
@@ -656,25 +732,24 @@ function saveNoteModal(text) {
   }, 'Note saved');
 }
 
-// WORKER-AGENTS: newest first; left = role/label/tokens/status, right = prompts and replies
-function workerLeft(w) {
+// WORKER-AGENTS: running first, then newest; header = role · label · status · CLI · model/effort
+function workerHead(w) {
   const st = simpleStatus(w);
-  return `<div class="role">${esc(w.role)}</div><div class="label">${esc(w.label)}</div>
-    <div class="small">${fmtTok(w.tokens)} tokens</div><div>${pill(st)}</div>
-    <div class="faint small">${esc(w.agent)}</div>
-    <div class="row small" style="margin-top:4px"><a href="#" data-log="${w.id}">log</a>
-      ${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}</div>`;
+  return `<span class="role">${esc(w.role)}</span><span class="faint">·</span><span class="wlabel">${esc(w.label)}</span>${pill(st)}
+    <span class="spacer"></span><span class="faint">${esc(cliName(w.agent))} · ${esc(w.model || 'default')}/${esc(w.effort || 'default')}</span>
+    <a href="#" data-log="${w.id}">log</a>${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}`;
 }
 function renderWorkers() {
   const el = $('#ov-workers');
   if (!el) return;
-  const workers = S.goal.sessions.filter(s => s.kind === 'worker').sort((a, b) => b.created - a.created);
+  const rank = w => simpleStatus(w) === 'running' ? 1 : 0;
+  const workers = S.goal.sessions.filter(s => s.kind === 'worker').sort((a, b) => rank(b) - rank(a) || b.created - a.created);
   $('#ov-wcount').textContent = workers.length ? `(${workers.length})` : '';
   const ids = workers.map(w => w.id).join();
   if (el.dataset.ids !== ids) {
     el.dataset.ids = ids;
-    el.innerHTML = workers.map(w => `<div class="worker ${simpleStatus(w)}" id="w-${w.id}"><div class="wl">${workerLeft(w)}</div>
-      <div class="wr"><div class="feed" data-feed="${w.id}"></div></div></div>`).join('')
+    el.innerHTML = workers.map(w => `<div class="worker ${simpleStatus(w)}" id="w-${w.id}"><div class="wh row small">${workerHead(w)}</div>
+      ${feedShell(w.id)}</div>`).join('')
       || '<div class="empty">No workers yet. The meta-work spawns them as it needs them.</div>';
     el.onclick = e => {
       const log = e.target.closest('[data-log]'), stop = e.target.closest('[data-stop]');
@@ -687,37 +762,27 @@ function renderWorkers() {
   workers.forEach(w => {
     const row = $(`#w-${w.id}`);
     row.className = `worker ${simpleStatus(w)}`;
-    $('.wl', row).innerHTML = workerLeft(w);
+    $('.wh', row).innerHTML = workerHead(w);
   });
 }
 
-// full log with tool calls and evidence files
-function evHtml(e) {
-  switch (e.type) {
-    case 'turn': return `<div class="fr prompt"><div class="fl">▶ turn ${e.n} · ${hhmm(e.ts)}</div><pre>${esc(e.prompt)}</pre></div>`;
-    case 'text': return `<div class="fr reply"><div class="md">${md(e.text)}</div></div>`;
-    case 'tool': return `<div class="fe">▸ ${esc(e.name)} ${esc(e.detail)}</div>`;
-    case 'tool_result': return `<div class="fe ${e.error ? 'err' : ''}" style="padding-left:14px">${esc(String(e.text || '').slice(0, 400))}</div>`;
-    case 'thinking': return `<div class="fe" style="font-style:italic">${esc(e.text)}</div>`;
-    case 'error': return `<div class="fe err">! ${esc(e.text)}</div>`;
-    case 'turn_end': return `<div class="fe">└ turn ${e.n} ${esc(e.status)}${e.error ? ' · ' + esc(e.error) : ''}${e.tokens ? ' · ' + fmtTok(e.tokens) + ' tokens' : ''}</div>`;
-    default: return '';
-  }
-}
+// log window: one session, every event, streaming live while it runs
 async function sessionModal(sid) {
   const { ws, gid } = S.route;
   const s = S.goal.sessions.find(x => x.id === sid) || { id: sid };
   const [turns, evs] = await Promise.all([api(`/api/sessions/${sid}/turns`), api(`/api/sessions/${sid}/events?limit=3000`)]);
   const file = (n, ext) => `<a href="/api/runs/${ws}/${gid}/${sid}/t${n}.${ext}" target="_blank">${ext}</a>`;
   const title = s.kind === 'worker' ? `${s.role} · ${s.label}` : s.kind;
-  const m = modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s)}</div><h2>${esc(title)}</h2></div>
+  modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${esc(cliName(s.agent))} · ${esc(s.model || 'default')}/${esc(s.effort || 'default')}</div><h2>${esc(title)}</h2></div>
       <button class="icon-btn" data-close>×</button></div>
     ${s.cwd ? `<div class="faint small">${esc(s.cwd)}${s.branch ? ' · ' + esc(s.branch) : ''}</div>` : ''}
-    <table class="t" style="margin-top:8px"><tr><th>#</th><th>status</th><th>started</th><th>tokens</th><th>final message</th>${s.kind === 'worker' ? '<th>evidence</th>' : ''}</tr>
+    <details class="turns"><summary class="small">${turns.turns.length} turns</summary>
+    <table class="t" style="margin-top:6px"><tr><th>#</th><th>status</th><th>started</th><th>tokens</th><th>final message</th>${s.kind === 'worker' ? '<th>evidence</th>' : ''}</tr>
       ${turns.turns.map(t => `<tr><td>${t.n}</td><td>${pill(t.status)}</td><td class="small">${fmtTime(t.started)}</td><td class="small">${fmtTok(t.tokens)}</td>
-        <td class="small">${esc(firstLine(t.final))}</td>${s.kind === 'worker' ? `<td class="small">${file(t.n, 'prompt.md')} ${file(t.n, 'out.md')} ${file(t.n, 'diff')}</td>` : ''}</tr>`).join('')}</table>
-    <div class="feed" style="max-height:56vh;margin-top:10px">${evs.events.map(evHtml).join('')}</div>`, true);
-  const log = $('.feed', m); log.scrollTop = log.scrollHeight;
+        <td class="small">${esc(firstLine(t.final))}</td>${s.kind === 'worker' ? `<td class="small">${file(t.n, 'prompt.md')} ${file(t.n, 'out.md')} ${file(t.n, 'diff')}</td>` : ''}</tr>`).join('')}</table></details>
+    <div class="modal-feed">${feedShell('modal')}</div>`, true);
+  S.modal = { sid, evs: evs.events };
+  renderFeed('modal');
 }
 
 // ---------- plan, human report & notes, git ----------
@@ -802,24 +867,25 @@ function renderInfra() {
       ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)} ${esc(x.role || '')}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td></tr>`).join('')}</table>`
         : '<div class="empty">No agent sessions running.</div>'}
       <p class="hint">Workers run in a systemd scope capped by infra.worker_memory_max_gb (loop.yaml); new workers are refused below min_free_ram_gb.</p>`)}</div></div>`;
-  drawChart();
+  drawChart($('#infra-chart'), 600);
 }
-function drawChart() {
-  const c = $('#infra-chart');
+function drawChart(c, points) {
   if (!c) return;
   const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
   c.width = w * dpr; c.height = h * dpr;
   const g = c.getContext('2d'); g.scale(dpr, dpr);
   const css = getComputedStyle(document.documentElement);
+  const top = 6, bottom = 6, left = 28, y = v => h - bottom - (h - top - bottom) * Math.min(100, v) / 100;
   g.strokeStyle = css.getPropertyValue('--border'); g.fillStyle = css.getPropertyValue('--faint');
-  g.font = `11px ${css.getPropertyValue('--font')}`; g.lineWidth = 1;
-  [0, 25, 50, 75, 100].forEach(v => { const y = h - 18 - (h - 28) * v / 100; g.beginPath(); g.moveTo(30, y); g.lineTo(w, y); g.stroke(); g.fillText(v, 4, y + 4); });
-  const hist = S.history.slice(-200);
+  g.font = `10px ${css.getPropertyValue('--font')}`; g.lineWidth = 1;
+  (h < 120 ? [0, 50, 100] : [0, 25, 50, 75, 100]).forEach(v => { g.beginPath(); g.moveTo(left, y(v)); g.lineTo(w, y(v)); g.stroke(); g.fillText(v, 2, y(v) + 3); });
+  const hist = S.history.slice(-points);
   const series = [[css.getPropertyValue('--accent'), x => x.cpu_pct], [css.getPropertyValue('--reply'), x => x.ram_pct]];
   if (hist.some(x => x.gpus?.length)) series.push([css.getPropertyValue('--warn'), x => x.gpus?.[0] ? 100 * x.gpus[0].mem_used_gb / x.gpus[0].mem_total_gb : 0]);
+  // Fixed time axis: the newest sample sits at the right edge, older ones scroll left
   series.forEach(([color, f]) => {
     g.strokeStyle = color; g.lineWidth = 1.5; g.beginPath();
-    hist.forEach((x, i) => { const px = 30 + (w - 30) * i / Math.max(1, hist.length - 1), py = h - 18 - (h - 28) * Math.min(100, f(x)) / 100; i ? g.lineTo(px, py) : g.moveTo(px, py); });
+    hist.forEach((x, i) => { const px = left + (w - left) * (points - hist.length + i) / Math.max(1, points - 1); i ? g.lineTo(px, y(f(x))) : g.moveTo(px, y(f(x))); });
     g.stroke();
   });
 }
@@ -864,20 +930,30 @@ function handle(evt) {
       S.infra = evt.data; S.history.push(evt.data); if (S.history.length > 600) S.history.shift();
       $('#nav-infra').title = `CPU ${evt.data.cpu_pct.toFixed(0)}% · RAM ${evt.data.ram_pct}%`;
       if (r.view === 'infra') renderInfra();
+      renderOvInfra();
       break;
     case 'session_event': {
       if (!inGoal) break;
-      const e = evt.event;
-      if (S.feeds[evt.session] && FEED_TYPES.includes(e.type)) {
-        S.feeds[evt.session].push(e);
-        const s = S.goal?.sessions.find(x => x.id === evt.session);
-        paintFeed(s?.kind === 'meta-work' ? 'meta-work' : evt.session);
-      } else if (!S.feeds[evt.session] && e.type === 'turn') {
-        S.feeds[evt.session] = [e];  // a session that started after the page loaded
+      const e = evt.event, sid = evt.session;
+      const s = S.goal?.sessions.find(x => x.id === sid);
+      const keys = [s?.kind === 'meta-work' ? 'meta-work' : sid, ...(S.modal?.sid === sid ? ['modal'] : [])];
+      const chat = sid === S.chat.sid;
+      // Token deltas only feed the live reply; the complete message replaces it
+      if (e.type === 'delta') {
+        S.partial[sid] = (S.partial[sid] || '') + e.text;
+        keys.forEach(paintLive);
+        if (chat) paintChatLive();
+        break;
       }
-      if (evt.session === S.chat.sid && ['tool', 'text', 'thinking'].includes(e.type)) {
-        S.chat.live = e.type === 'tool' ? `▸ ${e.name} ${e.detail}` : firstLine(e.text);
-        if ($('#chat-live')) $('#chat-live').textContent = S.chat.live;
+      if (['turn', 'tool', 'turn_end', 'error'].includes(e.type) || (e.type === 'text' && !e.sub)) S.partial[sid] = '';
+      if (S.feeds[sid]) { if (FEED_TYPES.includes(e.type)) S.feeds[sid].push(e); }
+      else if (e.type === 'turn') S.feeds[sid] = [e];  // a session that started after the page loaded
+      if (S.modal?.sid === sid) S.modal.evs.push(e);
+      keys.forEach(paintFeed);
+      if (chat) {
+        if (e.type === 'turn') { S.chat.liveEvs = []; S.chat.busy = true; }
+        else if (FEED_TYPES.includes(e.type)) S.chat.liveEvs.push(e);
+        paintChatLive();
       }
       if (e.type === 'turn' || e.type === 'turn_end') scheduleRefresh();
       break;
@@ -914,7 +990,10 @@ function connect() {
   es.onerror = () => $('#conn').classList.remove('on');
   es.onmessage = e => { try { handle(JSON.parse(e.data)); } catch (err) { console.error(err); } };
 }
-window.addEventListener('resize', () => { if (S.route.view === 'infra') drawChart(); });
+window.addEventListener('resize', () => {
+  if (S.route.view === 'infra') drawChart($('#infra-chart'), 600);
+  fitOverview(); renderOvInfra();
+});
 
 (async function boot() {
   try { const r = await api('/api/infra'); S.history = r.history; S.infra = r.latest; } catch { /* first sample arrives over SSE */ }

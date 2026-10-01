@@ -59,6 +59,16 @@ def test_claude_parse_result():
     assert (st.vendor_id, st.final, st.cost, st.tokens, st.is_error) == ("S", "ok", 0.5, 3, False)
 
 
+
+def test_claude_stream_deltas():
+    st, ad = ParseState(), ClaudeAdapter()
+    delta = lambda d, parent=None: {"type": "stream_event", "parent_tool_use_id": parent,
+                                    "event": {"type": "content_block_delta", "delta": d}}
+    assert ad.parse(delta({"type": "text_delta", "text": "One"}), st) == [{"type": "delta", "text": "One"}]
+    assert ad.parse(delta({"type": "thinking_delta", "thinking": ""}), st) == []
+    assert ad.parse(delta({"type": "text_delta", "text": "x"}, parent="t1"), st) == []
+    assert "--include-partial-messages" in ad.argv(RunSpec(agent="claude", kind="worker", cwd=Path("."), prompt="x"))
+
 def test_verify_and_checklist():
     goal = "- tests pass\n- verify: `make test`\nverify: python -c 'print(1)'\n"
     assert digest.verify_commands(goal) == ["make test", "python -c 'print(1)'"]

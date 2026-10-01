@@ -209,7 +209,7 @@ def create_app(api_url: str) -> FastAPI:
     # ---------- infra and agent CLIs ----------
     @app.get("/api/infra")
     def infra():
-        return {"latest": engine.infra.latest(), "history": list(engine.infra.history)[-200:]}
+        return {"latest": engine.infra.latest(), "history": list(engine.infra.history)}
 
     @app.get("/api/agents")
     async def agents_info():

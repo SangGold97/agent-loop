@@ -19,7 +19,7 @@ class ClaudeAdapter(Adapter):
 
     def argv(self, s: RunSpec) -> list[str]:
         a = ["claude", "-p", "--output-format", "stream-json", "--verbose",
-             "--dangerously-skip-permissions", "--setting-sources", "project,local"]
+             "--include-partial-messages", "--dangerously-skip-permissions", "--setting-sources", "project,local"]
         if s.model:
             a += ["--model", s.model]
         if s.effort:
@@ -46,6 +46,13 @@ class ClaudeAdapter(Adapter):
         if kind == "system" and o.get("subtype") == "init":
             st.vendor_id = o.get("session_id") or st.vendor_id
             out.append({"type": "init", "vendor_id": st.vendor_id, "model": o.get("model")})
+        elif kind == "stream_event":
+            # Token deltas of the main agent's reply: live preview only (the full message follows)
+            ev = o.get("event") or {}
+            delta = ev.get("delta") or {}
+            if ev.get("type") == "content_block_delta" and delta.get("type") == "text_delta" \
+                    and not o.get("parent_tool_use_id"):
+                out.append({"type": "delta", "text": delta.get("text", "")})
         elif kind == "assistant":
             msg = o.get("message") or {}
             usage = msg.get("usage") or {}
