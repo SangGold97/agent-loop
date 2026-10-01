@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from .base import Adapter, ParseState, RunSpec, short, to_tokens
 
@@ -76,6 +77,20 @@ class CodexAdapter(Adapter):
         elif kind == "error":
             out.append({"type": "error", "text": short(o.get("message", ""), 400)})
         return out
+
+    def finish(self, st: ParseState, s: RunSpec) -> None:
+        # exec --json only reports per-turn sums; the TUI's context figure is the last call in the rollout file
+        if not (s.codex_home and st.vendor_id):
+            return
+        files = sorted(Path(s.codex_home, "sessions").rglob(f"rollout-*{st.vendor_id}.jsonl"))
+        for line in reversed(files[-1].read_text().splitlines() if files else []):
+            if '"token_count"' in line:
+                try:
+                    last = (json.loads(line)["payload"].get("info") or {}).get("last_token_usage") or {}
+                except (ValueError, KeyError):
+                    continue
+                st.context = last.get("total_tokens") or st.context
+                return
 
     def final_text(self, st: ParseState, s: RunSpec) -> str:
         if s.last_message_file and s.last_message_file.exists():

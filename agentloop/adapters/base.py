@@ -60,6 +60,9 @@ class Adapter:
     def final_text(self, st: ParseState, spec: RunSpec) -> str:
         return st.final if st.final is not None else st.last_text
 
+    def finish(self, st: ParseState, spec: RunSpec) -> None:
+        """Last look at CLI-side state once the process has exited (no-op by default)."""
+
 
 def short(text, limit: int = 600) -> str:
     text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)

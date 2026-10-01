@@ -1,9 +1,25 @@
 """Claude Code adapter: `claude -p --output-format stream-json`, prompt on stdin, resume by session id."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from .base import Adapter, ParseState, RunSpec, short, to_tokens
 
+USER_SETTINGS = Path.home() / ".claude" / "settings.json"
+
 TOOL_KEYS = ("command", "file_path", "pattern", "path", "url", "query", "description", "prompt")
+
+
+def user_autocompact() -> int | None:
+    """The human's own Claude Code auto-compact window (sessions skip user settings, so pass it on)."""
+    try:
+        cfg = json.loads(USER_SETTINGS.read_text())
+    except (OSError, ValueError):
+        return None
+    if cfg.get("autoCompactEnabled") is False:
+        return None
+    return to_tokens(cfg.get("autoCompactWindow"))
 
 
 def tool_detail(inp: dict) -> str:
@@ -24,7 +40,7 @@ class ClaudeAdapter(Adapter):
             a += ["--model", s.model]
         if s.effort:
             a += ["--effort", s.effort]
-        tokens = to_tokens(s.autocompact)
+        tokens = to_tokens(s.autocompact) or user_autocompact()
         if tokens:
             a += ["--autocompact", str(tokens)]
         if s.resume_id:

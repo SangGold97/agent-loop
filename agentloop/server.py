@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 
 from . import agents, digest, gitops, workspace
+from .adapters.claude import user_autocompact as claude_user_autocompact
 from .config import goal_config, workspace_config
 from .engine import AgentError, Engine
 
@@ -217,7 +218,11 @@ def create_app(api_url: str) -> FastAPI:
 
     @app.get("/api/models")
     def models():
-        return agents.load_models()
+        catalog = agents.load_models()
+        # The human's Claude Code auto-compact window is what sessions use when the goal sets none
+        if "claude" in catalog:
+            catalog["claude"]["autocompact"] = claude_user_autocompact()
+        return catalog
 
     @app.post("/api/models/refresh")
     async def models_refresh():

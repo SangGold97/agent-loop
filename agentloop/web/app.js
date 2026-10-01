@@ -104,6 +104,8 @@ function effortOptions(agent, model, current) {
 async function loadModels() { try { S.models = await api('/api/models'); } catch { S.models = {}; } }
 
 // ---------- agent settings form (HUMAN layer, new goal, new meta-chat) ----------
+// Empty autocompact = the CLI's own setting (for Claude Code: autoCompactWindow in ~/.claude/settings.json)
+const autocompactHint = agent => S.models?.[agent]?.autocompact ? `CLI setting: ${fmtTok(S.models[agent].autocompact)}` : 'CLI default';
 function agentRow(key, conf = {}, opts = {}) {
   const agent = conf.agent || opts.agent || 'claude';
   const off = opts.toggle && conf.enabled === false;
@@ -112,7 +114,7 @@ function agentRow(key, conf = {}, opts = {}) {
     ${opts.fixedAgent ? `<div>${esc(agent)}</div>` : `<select data-f="agent">${AGENTS.map(a => `<option ${a === agent ? 'selected' : ''}>${a}</option>`).join('')}</select>`}
     <select data-f="model">${modelOptions(agent, conf.model)}</select>
     <select data-f="effort">${effortOptions(agent, conf.model, conf.effort)}</select>
-    ${opts.noAutocompact ? '<span></span>' : `<input type="text" data-f="autocompact" value="${esc(conf.autocompact ?? '')}" placeholder="autocompact">`}
+    ${opts.noAutocompact ? '<span></span>' : `<input type="text" data-f="autocompact" value="${esc(conf.autocompact ?? '')}" placeholder="${esc(autocompactHint(agent))}">`}
   </div>`;
 }
 function agentHeader() {
@@ -645,8 +647,7 @@ function renderMetaWorkHead() {
   const sessions = S.goal.sessions.filter(s => s.kind === 'meta-work');
   const cur = sessions.find(s => s.id === S.goal.row.meta_work) || sessions[sessions.length - 1];
   if (!cur) { el.innerHTML = `<span class="muted">${agentLine({ agent: S.goal.config.meta_work.agent, ...S.goal.config.meta_work })}</span>`; return; }
-  const tokens = sessions.reduce((a, s) => a + (s.tokens || 0), 0);
-  el.innerHTML = `<span class="muted">${agentLine(cur, tokens)}</span>
+  el.innerHTML = `<span class="muted">${agentLine(cur, cur.context)}</span>
     <span class="spacer"></span>${pill(simpleStatus(cur))}<button class="btn small" data-log="${cur.id}">expand</button>`;
   $('[data-log]', el).onclick = () => sessionModal(cur.id);
 }
@@ -674,7 +675,7 @@ function renderChatBar() {
   if (!S.chat.sid && chats.length) S.chat.sid = chats[chats.length - 1].id;
   const cur = chats.find(c => c.id === S.chat.sid);
   bar.innerHTML = `<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
-      chat ${i + 1} · ${agentLine(c, c.tokens)}</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
+      chat ${i + 1} · ${agentLine(c, c.context)}</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
     ${cur ? pill(simpleStatus(cur)) : ''}<button class="btn small" id="chat-new-btn">+ new chat</button>
     <button class="btn small" id="chat-expand">${S.chatOut ? 'collapse' : 'expand'}</button>`;
   $('#chat-expand').onclick = () => S.chatOut ? closeModal() : expandChat();
@@ -766,9 +767,10 @@ const workerOpen = w => simpleStatus(w) === 'running' || !!S.open[w.id];
 function workerHead(w) {
   const st = simpleStatus(w);
   return `<span class="fold">${workerOpen(w) ? '▾' : '▸'}</span><span class="role">${esc(w.role)}</span><span class="faint">·</span><span class="wlabel">${esc(w.label)}</span>${pill(st)}
-    <span class="spacer"></span><span class="faint">${agentLine(w, w.tokens)}</span>
+    <span class="spacer"></span><span class="faint">${agentLine(w, w.context)}</span>
     <button class="btn small" data-log="${w.id}">expand</button>${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}`;
 }
+function paintHeads() { renderMetaWorkHead(); renderWorkers(); if (!$('#chat-sel:focus')) renderChatBar(); }
 function renderWorkers() {
   const el = $('#ov-workers');
   if (!el) return;
@@ -816,7 +818,7 @@ async function sessionModal(sid) {
   const [turns, evs] = await Promise.all([api(`/api/sessions/${sid}/turns`), api(`/api/sessions/${sid}/events?limit=3000`)]);
   const file = (n, ext) => `<a href="/api/runs/${ws}/${gid}/${sid}/t${n}.${ext}" target="_blank">${ext}</a>`;
   const title = s.kind === 'worker' ? `${s.role} · ${s.label}` : s.kind;
-  modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s, s.tokens)}</div><h2>${esc(title)}</h2></div>
+  modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s, s.context)}</div><h2>${esc(title)}</h2></div>
       <button class="icon-btn" data-close>×</button></div>
     ${s.cwd ? `<div class="faint small">${esc(s.cwd)}${s.branch ? ' · ' + esc(s.branch) : ''}</div>` : ''}
     <details class="turns"><summary class="small">${turns.turns.length} turns</summary>
@@ -981,6 +983,7 @@ function handle(evt) {
       const s = S.goal?.sessions.find(x => x.id === sid);
       const keys = [s?.kind === 'meta-work' ? 'meta-work' : sid, ...(S.modal?.sid === sid ? ['modal'] : [])];
       const chat = sid === S.chat.sid;
+      if (e.type === 'usage' && s && e.context) { s.context = e.context; schedule('h', 'heads', paintHeads); break; }
       // Token deltas only feed the live reply; the complete message replaces it
       if (e.type === 'delta') {
         S.partial[sid] = (S.partial[sid] || '') + e.text;

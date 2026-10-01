@@ -216,3 +216,25 @@ def test_sync_harness_keeps_human_edits(tmp_path, monkeypatch):
     assert workspace.sync_harness(ws) == {"updated": ["worker/AGENTS.md"], "kept": ["meta/AGENTS.md"]}
     assert (ws / "worker/AGENTS.md").read_text() == "w2" and (ws / "meta/AGENTS.md").read_text() == "mine"
     assert not (ws / "PLATFORM.md").exists()
+
+
+def test_claude_uses_user_autocompact(tmp_path, monkeypatch):
+    from agentloop.adapters import claude
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"autoCompactWindow": 500000, "autoCompactEnabled": True}))
+    monkeypatch.setattr(claude, "USER_SETTINGS", settings)
+    argv = lambda ac=None: ClaudeAdapter().argv(RunSpec(agent="claude", kind="meta", cwd=tmp_path, prompt="x", autocompact=ac))
+    assert argv()[argv().index("--autocompact") + 1] == "500000"
+    assert argv("300k")[argv("300k").index("--autocompact") + 1] == "300000"
+    settings.write_text(json.dumps({"autoCompactWindow": 500000, "autoCompactEnabled": False}))
+    assert "--autocompact" not in argv()
+
+
+def test_codex_context_from_rollout(tmp_path):
+    day = tmp_path / "sessions/2026/10/01"
+    day.mkdir(parents=True)
+    usage = lambda n: json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"total_tokens": n}}}})
+    (day / "rollout-2026-10-01T16-53-05-T1.jsonl").write_text(usage(100) + "\n" + usage(18702) + "\n")
+    st = ParseState(vendor_id="T1", context=104139)
+    CodexAdapter().finish(st, RunSpec(agent="codex", kind="worker", cwd=tmp_path, prompt="x", codex_home=tmp_path))
+    assert st.context == 18702

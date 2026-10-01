@@ -154,6 +154,7 @@ class Runner:
             error = "stopped"
         elif rc and not error:
             error = f"exit {rc}: " + "".join(stderr_tail)[-800:].strip()
+        adapter.finish(st, spec)
         return TurnResult(st.vendor_id, adapter.final_text(st, spec) or "", st.tokens, st.cost,
                           st.context, rc, error, time.time() - started, stopped)
 
