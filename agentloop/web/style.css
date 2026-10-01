@@ -149,7 +149,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .md th, .md td { border: 1px solid var(--border); padding: 2px 6px; text-align: left; vertical-align: top; }
 .md blockquote { margin: 4px 0; padding-left: 10px; border-left: 2px solid var(--border-2); color: var(--muted); }
 
-/* mission overview */
+/* goal overview */
 .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 8px; }
 .meta-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
 .cfg { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 12px; align-items: center; }

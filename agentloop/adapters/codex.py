@@ -24,7 +24,7 @@ class CodexAdapter(Adapter):
         if s.kind == "worker":
             a += ["--dangerously-bypass-approvals-and-sandbox"]
         else:
-            # Meta-work/meta-chat: sandboxed writes (cwd + mission dirs), network on so `loop` reaches the API
+            # Meta-work/meta-chat: sandboxed writes (cwd + goal dirs), network on so `loop` reaches the API
             roots = json.dumps([str(d) for d in s.add_dirs])
             a += ["-c", 'sandbox_mode="workspace-write"', "-c", f"sandbox_workspace_write.writable_roots={roots}",
                   "-c", "sandbox_workspace_write.network_access=true"]

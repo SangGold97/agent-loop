@@ -13,11 +13,11 @@ import sys
 from pathlib import Path
 
 PROTECTED_RE = re.compile(
-    r"^(missions/[^/]+/(spec\.md|goal\.md|mission\.yaml)|loop\.yaml|(meta|worker)/hooks\.json)$")
+    r"^(goals/[^/]+/(spec\.md|goal\.md|goal\.yaml)|loop\.yaml|(meta|worker)/hooks\.json)$")
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "shell", "exec_command", "local_shell"}
 WRITE_OPS = r"(>|\btee\b|\bsed\s+-i|\bmv\b|\brm\b|\bcp\b|\btruncate\b|\bchmod\b|\bln\b)"
-PROTECTED_IN_CMD = r"(missions/\S*(spec|goal)\.md|mission\.yaml|LOOP_MISSION_DIR\S*(spec|goal)\.md|hooks\.json|loop\.yaml)"
+PROTECTED_IN_CMD = r"(goals/\S*(spec|goal)\.md|goal\.yaml|LOOP_GOAL_DIR\S*(spec|goal)\.md|hooks\.json|loop\.yaml)"
 # Package installs that change the human's own Python instead of a project venv
 GLOBAL_INSTALL = re.compile(r"\bsudo\b|\bpip3?\b[^|;&\n]*\binstall\b[^|;&\n]*(--user|--break-system-packages)\b"
                             r"|\bconda\s+install\b(?![^|;&\n]*(-p|--prefix)\s)")
@@ -83,9 +83,9 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
     code = strip_heredocs(cmd)
     bare = strip_quotes(code)  # git checks ignore quoted text such as commit messages or prompts
     if re.search(r"\bgit\b[^|;&\n]*\bpush\b", bare):
-        return "agents never push; the human (or the mission push policy) handles remotes"
+        return "agents never push; the human (or the goal push policy) handles remotes"
     if re.search(WRITE_OPS, code) and re.search(PROTECTED_IN_CMD, code):
-        return "this command would modify a human-owned file (spec/goal/mission.yaml/loop.yaml/hooks.json)"
+        return "this command would modify a human-owned file (spec/goal/goal.yaml/loop.yaml/hooks.json)"
     if GLOBAL_INSTALL.search(bare):
         return ("do not install into the user or system Python; create a venv in your worktree or "
                 "$LOOP_RUN_DIR (python -m venv .venv) and install there")

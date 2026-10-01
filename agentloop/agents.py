@@ -133,7 +133,7 @@ def check_agent_conf(agent: str, conf: dict, catalog: dict) -> str | None:
 
 
 def config_errors(doc: dict) -> list[str]:
-    """Agent choices in a mission config (or loop.yaml `defaults`) that the installed CLIs reject."""
+    """Agent choices in a goal config (or loop.yaml `defaults`) that the installed CLIs reject."""
     catalog, errors = load_models(), []
     mw = doc.get("meta_work") or {}
     if mw:

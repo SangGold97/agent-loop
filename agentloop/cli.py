@@ -12,11 +12,11 @@ HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   spawn   start a new worker session           loop spawn --agent claude --role coder --label api <<'EOF' ... EOF
   send    continue an idle worker              loop send w-1a2b3c <<'EOF' ... EOF
   stop    stop a running worker                loop stop w-1a2b3c
-  ls      list this mission's workers
+  ls      list this goal's workers
   show    worker details / a turn's evidence   loop show w-1a2b3c --turn 2 [--full]
-  merge   merge a worker branch into loop/<mission>/integration
-  done    close the mission with a report      loop done --status success <<'EOF' ... EOF
-  status  mission overview (meta-chat)
+  merge   merge a worker branch into loop/<goal>/integration
+  done    close the goal with a report      loop done --status success <<'EOF' ... EOF
+  status  goal overview (meta-chat)
   note    propose a note to the human (meta-chat)  loop note "try X instead of Y"
   budget  budget usage
   infra   host resources"""

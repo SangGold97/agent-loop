@@ -1,4 +1,4 @@
-"""Paths and layered configuration: DEFAULTS < workspace loop.yaml < mission.yaml."""
+"""Paths and layered configuration: DEFAULTS < workspace loop.yaml < goal.yaml."""
 from __future__ import annotations
 
 import copy
@@ -13,7 +13,7 @@ TEMPLATES = PLATFORM_ROOT / "templates"
 PYTHON = sys.executable
 
 DEFAULTS: dict = {
-    "limits": {"max_running_missions": 3, "max_workers_total": 6},
+    "limits": {"max_running_goals": 3, "max_workers_total": 6},
     "defaults": {
         # Fixed by the human: every meta-work turn and every worker turn uses these settings
         "meta_work": {"agent": "claude", "model": "opus", "effort": "high",
@@ -34,8 +34,8 @@ DEFAULTS: dict = {
     "guard": {"deny_patterns": []},
 }
 
-# Mission-level keys that override workspace defaults
-MISSION_KEYS = ("meta_work", "workers", "budget", "language", "base_branch", "push")
+# Goal-level keys that override workspace defaults
+GOAL_KEYS = ("meta_work", "workers", "budget", "language", "base_branch", "push")
 
 
 def home() -> Path:
@@ -75,10 +75,10 @@ def workspace_config(ws: Path) -> dict:
     return deep_merge(DEFAULTS, load_yaml(ws / "loop.yaml"))
 
 
-def mission_config(ws: Path, mid: str) -> dict:
-    """Effective config for a mission: workspace config with mission overrides in `defaults`."""
+def goal_config(ws: Path, gid: str) -> dict:
+    """Effective config for a goal: workspace config with goal overrides in `defaults`."""
     cfg = workspace_config(ws)
-    mission = load_yaml(ws / "missions" / mid / "mission.yaml")
-    cfg["mission"] = deep_merge(cfg["defaults"], {k: mission[k] for k in MISSION_KEYS if k in mission})
-    cfg["mission"]["title"] = mission.get("title", mid)
+    goal = load_yaml(ws / "goals" / gid / "goal.yaml")
+    cfg["goal"] = deep_merge(cfg["defaults"], {k: goal[k] for k in GOAL_KEYS if k in goal})
+    cfg["goal"]["title"] = goal.get("title", gid)
     return cfg

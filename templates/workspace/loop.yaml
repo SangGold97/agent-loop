@@ -1,10 +1,10 @@
-# Workspace defaults. Missions copy `defaults` at creation and may override them in mission.yaml.
+# Workspace defaults. Goals copy `defaults` at creation and may override them in goal.yaml.
 limits:
-  max_running_missions: 3     # missions (= meta-work sessions) running at once in this workspace
-  max_workers_total: 6        # worker sessions running at once (all missions of this workspace)
+  max_running_goals: 3        # goals (= meta-work sessions) running at once in this workspace
+  max_workers_total: 6        # worker sessions running at once (all goals of this workspace)
 
 defaults:
-  meta_work:                  # the session that runs a mission (fixed for every meta-work turn)
+  meta_work:                  # the session that runs a goal (fixed for every meta-work turn)
     agent: claude             # claude | codex
     model: opus               # models and efforts: Agent CLIs page (follows the installed CLI version)
     effort: high
@@ -15,11 +15,11 @@ defaults:
     codex:  {enabled: true, model: gpt-6-astra, effort: high, autocompact: null}
   budget:                     # tokens and time are tracked, not limited
     max_concurrent_workers: 3
-    max_worker_turns: 40      # spawn + send, over the whole mission
+    max_worker_turns: 40      # spawn + send, over the whole goal
     max_meta_turns: 80
   language: English           # language for the human (plan, journal, report, chat); agents talk to each other in English
   base_branch: null           # null = the repo's current branch
-  push: manual                # manual | branch (push loop/<mission>/integration on accept; never main)
+  push: manual                # manual | branch (push loop/<goal>/integration on accept; never main)
 
 digest:                       # what a finished worker turn sends back to the meta-work
   max_output_words: 500

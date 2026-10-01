@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 
 from . import agents, digest, gitops, workspace
-from .config import mission_config, workspace_config
+from .config import goal_config, workspace_config
 from .engine import AgentError, Engine
 
 WEB = Path(__file__).parent / "web"
@@ -58,12 +58,12 @@ def create_app(api_url: str) -> FastAPI:
         out = []
         for name in workspace.list_workspaces():
             p = workspace.ws_path(name)
-            missions = []
-            for mid in workspace.list_missions(p):
-                row = engine.mission_row(name, mid)
-                missions.append({"id": mid, "title": mission_config(p, mid)["mission"]["title"],
+            goals = []
+            for gid in workspace.list_goals(p):
+                row = engine.goal_row(name, gid)
+                goals.append({"id": gid, "title": goal_config(p, gid)["goal"]["title"],
                                  "status": row["status"], "outcome": row["outcome"]})
-            out.append({"name": name, "missions": missions})
+            out.append({"name": name, "goals": goals})
         return {"workspaces": out}
 
     @app.post("/api/workspaces")
@@ -100,8 +100,8 @@ def create_app(api_url: str) -> FastAPI:
         engine.human_edit(ws, "loop.yaml", (await body(req)).get("text", ""))
         return {"ok": True}
 
-    @app.post("/api/workspaces/{ws}/missions")
-    async def create_mission(ws: str, req: Request):
+    @app.post("/api/workspaces/{ws}/goals")
+    async def create_goal(ws: str, req: Request):
         b = await body(req)
         config = b.get("config")
         if isinstance(config, str):
@@ -109,68 +109,68 @@ def create_app(api_url: str) -> FastAPI:
         errors = agents.config_errors(config or {})
         if errors:
             raise AgentError("; ".join(errors))
-        mid = workspace.create_mission(workspace.ws_path(ws), b.get("title", ""), b.get("spec", ""),
+        gid = workspace.create_goal(workspace.ws_path(ws), b.get("title", ""), b.get("spec", ""),
                                        b.get("goal", ""), config)
-        engine.mission_row(ws, mid)
-        return {"id": mid}
+        engine.goal_row(ws, gid)
+        return {"id": gid}
 
-    # ---------- missions ----------
-    @app.get("/api/missions/{ws}/{mid}")
-    def get_mission(ws: str, mid: str):
+    # ---------- goals ----------
+    @app.get("/api/goals/{ws}/{gid}")
+    def get_goal(ws: str, gid: str):
         p = workspace.ws_path(ws)
-        row = engine.mission_row(ws, mid)
-        files = workspace.read_mission_files(p, mid)
-        sessions = engine.db.q("SELECT * FROM sessions WHERE ws=? AND mission=? ORDER BY created", ws, mid)
+        row = engine.goal_row(ws, gid)
+        files = workspace.read_goal_files(p, gid)
+        sessions = engine.db.q("SELECT * FROM sessions WHERE ws=? AND goal=? ORDER BY created", ws, gid)
         for s in sessions:
             s.pop("token", None)
             s["live"] = engine.runner.running(s["id"])
         done, total = digest.checklist(files["plan.md"])
-        return {"ws": ws, "id": mid, "row": row, "files": files, "config": mission_config(p, mid)["mission"],
-                "budget": engine.budget(ws, mid), "checklist": {"done": done, "total": total},
+        return {"ws": ws, "id": gid, "row": row, "files": files, "config": goal_config(p, gid)["goal"],
+                "budget": engine.budget(ws, gid), "checklist": {"done": done, "total": total},
                 "sessions": sessions,
-                "notes": engine.db.q("SELECT * FROM notes WHERE ws=? AND mission=? ORDER BY id DESC", ws, mid),
-                "verify": digest.verify_commands(files["goal.md"]), "meta_active": (ws, mid) in engine.meta_active}
+                "notes": engine.db.q("SELECT * FROM notes WHERE ws=? AND goal=? ORDER BY id DESC", ws, gid),
+                "verify": digest.verify_commands(files["goal.md"]), "meta_active": (ws, gid) in engine.meta_active}
 
-    @app.put("/api/missions/{ws}/{mid}/files/{name}")
-    async def put_file(ws: str, mid: str, name: str, req: Request):
-        engine.human_edit(ws, f"missions/{mid}/{name}", (await body(req)).get("text", ""))
+    @app.put("/api/goals/{ws}/{gid}/files/{name}")
+    async def put_file(ws: str, gid: str, name: str, req: Request):
+        engine.human_edit(ws, f"goals/{gid}/{name}", (await body(req)).get("text", ""))
         return {"ok": True}
 
-    @app.post("/api/missions/{ws}/{mid}/{action}")
-    async def mission_action(ws: str, mid: str, action: str, req: Request):
+    @app.post("/api/goals/{ws}/{gid}/{action}")
+    async def goal_action(ws: str, gid: str, action: str, req: Request):
         b = await body(req)
         if action == "start":
-            await engine.start_mission(ws, mid)
+            await engine.start_goal(ws, gid)
         elif action == "stop":
-            await engine.stop_mission(ws, mid)
+            await engine.stop_goal(ws, gid)
         elif action == "accept":
-            return {"tags": await engine.accept(ws, mid)}
+            return {"tags": await engine.accept(ws, gid)}
         elif action == "reopen":
-            await engine.reopen(ws, mid, b.get("text", ""))
+            await engine.reopen(ws, gid, b.get("text", ""))
         elif action == "notes":
-            return {"id": engine.add_note(ws, mid, b.get("text", ""), mode=b.get("mode", "queue"))}
+            return {"id": engine.add_note(ws, gid, b.get("text", ""), mode=b.get("mode", "queue"))}
         elif action == "meta-chats":
-            s = engine.create_meta_chat(ws, mid, b)
+            s = engine.create_meta_chat(ws, gid, b)
             return {"id": s["id"]}
         else:
             raise HTTPException(404, "unknown action")
         return {"ok": True}
 
-    @app.get("/api/missions/{ws}/{mid}/git")
-    def mission_git(ws: str, mid: str):
+    @app.get("/api/goals/{ws}/{gid}/git")
+    def goal_git(ws: str, gid: str):
         p = workspace.ws_path(ws)
-        branch, repo = gitops.int_branch(mid), p / "repo"
-        base = mission_config(p, mid)["mission"].get("base_branch") or gitops.current_branch(repo)
-        return {"branches": gitops.branches(p, mid), "base": base,
+        branch, repo = gitops.int_branch(gid), p / "repo"
+        base = goal_config(p, gid)["goal"].get("base_branch") or gitops.current_branch(repo)
+        return {"branches": gitops.branches(p, gid), "base": base,
                 "integration_log": gitops.log(repo, f"{base}..{branch}") if gitops.branch_exists(repo, branch) else [],
-                "workspace_log": [c for c in gitops.log(p, n=80) if mid in c["subject"] or c["author"] == "human"]}
+                "workspace_log": [c for c in gitops.log(p, n=80) if gid in c["subject"] or c["author"] == "human"]}
 
     @app.post("/api/notes/{nid}/{verdict}")
     async def review_note(nid: int, verdict: str, req: Request):
         b = await body(req)
         note = engine.db.one("SELECT * FROM notes WHERE id=?", nid)
         if verdict == "approve" and b.get("reopen") and note:
-            await engine.reopen(note["ws"], note["mission"], b.get("text") or note["text"], nid=nid)
+            await engine.reopen(note["ws"], note["goal"], b.get("text") or note["text"], nid=nid)
         else:
             engine.review_note(nid, verdict == "approve", b.get("mode", "queue"), b.get("text"))
         return {"ok": True}
@@ -199,10 +199,10 @@ def create_app(api_url: str) -> FastAPI:
         engine.meta_chat_send(sid, (await body(req)).get("text", ""))
         return {"ok": True}
 
-    @app.get("/api/runs/{ws}/{mid}/{sid}/{name}")
-    def run_file(ws: str, mid: str, sid: str, name: str):
-        path = (engine.mdir(ws, mid) / "runs" / sid / name).resolve()
-        if not path.is_relative_to((engine.mdir(ws, mid) / "runs").resolve()) or not path.is_file():
+    @app.get("/api/runs/{ws}/{gid}/{sid}/{name}")
+    def run_file(ws: str, gid: str, sid: str, name: str):
+        path = (engine.gdir(ws, gid) / "runs" / sid / name).resolve()
+        if not path.is_relative_to((engine.gdir(ws, gid) / "runs").resolve()) or not path.is_file():
             raise HTTPException(404)
         return FileResponse(path, media_type="text/plain")
 
@@ -266,7 +266,7 @@ def create_app(api_url: str) -> FastAPI:
         elif cmd == "note":
             if caller["kind"] != "meta-chat":
                 raise AgentError("meta-work sessions write strategy to plan.md; notes are proposed by meta-chats")
-            nid = engine.add_note(caller["ws"], caller["mission"], b.get("text", ""), author="meta-chat",
+            nid = engine.add_note(caller["ws"], caller["goal"], b.get("text", ""), author="meta-chat",
                                   status="pending", source=caller["id"])
             text = f"Proposed note #{nid}; the human will approve or reject it in the UI."
         elif cmd == "ls":
@@ -276,7 +276,7 @@ def create_app(api_url: str) -> FastAPI:
         elif cmd == "status":
             text = engine.status_text(caller)
         elif cmd == "budget":
-            text = digest.budget_line(engine.budget(caller["ws"], caller["mission"]))
+            text = digest.budget_line(engine.budget(caller["ws"], caller["goal"]))
         elif cmd == "infra":
             text = engine.infra_text()
         else:

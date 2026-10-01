@@ -1,4 +1,4 @@
-"""SQLite runtime state: missions, sessions, turns, inbox events, notes, meta-chat messages."""
+"""SQLite runtime state: goals, sessions, turns, inbox events, notes, meta-chat messages."""
 from __future__ import annotations
 
 import json
@@ -8,14 +8,14 @@ import time
 from pathlib import Path
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS missions(
+CREATE TABLE IF NOT EXISTS goals(
   ws TEXT, id TEXT, status TEXT, meta_work TEXT, first_started REAL, started REAL, ended REAL,
   meta_turns INT DEFAULT 0, worker_turns INT DEFAULT 0, tokens INT DEFAULT 0,
   cost REAL DEFAULT 0, final_turn INT DEFAULT 0, idle_streak INT DEFAULT 0,
   fail_streak INT DEFAULT 0, active_s REAL DEFAULT 0, outcome TEXT,
   PRIMARY KEY(ws, id));
 CREATE TABLE IF NOT EXISTS sessions(
-  id TEXT PRIMARY KEY, ws TEXT, mission TEXT, kind TEXT, parent TEXT, role TEXT,
+  id TEXT PRIMARY KEY, ws TEXT, goal TEXT, kind TEXT, parent TEXT, role TEXT,
   label TEXT, agent TEXT, model TEXT, effort TEXT, autocompact TEXT, vendor_id TEXT,
   cwd TEXT, branch TEXT, status TEXT, turns INT DEFAULT 0, tokens INT DEFAULT 0,
   cost REAL DEFAULT 0, context INT DEFAULT 0, token TEXT, gpu INT DEFAULT 0,
@@ -24,16 +24,16 @@ CREATE TABLE IF NOT EXISTS turns(
   id INTEGER PRIMARY KEY, session TEXT, n INT, started REAL, ended REAL, status TEXT,
   start_commit TEXT, end_commit TEXT, exit_code INT, tokens INT, cost REAL, final TEXT);
 CREATE TABLE IF NOT EXISTS inbox(
-  id INTEGER PRIMARY KEY, ws TEXT, mission TEXT, ts REAL, kind TEXT, payload TEXT,
+  id INTEGER PRIMARY KEY, ws TEXT, goal TEXT, ts REAL, kind TEXT, payload TEXT,
   deferred INT DEFAULT 0, consumed INT DEFAULT 0);
 CREATE TABLE IF NOT EXISTS notes(
-  id INTEGER PRIMARY KEY, ws TEXT, mission TEXT, ts REAL, text TEXT, author TEXT,
+  id INTEGER PRIMARY KEY, ws TEXT, goal TEXT, ts REAL, text TEXT, author TEXT,
   status TEXT, mode TEXT, source_session TEXT);
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY, session TEXT, ts REAL, role TEXT, text TEXT);
 """
 # Columns added after the first release: (table, column, type)
-ADDED_COLUMNS = [("missions", "first_started", "REAL")]
+ADDED_COLUMNS = [("goals", "first_started", "REAL")]
 
 
 class DB:
@@ -43,6 +43,12 @@ class DB:
         self.lock = threading.Lock()
         with self.lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
+            # Databases from before the mission -> goal rename
+            tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "missions" in tables and "goals" not in tables:
+                self.conn.execute("ALTER TABLE missions RENAME TO goals")
+                for table in ("sessions", "inbox", "notes"):
+                    self.conn.execute(f"ALTER TABLE {table} RENAME COLUMN mission TO goal")
             self.conn.executescript(SCHEMA)
             for table, col, typ in ADDED_COLUMNS:
                 if col not in [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")]:
@@ -71,9 +77,9 @@ class DB:
     def session(self, sid: str) -> dict | None:
         return self.one("SELECT * FROM sessions WHERE id=?", sid)
 
-    def mission(self, ws: str, mid: str) -> dict | None:
-        return self.one("SELECT * FROM missions WHERE ws=? AND id=?", ws, mid)
+    def goal(self, ws: str, gid: str) -> dict | None:
+        return self.one("SELECT * FROM goals WHERE ws=? AND id=?", ws, gid)
 
-    def push_inbox(self, ws: str, mid: str, kind: str, payload: dict, deferred: bool = False) -> int:
-        return self.x("INSERT INTO inbox(ws, mission, ts, kind, payload, deferred) VALUES(?,?,?,?,?,?)",
-                      ws, mid, time.time(), kind, json.dumps(payload), int(deferred))
+    def push_inbox(self, ws: str, gid: str, kind: str, payload: dict, deferred: bool = False) -> int:
+        return self.x("INSERT INTO inbox(ws, goal, ts, kind, payload, deferred) VALUES(?,?,?,?,?,?)",
+                      ws, gid, time.time(), kind, json.dumps(payload), int(deferred))

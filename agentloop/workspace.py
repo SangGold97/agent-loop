@@ -1,4 +1,4 @@
-"""Workspace and mission files: creation from templates, actor-tagged commits, protection."""
+"""Workspace and goal files: creation from templates, actor-tagged commits, protection."""
 from __future__ import annotations
 
 import hashlib
@@ -14,12 +14,12 @@ from pathlib import Path
 import yaml
 
 from . import gitops
-from .config import MISSION_KEYS, PYTHON, TEMPLATES, workspace_config, workspaces_dir
+from .config import GOAL_KEYS, PYTHON, TEMPLATES, workspace_config, workspaces_dir
 from .guard import PROTECTED_RE
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
-HUMAN_FILES = {"spec.md", "goal.md", "mission.yaml"}
-MISSION_FILES = ("spec.md", "goal.md", "plan.md", "journal.md", "notes.md", "report.md", "mission.yaml")
+HUMAN_FILES = {"spec.md", "goal.md", "goal.yaml"}
+GOAL_FILES = ("spec.md", "goal.md", "plan.md", "journal.md", "notes.md", "report.md", "goal.yaml")
 _locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 PRE_COMMIT = """#!/bin/sh
@@ -32,7 +32,7 @@ fi
 exit 0
 """
 PRE_PUSH = """#!/bin/sh
-# agent-loop: agents never push; the platform pushes only when the mission policy allows it
+# agent-loop: agents never push; the platform pushes only when the goal policy allows it
 if [ -n "$LOOP_ROLE" ]; then echo "agent-loop: agents cannot push" >&2; exit 1; fi
 [ -x "$0.orig" ] && exec "$0.orig" "$@"
 exit 0
@@ -50,15 +50,15 @@ def list_workspaces() -> list[str]:
     return sorted(p.name for p in root.iterdir() if (p / "loop.yaml").exists()) if root.exists() else []
 
 
-def mission_dir(ws: Path, mid: str) -> Path:
-    if not NAME_RE.match(mid) and not re.match(r"^\d{4}-\d{2}-\d{2}-[a-z0-9-]+$", mid):
-        raise ValueError(f"invalid mission id: {mid!r}")
-    return ws / "missions" / mid
+def goal_dir(ws: Path, gid: str) -> Path:
+    if not NAME_RE.match(gid) and not re.match(r"^\d{4}-\d{2}-\d{2}-[a-z0-9-]+$", gid):
+        raise ValueError(f"invalid goal id: {gid!r}")
+    return ws / "goals" / gid
 
 
-def list_missions(ws: Path) -> list[str]:
-    root = ws / "missions"
-    return sorted((p.name for p in root.iterdir() if (p / "mission.yaml").exists()), reverse=True) \
+def list_goals(ws: Path) -> list[str]:
+    root = ws / "goals"
+    return sorted((p.name for p in root.iterdir() if (p / "goal.yaml").exists()), reverse=True) \
         if root.exists() else []
 
 
@@ -80,7 +80,7 @@ def commit_external(ws: Path) -> bool:
 def enforce_protected(ws: Path) -> list[str]:
     """Revert agent changes to human-owned files. Returns the reverted paths.
 
-    The changed copy is kept under .loop/reverted/<ts>/ in case the human edited it mid-turn."""
+    The changed copy is kept under .loop/reverted/<ts>/ in case the human edited it gid-turn."""
     reverted, backup = [], ws / ".loop" / "reverted" / time.strftime("%Y%m%d-%H%M%S")
     with _locks[str(ws)]:
         for line in gitops.git(ws, "status", "--porcelain", "--untracked-files=all").splitlines():
@@ -120,7 +120,7 @@ def create_workspace(name: str, repo: str | None = None, base_branch: str | None
     for layer in ("meta", "worker"):
         hooks = ws / layer / "hooks.json"
         hooks.write_text(hooks.read_text().replace("{{PY}}", PYTHON))
-    for sub in ("missions", "wt", "data", ".loop"):
+    for sub in ("goals", "wt", "data", ".loop"):
         (ws / sub).mkdir(exist_ok=True)
     try:
         if repo:
@@ -144,31 +144,31 @@ def create_workspace(name: str, repo: str | None = None, base_branch: str | None
     return ws
 
 
-def create_mission(ws: Path, title: str, spec: str, goal: str, config: dict | None = None) -> str:
+def create_goal(ws: Path, title: str, spec: str, goal_text: str, config: dict | None = None) -> str:
     title = (title or "").strip()
     if not title:
-        raise ValueError("mission title is required")
+        raise ValueError("goal title is required")
     base_id = f"{date.today().isoformat()}-{gitops.slug(title, 40)}"
-    mid, i = base_id, 2
-    while (ws / "missions" / mid).exists():
-        mid, i = f"{base_id}-{i}", i + 1
-    mdir = ws / "missions" / mid
-    shutil.copytree(TEMPLATES / "mission", mdir)
-    (mdir / "runs").mkdir()
-    (mdir / "spec.md").write_text(spec.strip() + "\n" if spec.strip() else (mdir / "spec.md").read_text())
-    (mdir / "goal.md").write_text(goal.strip() + "\n" if goal.strip() else (mdir / "goal.md").read_text())
+    gid, i = base_id, 2
+    while (ws / "goals" / gid).exists():
+        gid, i = f"{base_id}-{i}", i + 1
+    gdir = ws / "goals" / gid
+    shutil.copytree(TEMPLATES / "goal", gdir)
+    (gdir / "runs").mkdir()
+    (gdir / "spec.md").write_text(spec.strip() + "\n" if spec.strip() else (gdir / "spec.md").read_text())
+    (gdir / "goal.md").write_text(goal_text.strip() + "\n" if goal_text.strip() else (gdir / "goal.md").read_text())
     defaults = workspace_config(ws)["defaults"]
     doc = {"title": title, "created": time.strftime("%Y-%m-%d %H:%M")}
-    for key in MISSION_KEYS:
+    for key in GOAL_KEYS:
         doc[key] = (config or {}).get(key, defaults[key])
-    (mdir / "mission.yaml").write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
-    commit(ws, "control-plane", f"control-plane: new mission {mid}")
-    return mid
+    (gdir / "goal.yaml").write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+    commit(ws, "control-plane", f"control-plane: new goal {gid}")
+    return gid
 
 
-def read_mission_files(ws: Path, mid: str) -> dict:
-    mdir = mission_dir(ws, mid)
-    return {n: (mdir / n).read_text() if (mdir / n).exists() else "" for n in MISSION_FILES}
+def read_goal_files(ws: Path, gid: str) -> dict:
+    gdir = goal_dir(ws, gid)
+    return {n: (gdir / n).read_text() if (gdir / n).exists() else "" for n in GOAL_FILES}
 
 
 def human_write(ws: Path, rel: str, text: str) -> str:
@@ -177,7 +177,7 @@ def human_write(ws: Path, rel: str, text: str) -> str:
     if not target.is_relative_to(ws.resolve()):
         raise ValueError("path escapes the workspace")
     name = target.name
-    if rel != "loop.yaml" and not (name in HUMAN_FILES and target.parent.parent.name == "missions"):
+    if rel != "loop.yaml" and not (name in HUMAN_FILES and target.parent.parent.name == "goals"):
         raise ValueError(f"{rel} is not a human-editable file")
     if name.endswith(".yaml"):
         data = yaml.safe_load(text)

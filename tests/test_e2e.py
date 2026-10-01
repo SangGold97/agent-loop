@@ -1,4 +1,4 @@
-"""End-to-end with the scripted fake agent: workspace -> mission -> meta-work -> worker -> merge -> done."""
+"""End-to-end with the scripted fake agent: workspace -> goal -> meta-work -> worker -> merge -> done."""
 import subprocess
 from pathlib import Path
 
@@ -9,58 +9,58 @@ from conftest import wait_for
 FAKE_ROLE = {"agent": "fake", "model": None, "effort": None, "autocompact": None}
 
 
-def mission_config():
+def goal_config():
     return {"meta_work": FAKE_ROLE, "workers": {"fake": {**FAKE_ROLE, "enabled": True}},
             "budget": {"max_concurrent_workers": 2, "max_worker_turns": 5, "max_meta_turns": 10},
             "base_branch": None, "push": "manual"}
 
 
-def test_full_mission(server):
+def test_full_goal(server):
     client, engine = server
     assert client.post("/api/workspaces", json={"name": "demo"}).status_code == 200
     ws = Path(engine.wsp("demo"))
     assert (ws / "meta/.claude/skills").is_symlink() and "{{PY}}" not in (ws / "meta/hooks.json").read_text()
 
-    r = client.post("/api/workspaces/demo/missions", json={
+    r = client.post("/api/workspaces/demo/goals", json={
         "title": "Hello world", "spec": "Create hello.py", "goal": "- hello.py exists\n- verify: `test -f hello.py`",
-        "config": mission_config()})
-    mid = r.json()["id"]
-    assert client.post(f"/api/missions/demo/{mid}/start").json() == {"ok": True}
+        "config": goal_config()})
+    gid = r.json()["id"]
+    assert client.post(f"/api/goals/demo/{gid}/start").json() == {"ok": True}
 
-    view = wait_for(lambda: (v := client.get(f"/api/missions/demo/{mid}").json())["row"]["status"]
+    view = wait_for(lambda: (v := client.get(f"/api/goals/demo/{gid}").json())["row"]["status"]
                     == "awaiting_review" and v)
     assert view["row"]["outcome"] == "success" and view["checklist"] == {"done": 1, "total": 1}
     assert "Status: **success**" in view["files"]["report.md"] and "`test -f hello.py` → exit 0" in view["files"]["report.md"]
     workers = [s for s in view["sessions"] if s["kind"] == "worker"]
     assert len(workers) == 1 and workers[0]["merged"] == 1
     sid = workers[0]["id"]
-    run = ws / "missions" / mid / "runs" / sid
+    run = ws / "goals" / gid / "runs" / sid
     assert (run / "t1.prompt.md").exists() and "hello.py" in (run / "t1.diff").read_text()
-    assert (ws / "wt" / f"_int-{mid}" / "hello.py").exists()
+    assert (ws / "wt" / f"_int-{gid}" / "hello.py").exists()
     authors = subprocess.run(["git", "log", "--format=%an"], cwd=ws, capture_output=True, text=True).stdout
     assert "control-plane" in authors and "meta-work(" in authors
 
     # Human edits of goal are committed as human; agents cannot touch it
-    client.put(f"/api/missions/demo/{mid}/files/goal.md", json={"text": "- hello.py exists\n"})
+    client.put(f"/api/goals/demo/{gid}/files/goal.md", json={"text": "- hello.py exists\n"})
     assert subprocess.run(["git", "log", "-1", "--format=%an"], cwd=ws, capture_output=True,
                           text=True).stdout.strip() == "human"
 
     # Meta-chat proposes a note; the human approves it
-    adv = client.post(f"/api/missions/demo/{mid}/meta-chats", json={}).json()["id"]
+    adv = client.post(f"/api/goals/demo/{gid}/meta-chats", json={}).json()["id"]
     client.post(f"/api/meta-chats/{adv}/messages", json={"text": "How is it going?"})
     msgs = wait_for(lambda: len(m := client.get(f"/api/meta-chats/{adv}/messages").json()["messages"]) == 2 and m)
     assert "Proposed note" in msgs[1]["text"]
-    pending = [n for n in client.get(f"/api/missions/demo/{mid}").json()["notes"] if n["status"] == "pending"]
+    pending = [n for n in client.get(f"/api/goals/demo/{gid}").json()["notes"] if n["status"] == "pending"]
     assert pending and client.post(f"/api/notes/{pending[0]['id']}/approve", json={"mode": "queue"}).status_code == 200
-    assert "Consider adding a test" in (ws / "missions" / mid / "notes.md").read_text()
+    assert "Consider adding a test" in (ws / "goals" / gid / "notes.md").read_text()
 
     # Accept: worktrees removed, integration branch kept
-    assert client.post(f"/api/missions/demo/{mid}/accept").status_code == 200
+    assert client.post(f"/api/goals/demo/{gid}/accept").status_code == 200
     assert not (ws / "wt" / sid).exists()
     branches = subprocess.run(["git", "branch", "--list", "loop/*"], cwd=ws / "repo", capture_output=True,
                               text=True).stdout
-    assert f"loop/{mid}/integration" in branches and sid not in branches
-    assert client.get(f"/api/missions/demo/{mid}").json()["row"]["status"] == "done"
+    assert f"loop/{gid}/integration" in branches and sid not in branches
+    assert client.get(f"/api/goals/demo/{gid}").json()["row"]["status"] == "done"
 
 
 def test_agent_api_requires_token(server):
@@ -72,17 +72,17 @@ def test_agent_api_requires_token(server):
 def test_budget_final_turn(server):
     client, engine = server
     client.post("/api/workspaces", json={"name": "budget"})
-    cfg = mission_config()
+    cfg = goal_config()
     cfg["budget"]["max_meta_turns"] = 1
-    mid = client.post("/api/workspaces/budget/missions", json={
+    gid = client.post("/api/workspaces/budget/goals", json={
         "title": "Tight budget", "spec": "x", "goal": "- verify: `test -f nope.txt`", "config": cfg}).json()["id"]
-    client.post(f"/api/missions/budget/{mid}/start")
-    view = wait_for(lambda: (v := client.get(f"/api/missions/budget/{mid}").json())["row"]["status"]
+    client.post(f"/api/goals/budget/{gid}/start")
+    view = wait_for(lambda: (v := client.get(f"/api/goals/budget/{gid}").json())["row"]["status"]
                     == "awaiting_review" and v)
     # verify fails -> success rejected; budget exhausted -> platform closes as partial
     assert view["row"]["outcome"] == "partial"
-    mission_yaml = yaml.safe_load((Path(engine.wsp("budget")) / "missions" / mid / "mission.yaml").read_text())
-    assert mission_yaml["budget"]["max_meta_turns"] == 1
+    goal_yaml = yaml.safe_load((Path(engine.wsp("budget")) / "goals" / gid / "goal.yaml").read_text())
+    assert goal_yaml["budget"]["max_meta_turns"] == 1
 
 
 def test_harness_editor(server):
@@ -113,14 +113,14 @@ def test_worker_platform_failure_reaches_meta_work(server, monkeypatch):
         raise RuntimeError("index.lock exists")
 
     monkeypatch.setattr("agentloop.engine.gitops.diff", broken_diff)
-    mid = client.post("/api/workspaces/broken/missions", json={
-        "title": "Broken git", "spec": "x", "goal": "- x", "config": mission_config()}).json()["id"]
-    client.post(f"/api/missions/broken/{mid}/start")
+    gid = client.post("/api/workspaces/broken/goals", json={
+        "title": "Broken git", "spec": "x", "goal": "- x", "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/broken/{gid}/start")
     wait_for(lambda: engine.db.one("SELECT id FROM inbox WHERE ws='broken' AND kind='worker_done' "
                                    "AND payload LIKE '%failed inside the platform%'"))
-    workers = [s for s in client.get(f"/api/missions/broken/{mid}").json()["sessions"] if s["kind"] == "worker"]
+    workers = [s for s in client.get(f"/api/goals/broken/{gid}").json()["sessions"] if s["kind"] == "worker"]
     assert workers and all(w["status"] != "running" for w in workers)
-    client.post(f"/api/missions/broken/{mid}/stop")
+    client.post(f"/api/goals/broken/{gid}/stop")
 
 
 def test_codex_home_keeps_system_skills_out_of_harness(server):
@@ -162,20 +162,20 @@ def test_cli_update_flow(server, monkeypatch):
 def test_fixed_agent_settings(server):
     client, engine = server
     client.post("/api/workspaces", json={"name": "fixed"})
-    cfg = mission_config()
-    mid = client.post("/api/workspaces/fixed/missions", json={
+    cfg = goal_config()
+    gid = client.post("/api/workspaces/fixed/goals", json={
         "title": "Fixed", "spec": "x", "goal": "- x", "config": cfg}).json()["id"]
-    client.post(f"/api/missions/fixed/{mid}/start")
-    worker = wait_for(lambda: next((s for s in client.get(f"/api/missions/fixed/{mid}").json()["sessions"]
+    client.post(f"/api/goals/fixed/{gid}/start")
+    worker = wait_for(lambda: next((s for s in client.get(f"/api/goals/fixed/{gid}").json()["sessions"]
                                     if s["kind"] == "worker"), None))
     meta = engine.db.one("SELECT * FROM sessions WHERE ws='fixed' AND kind='meta-work'")
     caller = {**meta}
     # A disabled CLI is refused; the meta-work only picks enabled ones
     cfg["workers"]["fake"]["enabled"] = False
     text = yaml.safe_dump({"title": "Fixed", **cfg})
-    assert client.put(f"/api/missions/fixed/{mid}/files/mission.yaml", json={"text": text}).status_code == 200
+    assert client.put(f"/api/goals/fixed/{gid}/files/goal.yaml", json={"text": text}).status_code == 200
     import asyncio
-    engine.db.update("missions", {"ws": "fixed", "id": mid}, status="running")
+    engine.db.update("goals", {"ws": "fixed", "id": gid}, status="running")
     try:
         asyncio.run(engine.spawn_worker(caller, "fake", "coder", "x", "do it"))
         raise AssertionError("disabled agent was accepted")
@@ -183,8 +183,8 @@ def test_fixed_agent_settings(server):
         assert "not enabled" in str(exc)
     # Model/effort follow the human config at the next turn
     cfg["workers"]["fake"].update(enabled=True, model="m2", effort="low")
-    client.put(f"/api/missions/fixed/{mid}/files/mission.yaml", json={"text": yaml.safe_dump({"title": "Fixed", **cfg})})
+    client.put(f"/api/goals/fixed/{gid}/files/goal.yaml", json={"text": yaml.safe_dump({"title": "Fixed", **cfg})})
     w = engine.db.session(worker["id"])
     spec = engine.build_spec(w, "again", w["turns"] + 1)
     assert (spec.model, spec.effort) == ("m2", "low") and engine.db.session(w["id"])["model"] == "m2"
-    engine.db.update("missions", {"ws": "fixed", "id": mid}, status="stopped")
+    engine.db.update("goals", {"ws": "fixed", "id": gid}, status="stopped")

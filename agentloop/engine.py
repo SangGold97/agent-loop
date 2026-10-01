@@ -1,4 +1,4 @@
-"""Mission engine: event-driven meta-work turns, workers, meta-chats, notes, budgets, review."""
+"""Goal engine: event-driven meta-work turns, workers, meta-chats, notes, budgets, review."""
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +18,7 @@ import yaml
 from . import agents, digest, gitops, workspace
 from .adapters import RunSpec
 from .adapters.base import to_tokens
-from .config import PYTHON, home, mission_config, state_dir, workspace_config
+from .config import PYTHON, home, goal_config, state_dir, workspace_config
 from .db import DB
 from .infra import Infra, tree_rss
 from .runner import Runner, child_env, unit_prefix
@@ -92,45 +92,45 @@ class Engine:
     def wsp(ws: str) -> Path:
         return workspace.ws_path(ws)
 
-    def mdir(self, ws: str, mid: str) -> Path:
-        return workspace.mission_dir(self.wsp(ws), mid)
+    def gdir(self, ws: str, gid: str) -> Path:
+        return workspace.goal_dir(self.wsp(ws), gid)
 
     def logs(self, ws: str, sid: str) -> tuple[Path, Path]:
         base = self.wsp(ws) / ".loop" / "sessions"
         base.mkdir(parents=True, exist_ok=True)
         return base / f"{sid}.raw.jsonl", base / f"{sid}.events.jsonl"
 
-    def mission_row(self, ws: str, mid: str) -> dict:
-        if not (self.mdir(ws, mid) / "mission.yaml").exists():
-            raise AgentError(f"mission {ws}/{mid} not found")
-        row = self.db.mission(ws, mid)
+    def goal_row(self, ws: str, gid: str) -> dict:
+        if not (self.gdir(ws, gid) / "goal.yaml").exists():
+            raise AgentError(f"goal {ws}/{gid} not found")
+        row = self.db.goal(ws, gid)
         if not row:
-            self.db.x("INSERT OR IGNORE INTO missions(ws, id, status) VALUES(?,?,?)", ws, mid, "draft")
-            row = self.db.mission(ws, mid)
+            self.db.x("INSERT OR IGNORE INTO goals(ws, id, status) VALUES(?,?,?)", ws, gid, "draft")
+            row = self.db.goal(ws, gid)
         return row
 
-    def set_mission(self, ws: str, mid: str, **fields) -> None:
-        self.db.update("missions", {"ws": ws, "id": mid}, **fields)
+    def set_goal(self, ws: str, gid: str, **fields) -> None:
+        self.db.update("goals", {"ws": ws, "id": gid}, **fields)
         if "status" in fields:
-            self.publish("mission_status", ws=ws, mission=mid, status=fields["status"])
+            self.publish("goal_status", ws=ws, goal=gid, status=fields["status"])
 
-    def workers(self, ws: str, mid: str, running_only: bool = False) -> list[dict]:
-        rows = self.db.q("SELECT * FROM sessions WHERE ws=? AND mission=? AND kind='worker' ORDER BY created",
-                         ws, mid)
+    def workers(self, ws: str, gid: str, running_only: bool = False) -> list[dict]:
+        rows = self.db.q("SELECT * FROM sessions WHERE ws=? AND goal=? AND kind='worker' ORDER BY created",
+                         ws, gid)
         return [r for r in rows if r["status"] == "running"] if running_only else rows
 
-    def new_session(self, ws: str, mid: str, kind: str, role: str, label: str, conf: dict, cwd: Path,
+    def new_session(self, ws: str, gid: str, kind: str, role: str, label: str, conf: dict, cwd: Path,
                     parent: str | None = None, branch: str | None = None, gpu: bool = False,
                     sid: str | None = None) -> dict:
         sid = sid or f"{PREFIX[kind]}-{secrets.token_hex(3)}"
         now = time.time()
-        self.db.x("INSERT INTO sessions(id, ws, mission, kind, parent, role, label, agent, model, effort, "
+        self.db.x("INSERT INTO sessions(id, ws, goal, kind, parent, role, label, agent, model, effort, "
                   "autocompact, cwd, branch, status, token, gpu, created, updated) "
                   "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  sid, ws, mid, kind, parent, role, label, conf["agent"], conf.get("model"), conf.get("effort"),
+                  sid, ws, gid, kind, parent, role, label, conf["agent"], conf.get("model"), conf.get("effort"),
                   None if conf.get("autocompact") is None else str(conf.get("autocompact")), str(cwd), branch,
                   "idle", secrets.token_hex(16) if kind != "worker" else None, int(gpu), now, now)
-        self.publish("session_status", ws=ws, mission=mid, session=sid, status="idle")
+        self.publish("session_status", ws=ws, goal=gid, session=sid, status="idle")
         return self.db.session(sid)
 
     # ---------- lifecycle ----------
@@ -145,13 +145,13 @@ class Engine:
             for t in cut:
                 self.db.update("turns", {"id": t["id"]}, status="interrupted", ended=time.time())
             self.db.update("sessions", {"id": s["id"]}, status="interrupted", turns=s["turns"] + len(cut))
-        for m in self.db.q("SELECT * FROM missions WHERE status='running'"):
-            names = [s["id"] for s in self.db.q("SELECT id FROM sessions WHERE ws=? AND mission=? AND "
+        for m in self.db.q("SELECT * FROM goals WHERE status='running'"):
+            names = [s["id"] for s in self.db.q("SELECT id FROM sessions WHERE ws=? AND goal=? AND "
                                                 "status='interrupted' AND kind='worker'", m["ws"], m["id"])]
             # Count active time up to the last recorded activity before the restart
-            last = self.db.one("SELECT MAX(updated) t FROM sessions WHERE ws=? AND mission=?", m["ws"], m["id"])["t"]
+            last = self.db.one("SELECT MAX(updated) t FROM sessions WHERE ws=? AND goal=?", m["ws"], m["id"])["t"]
             gained = max(0.0, (last or 0) - (m["started"] or time.time()))
-            self.db.update("missions", {"ws": m["ws"], "id": m["id"]}, started=time.time(),
+            self.db.update("goals", {"ws": m["ws"], "id": m["id"]}, started=time.time(),
                            active_s=(m["active_s"] or 0) + gained)
             self.db.push_inbox(m["ws"], m["id"], "system", {"text": (
                 "[System] The platform restarted. " + (f"Interrupted workers: {', '.join(names)} "
@@ -175,8 +175,8 @@ class Engine:
                 snap = await asyncio.to_thread(self.infra.sample)
                 snap["sessions"] = []
                 for key, (proc, _) in list(self.runner.procs.items()):
-                    s = self.db.session(key) or {"kind": "smoke", "ws": "", "mission": "", "role": ""}
-                    snap["sessions"].append({"id": key, "kind": s["kind"], "ws": s["ws"], "mission": s["mission"],
+                    s = self.db.session(key) or {"kind": "smoke", "ws": "", "goal": "", "role": ""}
+                    snap["sessions"].append({"id": key, "kind": s["kind"], "ws": s["ws"], "goal": s["goal"],
                                              "role": s["role"], "rss_gb": round(tree_rss(proc.pid) / 2**30, 2)})
                 self.publish("infra", data=snap)
             except Exception:
@@ -188,12 +188,12 @@ class Engine:
             await self.runner.kill(key)
 
     # ---------- budget ----------
-    def budget(self, ws: str, mid: str) -> dict:
-        cfg = mission_config(self.wsp(ws), mid)["mission"]["budget"]
-        m = self.mission_row(ws, mid)
+    def budget(self, ws: str, gid: str) -> dict:
+        cfg = goal_config(self.wsp(ws), gid)["goal"]["budget"]
+        m = self.goal_row(ws, gid)
         running = m["status"] == "running" and m["started"]
         active = (m["active_s"] or 0) + (time.time() - m["started"] if running else 0)
-        return {**cfg, "running_workers": len(self.workers(ws, mid, running_only=True)),
+        return {**cfg, "running_workers": len(self.workers(ws, gid, running_only=True)),
                 "worker_turns": m["worker_turns"], "meta_turns": m["meta_turns"], "hours": active / 3600,
                 "from": m["first_started"], "to": None if running else m["ended"]}
 
@@ -206,34 +206,34 @@ class Engine:
             return "worker turns", False
         return None
 
-    def check_budget(self, ws: str, mid: str) -> None:
-        m = self.mission_row(ws, mid)
+    def check_budget(self, ws: str, gid: str) -> None:
+        m = self.goal_row(ws, gid)
         if m["status"] != "running" or m["final_turn"]:
             return
-        b = self.budget(ws, mid)
+        b = self.budget(ws, gid)
         hit = self.exhausted(b)
         if not hit:
             return
         reason, hard = hit
         if hard:
-            for w in self.workers(ws, mid, running_only=True):
+            for w in self.workers(ws, gid, running_only=True):
                 self.spawn(self.runner.kill(w["id"], stopped=True))
         elif b["running_workers"]:
             return  # soft limit: let running workers report first
-        self.set_mission(ws, mid, final_turn=1)
-        self.db.push_inbox(ws, mid, "budget", {"text": (
+        self.set_goal(ws, gid, final_turn=1)
+        self.db.push_inbox(ws, gid, "budget", {"text": (
             f"[Budget exhausted: {reason}] No more workers can be started. This is your final turn: "
             "call `loop done --status partial` (or `success` if the goal is met) with a report.")})
-        self.kick(ws, mid)
+        self.kick(ws, gid)
 
-    def check_dispatch(self, ws: str, mid: str, gpu: bool) -> None:
+    def check_dispatch(self, ws: str, gid: str, gpu: bool) -> None:
         p = self.wsp(ws)
-        cfg, m, b = workspace_config(p), self.mission_row(ws, mid), self.budget(ws, mid)
+        cfg, m, b = workspace_config(p), self.goal_row(ws, gid), self.budget(ws, gid)
         if m["final_turn"] or self.exhausted(b):
             raise AgentError("budget exhausted: no more workers can be started; finalize with `loop done`")
         if b["running_workers"] >= (b["max_concurrent_workers"] or 1e9):
             raise AgentError(f"{b['running_workers']} workers already running (max {b['max_concurrent_workers']} "
-                             "for this mission); end your turn and wait for a report")
+                             "for this goal); end your turn and wait for a report")
         total = self.db.one("SELECT COUNT(*) c FROM sessions WHERE ws=? AND kind='worker' AND status='running'",
                             ws)["c"]
         if total >= cfg["limits"]["max_workers_total"]:
@@ -252,7 +252,7 @@ class Engine:
     # ---------- running one turn of any session ----------
     @staticmethod
     def language_rule(lang: str) -> str:
-        """Meta-only rule: human-facing text in the mission language, agent-to-agent text in English."""
+        """Meta-only rule: human-facing text in the goal language, agent-to-agent text in English."""
         if not lang or lang.lower() == "english":
             return ""
         return (f" LANGUAGE: the human reads {lang}. Write plan.md, journal.md, notes, reports and chat replies "
@@ -260,14 +260,14 @@ class Engine:
                 "commands and commit messages in the project's usual language.")
 
     def mode_text(self, sess: dict) -> str:
-        ws, mid = sess["ws"], sess["mission"]
-        p, mdir = self.wsp(ws), self.mdir(ws, mid)
-        lang = self.language_rule(mission_config(p, mid)["mission"].get("language"))
+        ws, gid = sess["ws"], sess["goal"]
+        p, gdir = self.wsp(ws), self.gdir(ws, gid)
+        lang = self.language_rule(goal_config(p, gid)["goal"].get("language"))
         if sess["kind"] == "meta-work":
-            return (f"MODE: META-WORK for mission {mid} in workspace {ws}. Mission dir: {mdir}. "
+            return (f"MODE: META-WORK for goal {gid} in workspace {ws}. Goal dir: {gdir}. "
                     f"Workspace root: {p}. Follow the META-WORK section of your AGENTS.md.{lang}")
-        orch = self.mission_row(ws, mid)["meta_work"] or "not started"
-        return (f"MODE: META-CHAT for mission {mid} in workspace {ws}. Mission dir: {mdir}. Workspace root: {p}. "
+        orch = self.goal_row(ws, gid)["meta_work"] or "not started"
+        return (f"MODE: META-CHAT for goal {gid} in workspace {ws}. Goal dir: {gdir}. Workspace root: {p}. "
                 f"Meta-work session: {orch}. Follow the META-CHAT section of your AGENTS.md; "
                 f"you cannot dispatch workers.{lang}")
 
@@ -277,39 +277,39 @@ class Engine:
         keys = ("model", "effort", "autocompact")
         if sess["kind"] == "meta-chat":
             return {k: sess[k] for k in keys}
-        mc = mission_config(self.wsp(sess["ws"]), sess["mission"])["mission"]
+        mc = goal_config(self.wsp(sess["ws"]), sess["goal"])["goal"]
         conf = mc["meta_work"] if sess["kind"] == "meta-work" else mc["workers"].get(sess["agent"], {})
         return {k: None if conf.get(k) is None else str(conf[k]) for k in keys}
 
     def build_spec(self, sess: dict, prompt: str, n: int) -> RunSpec:
-        ws, mid, sid = sess["ws"], sess["mission"], sess["id"]
-        p, mdir = self.wsp(ws), self.mdir(ws, mid)
-        cfg = mission_config(p, mid)
+        ws, gid, sid = sess["ws"], sess["goal"], sess["id"]
+        p, gdir = self.wsp(ws), self.gdir(ws, gid)
+        cfg = goal_config(p, gid)
         worker = sess["kind"] == "worker"
         conf = self.session_conf(sess)
         if any(conf[k] != sess[k] for k in conf):  # the human changed the config since the last turn
             self.db.update("sessions", {"id": sid}, **conf)
         env = {"LOOP_ROLE": sess["kind"],
-               "LOOP_WS": p, "LOOP_MISSION": mid, "LOOP_MISSION_DIR": mdir, "LOOP_SESSION": sid,
+               "LOOP_WS": p, "LOOP_GOAL": gid, "LOOP_GOAL_DIR": gdir, "LOOP_SESSION": sid,
                "LOOP_GUARD_PATTERNS": json.dumps(cfg["guard"]["deny_patterns"] or [])}
         spec = RunSpec(agent=sess["agent"], kind="worker" if worker else "meta", cwd=Path(sess["cwd"]),
                        prompt=prompt, model=conf["model"], effort=conf["effort"], autocompact=conf["autocompact"],
                        resume_id=sess["vendor_id"], env=env)
         if worker:
-            env.update({"LOOP_RUN_DIR": mdir / "runs" / sid})
+            env.update({"LOOP_RUN_DIR": gdir / "runs" / sid})
             if not sess["gpu"]:
                 env["CUDA_VISIBLE_DEVICES"] = ""
             if sess["agent"] == "codex":
                 spec.codex_home = workspace.codex_home(p, "worker")
             else:
                 spec.plugin_dir, spec.append_file = p / "worker" / "claude-plugin", p / "worker" / "AGENTS.md"
-                spec.settings_file, spec.add_dirs = p / "worker" / "hooks.json", [mdir, p / "data"]
+                spec.settings_file, spec.add_dirs = p / "worker" / "hooks.json", [gdir, p / "data"]
         else:
             env.update({"LOOP_API": self.api_url, "LOOP_TOKEN": sess["token"], "PATH_PREPEND": self.bin_dir})
             spec.system_text = self.mode_text(sess)
             if sess["agent"] == "codex":
                 spec.codex_home = workspace.codex_home(p, "meta")
-                spec.add_dirs = [mdir, p / "worker"]
+                spec.add_dirs = [gdir, p / "worker"]
             else:
                 spec.settings_file, spec.add_dirs = p / "meta" / "hooks.json", [p]
         if sess["agent"] == "codex":
@@ -317,21 +317,21 @@ class Engine:
         return spec
 
     async def run_turn(self, sess: dict, prompt: str, start_commit: str | None = None):
-        sid, ws, mid = sess["id"], sess["ws"], sess["mission"]
+        sid, ws, gid = sess["id"], sess["ws"], sess["goal"]
         n = sess["turns"] + 1
         spec = self.build_spec(sess, prompt, n)
         raw, events = self.logs(ws, sid)
-        cfg = mission_config(self.wsp(ws), mid)
+        cfg = goal_config(self.wsp(ws), gid)
         self.db.update("sessions", {"id": sid}, status="running", updated=time.time())
         turn_id = self.db.x("INSERT INTO turns(session, n, started, status, start_commit) VALUES(?,?,?,?,?)",
                             sid, n, time.time(), "running", start_commit)
-        self.publish("session_status", ws=ws, mission=mid, session=sid, status="running", turn=n)
-        self._log_event(ws, mid, sid, n, events, {"type": "turn", "n": n, "prompt": prompt})
+        self.publish("session_status", ws=ws, goal=gid, session=sid, status="running", turn=n)
+        self._log_event(ws, gid, sid, n, events, {"type": "turn", "n": n, "prompt": prompt})
 
         async def on_event(evt: dict) -> None:
             if evt["type"] == "init" and evt.get("vendor_id") and not sess["vendor_id"]:
                 self.db.update("sessions", {"id": sid}, vendor_id=evt["vendor_id"])
-            self.bus.publish({"type": "session_event", "ws": ws, "mission": mid, "session": sid, "turn": n,
+            self.bus.publish({"type": "session_event", "ws": ws, "goal": gid, "session": sid, "turn": n,
                               "event": evt})
 
         mem = cfg["infra"]["worker_memory_max_gb"] if sess["kind"] == "worker" else None
@@ -344,128 +344,128 @@ class Engine:
                        context=res.context or cur["context"], status=status, updated=time.time())
         self.db.update("turns", {"id": turn_id}, ended=time.time(), status=status, exit_code=res.exit_code,
                        tokens=res.tokens, cost=res.cost, final=(res.final or res.error)[:20000])
-        self._log_event(ws, mid, sid, n, events, {"type": "turn_end", "n": n, "status": status, "error": res.error,
+        self._log_event(ws, gid, sid, n, events, {"type": "turn_end", "n": n, "status": status, "error": res.error,
                                                    "tokens": res.tokens, "cost": res.cost})
-        self.publish("session_status", ws=ws, mission=mid, session=sid, status=status, turn=n)
+        self.publish("session_status", ws=ws, goal=gid, session=sid, status=status, turn=n)
         return res, n
 
-    def _log_event(self, ws: str, mid: str, sid: str, n: int, path: Path, evt: dict) -> None:
+    def _log_event(self, ws: str, gid: str, sid: str, n: int, path: Path, evt: dict) -> None:
         evt["ts"] = time.time()
         with path.open("a") as fh:
             fh.write(json.dumps(evt, ensure_ascii=False) + "\n")
-        self.bus.publish({"type": "session_event", "ws": ws, "mission": mid, "session": sid, "turn": n, "event": evt})
+        self.bus.publish({"type": "session_event", "ws": ws, "goal": gid, "session": sid, "turn": n, "event": evt})
 
-    # ---------- missions ----------
-    def kickoff_text(self, ws: str, mid: str) -> str:
-        p, mdir = self.wsp(ws), self.mdir(ws, mid)
-        mc = mission_config(p, mid)["mission"]
+    # ---------- goals ----------
+    def kickoff_text(self, ws: str, gid: str) -> str:
+        p, gdir = self.wsp(ws), self.gdir(ws, gid)
+        mc = goal_config(p, gid)["goal"]
         agents = "\n".join(f"  - `--agent {a}`: {c.get('model') or 'default model'} / effort {c.get('effort') or 'default'}"
                            for a, c in mc["workers"].items() if c.get("enabled", True))
-        return (f"[Kickoff] Mission \"{mc['title']}\" ({mid}) in workspace {ws}.\n"
-                f"- Mission dir: {mdir}. Read spec.md and goal.md first (read-only for you). "
+        return (f"[Kickoff] Goal \"{mc['title']}\" ({gid}) in workspace {ws}.\n"
+                f"- Goal dir: {gdir}. Read spec.md and goal.md first (read-only for you). "
                 "You own plan.md and journal.md there.\n"
-                f"- Project repo (read-only for you): {p / 'repo'}. Integration branch {gitops.int_branch(mid)} is checked out "
-                f"at {p / 'wt' / ('_int-' + mid)}.\n"
+                f"- Project repo (read-only for you): {p / 'repo'}. Integration branch {gitops.int_branch(gid)} is checked out "
+                f"at {p / 'wt' / ('_int-' + gid)}.\n"
                 f"- Worker agents (the human fixed model and effort; you pick the CLI and name the role):\n{agents}\n"
-                f"- Workspace map: {p / 'PLATFORM.md'}. Cross-mission memory: {p / 'meta' / 'memory'}.\n"
+                f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.\n"
                 "Write plan.md, add a journal entry, dispatch workers with `loop spawn`, then end your turn.")
 
-    async def start_mission(self, ws: str, mid: str) -> None:
-        p, m = self.wsp(ws), self.mission_row(ws, mid)
+    async def start_goal(self, ws: str, gid: str) -> None:
+        p, m = self.wsp(ws), self.goal_row(ws, gid)
         if m["status"] in ("running", "awaiting_review", "done"):
-            raise AgentError(f"mission is {m['status']}")
-        limit = workspace_config(p)["limits"]["max_running_missions"]
-        running = self.db.one("SELECT COUNT(*) c FROM missions WHERE ws=? AND status='running'", ws)["c"]
+            raise AgentError(f"goal is {m['status']}")
+        limit = workspace_config(p)["limits"]["max_running_goals"]
+        running = self.db.one("SELECT COUNT(*) c FROM goals WHERE ws=? AND status='running'", ws)["c"]
         if running >= limit:
-            raise AgentError(f"{running} missions already running in this workspace (max_running_missions={limit})")
-        mc = mission_config(p, mid)["mission"]
-        gitops.ensure_integration(p, mid, mc.get("base_branch"))
+            raise AgentError(f"{running} goals already running in this workspace (max_running_goals={limit})")
+        mc = goal_config(p, gid)["goal"]
+        gitops.ensure_integration(p, gid, mc.get("base_branch"))
         if not m["meta_work"]:
-            orch = self.new_session(ws, mid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
-            self.set_mission(ws, mid, meta_work=orch["id"])
-            self.db.push_inbox(ws, mid, "kickoff", {"text": self.kickoff_text(ws, mid)})
+            orch = self.new_session(ws, gid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
+            self.set_goal(ws, gid, meta_work=orch["id"])
+            self.db.push_inbox(ws, gid, "kickoff", {"text": self.kickoff_text(ws, gid)})
         else:
-            self.db.push_inbox(ws, mid, "system", {"text": "[System] The human resumed the mission. "
+            self.db.push_inbox(ws, gid, "system", {"text": "[System] The human resumed the goal. "
                                                            "Check `loop ls` and continue."})
-        self.set_mission(ws, mid, status="running", started=time.time(), final_turn=0, idle_streak=0,
+        self.set_goal(ws, gid, status="running", started=time.time(), final_turn=0, idle_streak=0,
                          fail_streak=0, first_started=m["first_started"] or time.time())
-        self.kick(ws, mid)
+        self.kick(ws, gid)
 
-    async def stop_mission(self, ws: str, mid: str, status: str = "stopped", meta_work: bool = True) -> None:
+    async def stop_goal(self, ws: str, gid: str, status: str = "stopped", meta_work: bool = True) -> None:
         """Leave the running state; kill workers (and the meta-work unless it is the caller)."""
-        m = self.mission_row(ws, mid)
+        m = self.goal_row(ws, gid)
         if m["status"] == "running":
-            self.set_mission(ws, mid, status=status, active_s=self.budget(ws, mid)["hours"] * 3600,
+            self.set_goal(ws, gid, status=status, active_s=self.budget(ws, gid)["hours"] * 3600,
                              started=None)
         elif m["status"] != status:
-            self.set_mission(ws, mid, status=status)
+            self.set_goal(ws, gid, status=status)
         kinds = ("worker", "meta-work") if meta_work else ("worker",)
-        for s in self.db.q("SELECT id, kind FROM sessions WHERE ws=? AND mission=?", ws, mid):
+        for s in self.db.q("SELECT id, kind FROM sessions WHERE ws=? AND goal=?", ws, gid):
             if s["kind"] in kinds:
                 await self.runner.kill(s["id"], stopped=True)
 
-    def kick(self, ws: str, mid: str) -> None:
-        if (ws, mid) not in self.meta_active:
-            self.spawn(self.meta_loop(ws, mid))
+    def kick(self, ws: str, gid: str) -> None:
+        if (ws, gid) not in self.meta_active:
+            self.spawn(self.meta_loop(ws, gid))
 
-    async def meta_loop(self, ws: str, mid: str) -> None:
-        key = (ws, mid)
+    async def meta_loop(self, ws: str, gid: str) -> None:
+        key = (ws, gid)
         if key in self.meta_active:
             return
         self.meta_active.add(key)
         try:
             while True:
-                m = self.mission_row(ws, mid)
+                m = self.goal_row(ws, gid)
                 if m["status"] != "running":
                     return
-                if not self.db.one("SELECT id FROM inbox WHERE ws=? AND mission=? AND consumed=0 AND deferred=0",
-                                   ws, mid):
+                if not self.db.one("SELECT id FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0",
+                                   ws, gid):
                     return
-                items = self.db.q("SELECT * FROM inbox WHERE ws=? AND mission=? AND consumed=0 ORDER BY id",
-                                  ws, mid)
+                items = self.db.q("SELECT * FROM inbox WHERE ws=? AND goal=? AND consumed=0 ORDER BY id",
+                                  ws, gid)
                 # Items stay in flight (2) until the turn completes; failures put them back (0)
                 ids = ",".join(str(i["id"]) for i in items)
                 self.db.x(f"UPDATE inbox SET consumed=2 WHERE id IN ({ids})")
                 try:
-                    await self.meta_turn(ws, mid, items)
+                    await self.meta_turn(ws, gid, items)
                 except Exception as exc:
                     self.db.x(f"UPDATE inbox SET consumed=0 WHERE id IN ({ids}) AND consumed=2")
-                    log.exception("meta turn failed for %s/%s", ws, mid)
-                    await self.stop_mission(ws, mid, status="paused")
-                    self.publish("alert", ws=ws, mission=mid, text=f"Meta-work turn crashed, mission paused: {exc!r}")
+                    log.exception("meta turn failed for %s/%s", ws, gid)
+                    await self.stop_goal(ws, gid, status="paused")
+                    self.publish("alert", ws=ws, goal=gid, text=f"Meta-work turn crashed, goal paused: {exc!r}")
                     return
                 self.db.x(f"UPDATE inbox SET consumed=1 WHERE id IN ({ids}) AND consumed=2")
-                await self.after_meta_turn(ws, mid, items)
+                await self.after_meta_turn(ws, gid, items)
         finally:
             self.meta_active.discard(key)
 
-    async def meta_turn(self, ws: str, mid: str, items: list[dict]) -> None:
-        p, m = self.wsp(ws), self.mission_row(ws, mid)
-        mc = mission_config(p, mid)["mission"]
+    async def meta_turn(self, ws: str, gid: str, items: list[dict]) -> None:
+        p, m = self.wsp(ws), self.goal_row(ws, gid)
+        mc = goal_config(p, gid)["goal"]
         orch = self.db.session(m["meta_work"])
         rotate = to_tokens(mc["meta_work"].get("rotate_at_tokens"))
         # A vendor session cannot move between CLIs, so a new meta-work agent means a fresh session
         if orch["agent"] != mc["meta_work"]["agent"] or (rotate and orch["context"] > rotate):
             # Fresh meta-work session; plan.md/journal.md carry the state across
             self.db.update("sessions", {"id": orch["id"]}, status="retired")
-            orch = self.new_session(ws, mid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
-            self.set_mission(ws, mid, meta_work=orch["id"])
+            orch = self.new_session(ws, gid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
+            self.set_goal(ws, gid, meta_work=orch["id"])
             items = [{"kind": "handoff", "payload": json.dumps({"text": (
                 "[Handoff] You are a fresh meta-work session replacing a previous one (its context grew too "
                 "large, or the human switched the meta-work agent). Regain state from plan.md, journal.md, notes.md and `loop ls`.\n\n"
-                + self.kickoff_text(ws, mid))})}] + items
+                + self.kickoff_text(ws, gid))})}] + items
         workspace.commit_external(p)
-        text = digest.envelope(items, digest.budget_line(self.budget(ws, mid)), self.infra.summary())
+        text = digest.envelope(items, digest.budget_line(self.budget(ws, gid)), self.infra.summary())
         res, n = await self.run_turn(orch, text)
         reverted = workspace.enforce_protected(p)
-        workspace.commit(p, f"meta-work({orch['id']})", f"meta-work({orch['id']}): {mid} turn {n}")
-        m = self.mission_row(ws, mid)
+        workspace.commit(p, f"meta-work({orch['id']})", f"meta-work({orch['id']}): {gid} turn {n}")
+        m = self.goal_row(ws, gid)
         fields = {"meta_turns": m["meta_turns"] + 1, "tokens": m["tokens"] + res.tokens,
                   "cost": m["cost"] + res.cost}
         if reverted:
-            self.db.push_inbox(ws, mid, "system", {"text": "[System] Reverted your edits to human-owned files: "
+            self.db.push_inbox(ws, gid, "system", {"text": "[System] Reverted your edits to human-owned files: "
                                                            + ", ".join(reverted)}, deferred=True)
-            self.publish("alert", ws=ws, mission=mid, text="Reverted edits to human-owned files (backup in "
+            self.publish("alert", ws=ws, goal=gid, text="Reverted edits to human-owned files (backup in "
                                                             ".loop/reverted/): " + ", ".join(reverted))
         ids = ",".join(str(i["id"]) for i in items if "id" in i)
         if res.stopped and ids:  # a human-stopped turn: keep its events for the next trigger
@@ -475,99 +475,99 @@ class Engine:
             if ids:  # redeliver the same events on the next attempt
                 self.db.x(f"UPDATE inbox SET consumed=0 WHERE id IN ({ids})")
             if fields["fail_streak"] >= 3:
-                self.db.update("missions", {"ws": ws, "id": mid}, **fields)
-                await self.stop_mission(ws, mid, status="paused")
-                self.publish("alert", ws=ws, mission=mid, text=f"Meta-work failed 3 times: {res.error}")
+                self.db.update("goals", {"ws": ws, "id": gid}, **fields)
+                await self.stop_goal(ws, gid, status="paused")
+                self.publish("alert", ws=ws, goal=gid, text=f"Meta-work failed 3 times: {res.error}")
                 return
             await asyncio.sleep(min(60, 10 * fields["fail_streak"]))
         else:
             fields["fail_streak"] = 0
-        self.db.update("missions", {"ws": ws, "id": mid}, **fields)
+        self.db.update("goals", {"ws": ws, "id": gid}, **fields)
 
-    async def after_meta_turn(self, ws: str, mid: str, items: list[dict]) -> None:
-        m = self.mission_row(ws, mid)
+    async def after_meta_turn(self, ws: str, gid: str, items: list[dict]) -> None:
+        m = self.goal_row(ws, gid)
         if m["status"] != "running":
             return
         if m["final_turn"] == 1 and any(i["kind"] == "budget" for i in items):
-            reason = (self.exhausted(self.budget(ws, mid)) or ("limit",))[0]
-            await self.finish(ws, mid, "partial", f"Budget exhausted ({reason}); the meta-work did not "
-                                                  "close the mission on its final turn.", [], by="platform")
+            reason = (self.exhausted(self.budget(ws, gid)) or ("limit",))[0]
+            await self.finish(ws, gid, "partial", f"Budget exhausted ({reason}); the meta-work did not "
+                                                  "close the goal on its final turn.", [], by="platform")
             return
-        self.check_budget(ws, mid)
-        pending = self.db.one("SELECT id FROM inbox WHERE ws=? AND mission=? AND consumed=0 AND deferred=0", ws, mid)
-        if self.workers(ws, mid, running_only=True) or pending or self.mission_row(ws, mid)["final_turn"]:
+        self.check_budget(ws, gid)
+        pending = self.db.one("SELECT id FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0", ws, gid)
+        if self.workers(ws, gid, running_only=True) or pending or self.goal_row(ws, gid)["final_turn"]:
             return
         streak = m["idle_streak"] + 1
-        self.set_mission(ws, mid, idle_streak=streak)
+        self.set_goal(ws, gid, idle_streak=streak)
         if streak <= 2:
-            self.db.push_inbox(ws, mid, "system", {"text": (
-                "[System] No workers are running and the mission is still open. Dispatch work, or call "
+            self.db.push_inbox(ws, gid, "system", {"text": (
+                "[System] No workers are running and the goal is still open. Dispatch work, or call "
                 "`loop done` if the goal is met, progress has stalled, or you need the human.")})
         else:
-            await self.stop_mission(ws, mid, status="paused")
-            self.publish("alert", ws=ws, mission=mid, text="Meta-work went idle; mission paused.")
+            await self.stop_goal(ws, gid, status="paused")
+            self.publish("alert", ws=ws, goal=gid, text="Meta-work went idle; goal paused.")
 
-    async def finish(self, ws: str, mid: str, status: str, report: str, verify: list[dict], by: str) -> None:
-        mdir = self.mdir(ws, mid)
-        await self.stop_mission(ws, mid, status="awaiting_review", meta_work=False)
+    async def finish(self, ws: str, gid: str, status: str, report: str, verify: list[dict], by: str) -> None:
+        gdir = self.gdir(ws, gid)
+        await self.stop_goal(ws, gid, status="awaiting_review", meta_work=False)
         lines = [f"# Completion report\n", f"- Status: **{status}**", f"- Closed by: {by}",
                  f"- Time: {time.strftime('%Y-%m-%d %H:%M')}\n", report.strip() + "\n"]
         if verify:
             lines.append("## Verify commands\n")
             lines += [f"- `{v['cmd']}` → exit {v['code']}" for v in verify]
-        (mdir / "report.md").write_text("\n".join(lines) + "\n")
-        self.set_mission(ws, mid, outcome=status, ended=time.time())
-        workspace.commit(self.wsp(ws), "control-plane", f"control-plane: {mid} closed ({status})")
-        self.publish("alert", ws=ws, mission=mid, text=f"Mission closed as {status}; awaiting your review.")
+        (gdir / "report.md").write_text("\n".join(lines) + "\n")
+        self.set_goal(ws, gid, outcome=status, ended=time.time())
+        workspace.commit(self.wsp(ws), "control-plane", f"control-plane: {gid} closed ({status})")
+        self.publish("alert", ws=ws, goal=gid, text=f"Goal closed as {status}; awaiting your review.")
 
-    async def accept(self, ws: str, mid: str) -> list[str]:
-        p, m = self.wsp(ws), self.mission_row(ws, mid)
+    async def accept(self, ws: str, gid: str) -> list[str]:
+        p, m = self.wsp(ws), self.goal_row(ws, gid)
         if m["status"] != "awaiting_review":
-            raise AgentError("only a mission awaiting review can be accepted")
-        tags = gitops.cleanup(p, mid, self.workers(ws, mid))
-        if mission_config(p, mid)["mission"]["push"] == "branch" and gitops.git(p / "repo", "remote", check=False):
-            gitops.git(p / "repo", "push", "origin", gitops.int_branch(mid), check=False)
-        self.set_mission(ws, mid, status="done")
-        workspace.commit(p, "human", f"human: accepted {mid}")
+            raise AgentError("only a goal awaiting review can be accepted")
+        tags = gitops.cleanup(p, gid, self.workers(ws, gid))
+        if goal_config(p, gid)["goal"]["push"] == "branch" and gitops.git(p / "repo", "remote", check=False):
+            gitops.git(p / "repo", "push", "origin", gitops.int_branch(gid), check=False)
+        self.set_goal(ws, gid, status="done")
+        workspace.commit(p, "human", f"human: accepted {gid}")
         return tags
 
-    async def reopen(self, ws: str, mid: str, text: str, nid: int | None = None) -> None:
+    async def reopen(self, ws: str, gid: str, text: str, nid: int | None = None) -> None:
         """Back to running after review; the human's note (new, or an approved pending one) is delivered now."""
-        m = self.mission_row(ws, mid)
+        m = self.goal_row(ws, gid)
         if m["status"] != "awaiting_review":
-            raise AgentError("only a mission awaiting review can be reopened")
-        self.set_mission(ws, mid, status="running", started=time.time(), final_turn=0, idle_streak=0, outcome=None)
-        self.db.push_inbox(ws, mid, "system", {"text": "[System] The human reviewed your report and reopened "
-                                                       "the mission; see the note."}, deferred=True)
+            raise AgentError("only a goal awaiting review can be reopened")
+        self.set_goal(ws, gid, status="running", started=time.time(), final_turn=0, idle_streak=0, outcome=None)
+        self.db.push_inbox(ws, gid, "system", {"text": "[System] The human reviewed your report and reopened "
+                                                       "the goal; see the note."}, deferred=True)
         if nid:
             self.review_note(nid, True, "now", text)
         else:
-            self.add_note(ws, mid, text or "Reopened after review.", mode="now")
-        self.kick(ws, mid)
+            self.add_note(ws, gid, text or "Reopened after review.", mode="now")
+        self.kick(ws, gid)
 
     # ---------- notes and human edits ----------
-    def add_note(self, ws: str, mid: str, text: str, author: str = "human", mode: str = "queue",
+    def add_note(self, ws: str, gid: str, text: str, author: str = "human", mode: str = "queue",
                  status: str = "approved", source: str | None = None) -> int:
         text = text.strip()
         if not text:
             raise AgentError("empty note")
-        nid = self.db.x("INSERT INTO notes(ws, mission, ts, text, author, status, mode, source_session) "
-                        "VALUES(?,?,?,?,?,?,?,?)", ws, mid, time.time(), text, author, status, mode, source)
+        nid = self.db.x("INSERT INTO notes(ws, goal, ts, text, author, status, mode, source_session) "
+                        "VALUES(?,?,?,?,?,?,?,?)", ws, gid, time.time(), text, author, status, mode, source)
         if status == "approved":
             self.deliver_note(nid)
-        self.publish("note", ws=ws, mission=mid, id=nid, status=status)
+        self.publish("note", ws=ws, goal=gid, id=nid, status=status)
         return nid
 
     def deliver_note(self, nid: int) -> None:
         n = self.db.one("SELECT * FROM notes WHERE id=?", nid)
-        path = self.mdir(n["ws"], n["mission"]) / "notes.md"
+        path = self.gdir(n["ws"], n["goal"]) / "notes.md"
         with path.open("a") as fh:
             fh.write(f"\n## Note #{nid} · {time.strftime('%Y-%m-%d %H:%M')} · {n['author']}\n\n{n['text']}\n")
-        workspace.commit(self.wsp(n["ws"]), "human", f"human: note #{nid} for {n['mission']}")
-        self.db.push_inbox(n["ws"], n["mission"], "note", {"id": nid, "text": n["text"]},
+        workspace.commit(self.wsp(n["ws"]), "human", f"human: note #{nid} for {n['goal']}")
+        self.db.push_inbox(n["ws"], n["goal"], "note", {"id": nid, "text": n["text"]},
                            deferred=n["mode"] != "now")
         if n["mode"] == "now":
-            self.kick(n["ws"], n["mission"])
+            self.kick(n["ws"], n["goal"])
 
     def review_note(self, nid: int, approve: bool, mode: str = "queue", text: str | None = None) -> None:
         n = self.db.one("SELECT * FROM notes WHERE id=?", nid)
@@ -577,7 +577,7 @@ class Engine:
                        text=(text or n["text"]).strip())
         if approve:
             self.deliver_note(nid)
-        self.publish("note", ws=n["ws"], mission=n["mission"], id=nid)
+        self.publish("note", ws=n["ws"], goal=n["goal"], id=nid)
 
     def human_edit(self, ws: str, rel: str, text: str) -> None:
         if rel.endswith(".yaml"):
@@ -587,12 +587,12 @@ class Engine:
                 raise AgentError("; ".join(errors))
         change = workspace.human_write(self.wsp(ws), rel, text)
         parts = Path(rel).parts
-        if change and len(parts) == 3 and parts[0] == "missions":
-            mid, name = parts[1], parts[2]
-            if self.mission_row(ws, mid)["status"] in ("running", "paused", "stopped"):
-                self.db.push_inbox(ws, mid, "file_changed", {"name": name, "diff": change},
-                                   deferred=name == "mission.yaml")
-                self.kick(ws, mid)
+        if change and len(parts) == 3 and parts[0] == "goals":
+            gid, name = parts[1], parts[2]
+            if self.goal_row(ws, gid)["status"] in ("running", "paused", "stopped"):
+                self.db.push_inbox(ws, gid, "file_changed", {"name": name, "diff": change},
+                                   deferred=name == "goal.yaml")
+                self.kick(ws, gid)
         self.publish("file_changed", ws=ws, path=rel)
 
     # ---------- workers ----------
@@ -604,24 +604,24 @@ class Engine:
 
     def own_worker(self, caller: dict, sid: str) -> dict:
         w = self.db.session(sid)
-        if not w or w["kind"] != "worker" or w["mission"] != caller["mission"] or w["ws"] != caller["ws"]:
-            raise AgentError(f"no worker {sid} in this mission (see `loop ls`)")
+        if not w or w["kind"] != "worker" or w["goal"] != caller["goal"] or w["ws"] != caller["ws"]:
+            raise AgentError(f"no worker {sid} in this goal (see `loop ls`)")
         return w
 
     def require_meta_work(self, caller: dict) -> dict:
         if caller["kind"] != "meta-work":
-            raise AgentError("only the mission meta-work can do this; propose a note with `loop note` instead")
-        m = self.mission_row(caller["ws"], caller["mission"])
+            raise AgentError("only the goal meta-work can do this; propose a note with `loop note` instead")
+        m = self.goal_row(caller["ws"], caller["goal"])
         if m["status"] != "running":
-            raise AgentError(f"mission is {m['status']}")
+            raise AgentError(f"goal is {m['status']}")
         return m
 
     async def spawn_worker(self, caller: dict, agent: str, role: str, label: str, prompt: str,
                            gpu: bool = False) -> str:
         self.require_meta_work(caller)
-        ws, mid = caller["ws"], caller["mission"]
+        ws, gid = caller["ws"], caller["goal"]
         p = self.wsp(ws)
-        workers = mission_config(p, mid)["mission"]["workers"]
+        workers = goal_config(p, gid)["goal"]["workers"]
         enabled = [a for a, c in workers.items() if c.get("enabled", True)]
         if agent not in enabled:
             raise AgentError(f"worker agent {agent!r} is not enabled; use --agent {' or '.join(enabled) or '(none)'}")
@@ -630,14 +630,14 @@ class Engine:
         role = gitops.slug(role)
         if not prompt.strip():
             raise AgentError("empty prompt")
-        self.check_dispatch(ws, mid, gpu)
+        self.check_dispatch(ws, gid, gpu)
         sid = f"w-{secrets.token_hex(3)}"
-        wt, branch = gitops.add_worker_worktree(p, mid, sid, label or role)
-        sess = self.new_session(ws, mid, "worker", role, label or role, {"agent": agent, **workers[agent]}, wt,
+        wt, branch = gitops.add_worker_worktree(p, gid, sid, label or role)
+        sess = self.new_session(ws, gid, "worker", role, label or role, {"agent": agent, **workers[agent]}, wt,
                                 parent=caller["id"],
                                 branch=branch, gpu=gpu, sid=sid)
         self.db.update("sessions", {"id": sid}, status="running")
-        self._count_dispatch(ws, mid)
+        self._count_dispatch(ws, gid)
         self.spawn(self.worker_turn(sid, prompt))
         return (f"Spawned {sid} (role {role}: {sess['agent']}/{sess['model'] or 'default'}) on branch {branch}. "
                 "End your turn; you will be resumed when it reports.")
@@ -651,43 +651,43 @@ class Engine:
             raise AgentError(f"{sid}'s worktree no longer exists; spawn a new worker")
         if not prompt.strip():
             raise AgentError("empty prompt")
-        self.check_dispatch(caller["ws"], caller["mission"], bool(w["gpu"]))
+        self.check_dispatch(caller["ws"], caller["goal"], bool(w["gpu"]))
         self.db.update("sessions", {"id": sid}, status="running")
-        self._count_dispatch(caller["ws"], caller["mission"])
+        self._count_dispatch(caller["ws"], caller["goal"])
         self.spawn(self.worker_turn(sid, prompt))
         return f"Sent turn {w['turns'] + 1} to {sid}. End your turn; you will be resumed when it reports."
 
-    def _count_dispatch(self, ws: str, mid: str) -> None:
-        m = self.mission_row(ws, mid)
-        self.set_mission(ws, mid, worker_turns=m["worker_turns"] + 1, idle_streak=0)
+    def _count_dispatch(self, ws: str, gid: str) -> None:
+        m = self.goal_row(ws, gid)
+        self.set_goal(ws, gid, worker_turns=m["worker_turns"] + 1, idle_streak=0)
 
     async def worker_turn(self, sid: str, prompt: str) -> None:
         sess = self.db.session(sid)
-        ws, mid = sess["ws"], sess["mission"]
+        ws, gid = sess["ws"], sess["goal"]
         try:
             text, n = await self._worker_turn(sess, prompt)
         except Exception as exc:
-            # Any platform failure must still reach the meta-work, or the mission stalls on a phantom worker
+            # Any platform failure must still reach the meta-work, or the goal stalls on a phantom worker
             log.exception("worker turn failed for %s", sid)
             cur = self.db.session(sid)
             if cur["status"] == "running":
                 self.db.update("sessions", {"id": sid}, status="failed", updated=time.time())
-                self.publish("session_status", ws=ws, mission=mid, session=sid, status="failed")
+                self.publish("session_status", ws=ws, goal=gid, session=sid, status="failed")
             n = cur["turns"]
             text = (f"[Worker {sid} · role {cur['role']}] turn failed inside the platform: {exc!r}. Its worktree "
                     f"{cur['cwd']} is intact; retry with `loop send {sid}` or spawn a new worker.")
-        self.db.push_inbox(ws, mid, "worker_done", {"text": text, "sid": sid, "turn": n})
-        self.check_budget(ws, mid)
-        self.kick(ws, mid)
+        self.db.push_inbox(ws, gid, "worker_done", {"text": text, "sid": sid, "turn": n})
+        self.check_budget(ws, gid)
+        self.kick(ws, gid)
 
     async def _worker_turn(self, sess: dict, prompt: str) -> tuple[str, int]:
-        sid, ws, mid = sess["id"], sess["ws"], sess["mission"]
-        p, rd = self.wsp(ws), self.mdir(ws, mid) / "runs" / sid
-        cfg = mission_config(p, mid)
+        sid, ws, gid = sess["id"], sess["ws"], sess["goal"]
+        p, rd = self.wsp(ws), self.gdir(ws, gid) / "runs" / sid
+        cfg = goal_config(p, gid)
         wt, n = Path(sess["cwd"]), sess["turns"] + 1
         (rd / "artifacts").mkdir(parents=True, exist_ok=True)
         digest.write_text(rd / f"t{n}.prompt.md", prompt)
-        header = (f"[agent-loop] mission {mid} · role {sess['role']} · worktree {wt} (branch {sess['branch']}) · "
+        header = (f"[agent-loop] goal {gid} · role {sess['role']} · worktree {wt} (branch {sess['branch']}) · "
                   f"run dir {rd} · memory limit {cfg['infra']['worker_memory_max_gb']} GB · GPU "
                   f"{'granted' if sess['gpu'] else 'not granted'}")
         start = gitops.head(wt)
@@ -702,8 +702,8 @@ class Engine:
         paths["diff"] = digest.write_text(rd / f"t{n}.diff", patch) if patch else ""
         self.db.x("UPDATE turns SET end_commit=? WHERE session=? AND n=?", end, sid, n)
         text = digest.worker_digest(self.db.session(sid), n, res, stat, patch, paths, cfg["digest"])
-        m = self.mission_row(ws, mid)
-        self.set_mission(ws, mid, tokens=m["tokens"] + res.tokens, cost=m["cost"] + res.cost)
+        m = self.goal_row(ws, gid)
+        self.set_goal(ws, gid, tokens=m["tokens"] + res.tokens, cost=m["cost"] + res.cost)
         workspace.commit(p, "control-plane", f"control-plane: {sid} turn {n} evidence")
         return text, n
 
@@ -720,14 +720,14 @@ class Engine:
         if w["status"] == "running":
             raise AgentError(f"{sid} is still running")
         # Parallel `loop merge` calls would interleave in the single integration worktree
-        with self.merge_locks.setdefault((w["ws"], w["mission"]), threading.Lock()):
-            res = gitops.merge(self.wsp(w["ws"]), w["mission"], w["branch"])
+        with self.merge_locks.setdefault((w["ws"], w["goal"]), threading.Lock()):
+            res = gitops.merge(self.wsp(w["ws"]), w["goal"], w["branch"])
         if not res["ok"]:
             return (f"Merge of {w['branch']} FAILED with conflicts in: {', '.join(res['conflicts']) or '?'}. "
-                    f"The merge was aborted. Ask a worker to merge {gitops.int_branch(w['mission'])} into its branch and resolve.")
+                    f"The merge was aborted. Ask a worker to merge {gitops.int_branch(w['goal'])} into its branch and resolve.")
         self.db.update("sessions", {"id": sid}, merged=1)
-        self.publish("session_status", ws=w["ws"], mission=w["mission"], session=sid, status=w["status"])
-        return f"Merged {w['branch']} into {gitops.int_branch(w['mission'])}." + (f"\n{res['stat']}" if res["stat"] else
+        self.publish("session_status", ws=w["ws"], goal=w["goal"], session=sid, status=w["status"])
+        return f"Merged {w['branch']} into {gitops.int_branch(w['goal'])}." + (f"\n{res['stat']}" if res["stat"] else
                                                                   " (nothing new)")
 
     async def done(self, caller: dict, status: str, report: str) -> str:
@@ -736,11 +736,11 @@ class Engine:
             raise AgentError("status must be success, partial or blocked")
         if not report.strip():
             raise AgentError("a report is required (map each goal criterion to evidence and a verdict)")
-        ws, mid = caller["ws"], caller["mission"]
+        ws, gid = caller["ws"], caller["goal"]
         p, results = self.wsp(ws), []
         if status == "success":
-            wt = p / "wt" / f"_int-{mid}"
-            for cmd in digest.verify_commands((self.mdir(ws, mid) / "goal.md").read_text()):
+            wt = p / "wt" / f"_int-{gid}"
+            for cmd in digest.verify_commands((self.gdir(ws, gid) / "goal.md").read_text()):
                 proc = await asyncio.create_subprocess_shell(
                     cmd, cwd=wt, env=child_env({}), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                     start_new_session=True)
@@ -756,12 +756,12 @@ class Engine:
                 return "REJECTED: verify commands failed on the integration branch:\n" + "\n".join(
                     f"$ {r['cmd']} (exit {r['code']})\n{r['out']}" for r in failed) + \
                     "\nFix (merge the right work, or delegate fixes), or close with --status partial."
-        await self.finish(ws, mid, status, report, results, by=f"meta-work {caller['id']}")
-        return f"Mission closed as {status}; the human will review report.md. End your turn now."
+        await self.finish(ws, gid, status, report, results, by=f"meta-work {caller['id']}")
+        return f"Goal closed as {status}; the human will review report.md. End your turn now."
 
     # ---------- read views (agents + UI) ----------
     def ls_text(self, caller: dict) -> str:
-        rows = self.workers(caller["ws"], caller["mission"])
+        rows = self.workers(caller["ws"], caller["goal"])
         if not rows:
             return "No workers yet."
         out = ["id | role | label | agent/model | status | turns | context | tokens | merged | branch"]
@@ -773,7 +773,7 @@ class Engine:
 
     def show_text(self, caller: dict, sid: str, turn: int | None, full: bool) -> str:
         w = self.own_worker(caller, sid)
-        rd = self.mdir(w["ws"], w["mission"]) / "runs" / sid
+        rd = self.gdir(w["ws"], w["goal"]) / "runs" / sid
         turns = self.db.q("SELECT * FROM turns WHERE session=? ORDER BY n", sid)
         if not turn:
             lines = [f"{sid}: role {w['role']}, label {w['label']}, {w['agent']}/{w['model']}, status {w['status']}, "
@@ -798,14 +798,14 @@ class Engine:
         return "\n".join(out)
 
     def status_text(self, caller: dict) -> str:
-        ws, mid = caller["ws"], caller["mission"]
-        m, mdir = self.mission_row(ws, mid), self.mdir(ws, mid)
-        done, total = digest.checklist((mdir / "plan.md").read_text())
-        recent = self.db.q("SELECT kind, payload, ts FROM inbox WHERE ws=? AND mission=? ORDER BY id DESC LIMIT 8",
-                           ws, mid)
-        lines = [f"Mission {mid}: {m['status']}" + (f" ({m['outcome']})" if m["outcome"] else ""),
+        ws, gid = caller["ws"], caller["goal"]
+        m, gdir = self.goal_row(ws, gid), self.gdir(ws, gid)
+        done, total = digest.checklist((gdir / "plan.md").read_text())
+        recent = self.db.q("SELECT kind, payload, ts FROM inbox WHERE ws=? AND goal=? ORDER BY id DESC LIMIT 8",
+                           ws, gid)
+        lines = [f"Goal {gid}: {m['status']}" + (f" ({m['outcome']})" if m["outcome"] else ""),
                  f"Meta-work: {m['meta_work'] or '-'} · plan checklist {done}/{total}",
-                 digest.budget_line(self.budget(ws, mid)), "Workers:", self.ls_text(caller), "Recent events:"]
+                 digest.budget_line(self.budget(ws, gid)), "Workers:", self.ls_text(caller), "Recent events:"]
         for r in recent:
             first = json.loads(r["payload"]).get("text", "").splitlines()[:1]
             lines.append(f"- {time.strftime('%H:%M', time.localtime(r['ts']))} {r['kind']}: "
@@ -835,10 +835,10 @@ class Engine:
             return [json.loads(x) for x in deque((x for x in fh if x.startswith(keys, 1)), maxlen=limit)]
 
     # ---------- meta-chats ----------
-    def create_meta_chat(self, ws: str, mid: str, overrides: dict | None = None) -> dict:
-        self.mission_row(ws, mid)
-        # Chosen per chat by the human; unset fields fall back to the mission's meta-work settings
-        mc = mission_config(self.wsp(ws), mid)["mission"]
+    def create_meta_chat(self, ws: str, gid: str, overrides: dict | None = None) -> dict:
+        self.goal_row(ws, gid)
+        # Chosen per chat by the human; unset fields fall back to the goal's meta-work settings
+        mc = goal_config(self.wsp(ws), gid)["goal"]
         conf = {k: v for k, v in (overrides or {}).items() if k in ("agent", "model", "effort") and v}
         if conf.get("agent", mc["meta_work"]["agent"]) != mc["meta_work"]["agent"]:
             conf.setdefault("model", None)
@@ -847,7 +847,7 @@ class Engine:
         reason = agents.check_agent_conf(conf["agent"], conf, agents.load_models())
         if reason:
             raise AgentError(reason)
-        return self.new_session(ws, mid, "meta-chat", "meta-chat", "meta-chat", conf, self.wsp(ws) / "meta")
+        return self.new_session(ws, gid, "meta-chat", "meta-chat", "meta-chat", conf, self.wsp(ws) / "meta")
 
     def meta_chat_send(self, sid: str, text: str) -> None:
         s = self.db.session(sid)
@@ -859,7 +859,7 @@ class Engine:
             raise AgentError("empty message")
         self.db.update("sessions", {"id": sid}, status="running")  # claimed before the CLI starts
         self.db.x("INSERT INTO messages(session, ts, role, text) VALUES(?,?,?,?)", sid, time.time(), "user", text)
-        self.publish("meta_chat_message", session=sid, ws=s["ws"], mission=s["mission"])
+        self.publish("meta_chat_message", session=sid, ws=s["ws"], goal=s["goal"])
         self.spawn(self._meta_chat_turn(sid, text))
 
     async def _meta_chat_turn(self, sid: str, text: str) -> None:
@@ -878,4 +878,4 @@ class Engine:
             answer = f"(platform error: {exc!r})"
         self.db.x("INSERT INTO messages(session, ts, role, text) VALUES(?,?,?,?)", sid, time.time(),
                   "assistant", answer)
-        self.publish("meta_chat_message", session=sid, ws=s["ws"], mission=s["mission"])
+        self.publish("meta_chat_message", session=sid, ws=s["ws"], goal=s["goal"])

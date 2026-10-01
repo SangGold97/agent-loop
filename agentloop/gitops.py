@@ -34,14 +34,14 @@ def branch_exists(repo: Path, branch: str) -> bool:
     return bool(git(repo, "branch", "--list", branch))
 
 
-def int_branch(mid: str) -> str:
-    return f"loop/{mid}/integration"
+def int_branch(gid: str) -> str:
+    return f"loop/{gid}/integration"
 
 
-def ensure_integration(ws: Path, mid: str, base: str | None) -> Path:
-    """Create branch loop/<mid>/integration (from base) and its worktree wt/_int-<mid>."""
-    repo, branch = ws / "repo", int_branch(mid)
-    wt = ws / "wt" / f"_int-{mid}"
+def ensure_integration(ws: Path, gid: str, base: str | None) -> Path:
+    """Create branch loop/<gid>/integration (from base) and its worktree wt/_int-<gid>."""
+    repo, branch = ws / "repo", int_branch(gid)
+    wt = ws / "wt" / f"_int-{gid}"
     if not branch_exists(repo, branch):
         git(repo, "branch", branch, base or current_branch(repo))
     if not wt.exists():
@@ -50,10 +50,10 @@ def ensure_integration(ws: Path, mid: str, base: str | None) -> Path:
     return wt
 
 
-def add_worker_worktree(ws: Path, mid: str, sid: str, label: str) -> tuple[Path, str]:
+def add_worker_worktree(ws: Path, gid: str, sid: str, label: str) -> tuple[Path, str]:
     repo, wt = ws / "repo", ws / "wt" / sid
-    branch = f"loop/{mid}/{slug(label)}-{sid}"
-    git(repo, "worktree", "add", "-b", branch, str(wt), int_branch(mid))
+    branch = f"loop/{gid}/{slug(label)}-{sid}"
+    git(repo, "worktree", "add", "-b", branch, str(wt), int_branch(gid))
     return wt, branch
 
 
@@ -76,9 +76,9 @@ def diff(path: Path, start: str, end: str) -> tuple[str, str]:
     return git(path, "diff", "--stat", start, end), git(path, "diff", start, end)
 
 
-def merge(ws: Path, mid: str, branch: str) -> dict:
+def merge(ws: Path, gid: str, branch: str) -> dict:
     """Merge a worker branch into the integration branch; abort and report on conflicts."""
-    wt = ws / "wt" / f"_int-{mid}"
+    wt = ws / "wt" / f"_int-{gid}"
     # Only merges write here; stray files (verify-run output, an interrupted merge) are discarded
     git(wt, "merge", "--abort", check=False)
     git(wt, "reset", "--hard", "-q")
@@ -99,13 +99,13 @@ def is_merged(repo: Path, branch: str, into: str) -> bool:
     return subprocess.run(["git", "merge-base", "--is-ancestor", branch, into], cwd=repo).returncode == 0
 
 
-def branches(ws: Path, mid: str) -> list[dict]:
-    repo, into = ws / "repo", int_branch(mid)
+def branches(ws: Path, gid: str) -> list[dict]:
+    repo, into = ws / "repo", int_branch(gid)
     if not branch_exists(repo, into):
         return []
     out = []
     for line in git(repo, "for-each-ref", "--format=%(refname:short)|%(committerdate:relative)|%(subject)",
-                    f"refs/heads/loop/{mid}/*").splitlines():
+                    f"refs/heads/loop/{gid}/*").splitlines():
         name, when, subject = line.split("|", 2)
         ahead = git(repo, "rev-list", "--count", f"{into}..{name}") if name != into else "0"
         out.append({"branch": name, "when": when, "subject": subject, "ahead": int(ahead),
@@ -124,19 +124,19 @@ def remove_worktree(ws: Path, wt: Path) -> None:
         git(ws / "repo", "worktree", "remove", "--force", str(wt), check=False)
 
 
-def cleanup(ws: Path, mid: str, workers: list[dict]) -> list[str]:
-    """Remove worker worktrees; delete merged branches, tag unmerged ones as exp/<mid>/<sid>."""
-    repo, into, tagged = ws / "repo", int_branch(mid), []
+def cleanup(ws: Path, gid: str, workers: list[dict]) -> list[str]:
+    """Remove worker worktrees; delete merged branches, tag unmerged ones as exp/<gid>/<sid>."""
+    repo, into, tagged = ws / "repo", int_branch(gid), []
     for w in workers:
         remove_worktree(ws, Path(w["cwd"]))
         branch = w.get("branch")
         if not branch or not branch_exists(repo, branch):
             continue
         if not is_merged(repo, branch, into):
-            tag = f"exp/{mid}/{w['id']}"
+            tag = f"exp/{gid}/{w['id']}"
             git(repo, "tag", "-f", tag, branch, check=False)
             tagged.append(tag)
         git(repo, "branch", "-D", branch, check=False)
-    remove_worktree(ws, ws / "wt" / f"_int-{mid}")
+    remove_worktree(ws, ws / "wt" / f"_int-{gid}")
     git(repo, "worktree", "prune", check=False)
     return tagged

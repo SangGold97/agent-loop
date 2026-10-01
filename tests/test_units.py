@@ -30,7 +30,7 @@ def test_claude_argv_worker(tmp_path):
 
 def test_codex_argv_meta_resume(tmp_path):
     s = RunSpec(agent="codex", kind="meta", cwd=tmp_path, prompt="x", model="m", effort="max", resume_id="t1",
-                add_dirs=[tmp_path / "mission"], system_text="MODE", last_message_file=tmp_path / "l.txt")
+                add_dirs=[tmp_path / "goal"], system_text="MODE", last_message_file=tmp_path / "l.txt")
     a = CodexAdapter().argv(s)
     assert a[:4] == ["codex", "exec", "resume", "t1"] and a[-1] == "-"
     assert 'model_reasoning_effort="max"' in a and "-C" not in a
@@ -77,28 +77,28 @@ def test_trim_words_keeps_tail():
 
 def guard_env(tmp_path: Path, role: str) -> dict:
     return {"LOOP_ROLE": role, "LOOP_WS": str(tmp_path), "LOOP_SESSION": "w-1",
-            "LOOP_RUN_DIR": str(tmp_path / "missions/m1/runs/w-1"), "LOOP_GUARD_PATTERNS": json.dumps(["aws .*prod"])}
+            "LOOP_RUN_DIR": str(tmp_path / "goals/m1/runs/w-1"), "LOOP_GUARD_PATTERNS": json.dumps(["aws .*prod"])}
 
 
 def test_guard_rules(tmp_path):
-    for d in ("wt/w-1", "missions/m1/runs/w-1", "repo", "meta"):
+    for d in ("wt/w-1", "goals/m1/runs/w-1", "repo", "meta"):
         (tmp_path / d).mkdir(parents=True, exist_ok=True)
     w, m = guard_env(tmp_path, "worker"), guard_env(tmp_path, "meta-work")
     ev = lambda tool, **inp: {"tool_name": tool, "tool_input": inp, "cwd": str(tmp_path / "wt/w-1")}
     assert guard.check(ev("Bash", command="git push origin main"), w)
     assert guard.check(ev("Bash", command="aws s3 ls --profile prod"), w)
-    assert guard.check(ev("Bash", command="echo x > $LOOP_MISSION_DIR/goal.md"), w)
-    assert guard.check(ev("Write", file_path=str(tmp_path / "missions/m1/spec.md")), w)
+    assert guard.check(ev("Bash", command="echo x > $LOOP_GOAL_DIR/goal.md"), w)
+    assert guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/spec.md")), w)
     assert guard.check(ev("Write", file_path=str(tmp_path / "meta/AGENTS.md")), w)
     assert guard.check(ev("Bash", command="rm -rf /"), w)
     assert guard.check(ev("Bash", command="rm -rf /home/other/stuff"), w)
     assert not guard.check(ev("Write", file_path="hello.py"), w)
-    assert not guard.check(ev("Write", file_path=str(tmp_path / "missions/m1/runs/w-1/artifacts/a.txt")), w)
+    assert not guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/runs/w-1/artifacts/a.txt")), w)
     assert not guard.check(ev("Bash", command="rm -rf build && pytest -q"), w)
     assert guard.check(ev("Edit", file_path=str(tmp_path / "repo/app.py")), m)
     assert guard.check(ev("Bash", command="git -C ../repo commit -am x"), m)
-    assert not guard.check(ev("Write", file_path=str(tmp_path / "missions/m1/plan.md")), m)
-    patch = "*** Begin Patch\n*** Update File: " + str(tmp_path / "missions/m1/goal.md") + "\n@@\n*** End Patch"
+    assert not guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/plan.md")), m)
+    patch = "*** Begin Patch\n*** Update File: " + str(tmp_path / "goals/m1/goal.md") + "\n@@\n*** End Patch"
     assert guard.check(ev("apply_patch", command=patch), w)
     assert guard.check(ev("Bash", command="ls"), {}) is None
 
@@ -107,12 +107,12 @@ def test_guard_ignores_prompt_text(tmp_path):
     (tmp_path / "wt/w-1").mkdir(parents=True)
     m = guard_env(tmp_path, "meta-work")
     ev = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path)}
-    spawn = "loop spawn --role coder <<'EOF'\nImplement X, git commit your work, never git push.\nRead $LOOP_MISSION_DIR/goal.md > notes\nEOF"
+    spawn = "loop spawn --role coder <<'EOF'\nImplement X, git commit your work, never git push.\nRead $LOOP_GOAL_DIR/goal.md > notes\nEOF"
     assert guard.check(ev(spawn), m) is None
     assert guard.check(ev('loop note "please git commit more often"'), m) is None
     assert guard.check(ev("cd ../repo && git commit -m 'x'"), m)
     assert guard.check(ev("git push origin HEAD"), guard_env(tmp_path, "worker"))
-    assert guard.check(ev("cat <<EOF > $LOOP_MISSION_DIR/goal.md\nx\nEOF"), m)
+    assert guard.check(ev("cat <<EOF > $LOOP_GOAL_DIR/goal.md\nx\nEOF"), m)
 
 
 def test_guard_rm_edge_cases(tmp_path):

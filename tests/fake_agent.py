@@ -21,7 +21,7 @@ def main():
     resume = sys.argv[sys.argv.index("--resume") + 1] if "--resume" in sys.argv else None
     sid = resume or str(uuid.uuid4())
     prompt = sys.stdin.read()
-    role, mdir = os.environ.get("LOOP_ROLE"), Path(os.environ.get("LOOP_MISSION_DIR", "."))
+    role, gdir = os.environ.get("LOOP_ROLE"), Path(os.environ.get("LOOP_GOAL_DIR", "."))
     emit({"type": "system", "subtype": "init", "session_id": sid})
     if role == "worker":
         if "FAIL" in prompt:
@@ -33,12 +33,12 @@ def main():
             text = "**Result:** created hello.py\n**Evidence:** python hello.py -> hello"
     elif role == "meta-work":
         if "[Kickoff]" in prompt:
-            (mdir / "plan.md").write_text("# Plan\n\n- [ ] create hello.py\n")
+            (gdir / "plan.md").write_text("# Plan\n\n- [ ] create hello.py\n")
             text = loop("spawn", "--agent", "fake", "--role", "coder", "--label", "hello", "--prompt", "Create hello.py")
         elif m := re.search(r"\[Worker (w-\w+)", prompt):
             merged = loop("merge", m.group(1))
-            (mdir / "plan.md").write_text("# Plan\n\n- [x] create hello.py\n")
-            with (mdir / "journal.md").open("a") as fh:
+            (gdir / "plan.md").write_text("# Plan\n\n- [x] create hello.py\n")
+            with (gdir / "journal.md").open("a") as fh:
                 fh.write(f"- merged {m.group(1)}\n")
             text = merged + "\n" + loop("done", "--status", "success", stdin="- hello.py exists: verified")
         elif "Human note" in prompt:

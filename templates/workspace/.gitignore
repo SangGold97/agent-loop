@@ -2,5 +2,5 @@ repo/
 wt/
 data/
 .loop/
-missions/*/runs/*/artifacts/
+goals/*/runs/*/artifacts/
 meta/tmp/

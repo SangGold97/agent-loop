@@ -1,7 +1,7 @@
 'use strict';
 /* agent-loop web UI: vanilla JS, hash routing, live updates over SSE. */
 
-const S = { workspaces: [], route: {}, mission: null, feeds: {}, infra: null, history: [], agents: null, models: {},
+const S = { workspaces: [], route: {}, goal: null, feeds: {}, infra: null, history: [], agents: null, models: {},
   chat: { sid: null, messages: [], busy: false, live: '', creating: false }, edit: {}, cfgDirty: false };
 const main = document.getElementById('main');
 const AGENTS = ['claude', 'codex'];
@@ -60,7 +60,7 @@ function meter(used, max, progress = false) {
 }
 const box = (title, body, attrs = '') => `<div class="box" ${attrs}><div class="lt">${title}</div>${body}</div>`;
 
-// ---------- YAML (small dumper for mission.yaml) ----------
+// ---------- YAML (small dumper for goal.yaml) ----------
 function yamlScalar(v) {
   if (v === null || v === undefined || v === '') return 'null';
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
@@ -93,7 +93,7 @@ function effortOptions(agent, model, current) {
 }
 async function loadModels() { try { S.models = await api('/api/models'); } catch { S.models = {}; } }
 
-// ---------- agent settings form (HUMAN layer, new mission, new meta-chat) ----------
+// ---------- agent settings form (HUMAN layer, new goal, new meta-chat) ----------
 function agentRow(key, conf = {}, opts = {}) {
   const agent = conf.agent || opts.agent || 'claude';
   const off = opts.toggle && conf.enabled === false;
@@ -180,11 +180,11 @@ function renderSidebar() {
   const r = S.route;
   $('#ws-list').innerHTML = S.workspaces.map(w => `<div>
       <a class="ws-name ${r.view === 'workspace' && r.ws === w.name ? 'active' : ''}" href="#/ws/${w.name}">
-        <span>${esc(w.name)}</span><button class="icon-btn" data-new-mission="${esc(w.name)}" title="New mission">+</button></a>
-      ${w.missions.map(m => `<a class="m-link ${r.mid === m.id && r.ws === w.name ? 'active' : ''}" href="#/ws/${w.name}/m/${m.id}" title="${esc(m.title)}">
-        <span class="dot ${m.status}"></span><span class="title">${esc(m.title)}</span></a>`).join('') || '<div class="m-link faint">no missions yet</div>'}
+        <span>${esc(w.name)}</span><button class="icon-btn" data-new-goal="${esc(w.name)}" title="New goal">+</button></a>
+      ${w.goals.map(m => `<a class="m-link ${r.gid === m.id && r.ws === w.name ? 'active' : ''}" href="#/ws/${w.name}/g/${m.id}" title="${esc(m.title)}">
+        <span class="dot ${m.status}"></span><span class="title">${esc(m.title)}</span></a>`).join('') || '<div class="m-link faint">no goals yet</div>'}
     </div>`).join('') || '<div class="empty small">No workspace yet</div>';
-  $$('[data-new-mission]').forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); newMissionModal(b.dataset.newMission); });
+  $$('[data-new-goal]').forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); newGoalModal(b.dataset.newGoal); });
   $('#nav-infra').classList.toggle('active', r.view === 'infra');
   $('#nav-agents').classList.toggle('active', r.view === 'agents');
 }
@@ -193,9 +193,9 @@ $('#new-ws').onclick = () => newWorkspaceModal();
 const TABS = [['overview', 'OVERVIEW'], ['config', 'CONFIG'], ['plan', 'PLAN & JOURNAL'], ['notes', 'HUMAN REPORT & NOTES'], ['git', 'GIT']];
 function parseHash() {
   const p = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
-  if (p[0] === 'ws' && p[2] === 'm') {
+  if (p[0] === 'ws' && p[2] === 'g') {
     const tab = TABS.some(([k]) => k === p[4]) ? p[4] : 'overview';
-    return { view: 'mission', ws: p[1], mid: p[3], tab };
+    return { view: 'goal', ws: p[1], gid: p[3], tab };
   }
   if (p[0] === 'ws' && p[1]) return { view: 'workspace', ws: p[1] };
   if (p[0] === 'infra') return { view: 'infra' };
@@ -205,13 +205,13 @@ function parseHash() {
 async function render() {
   const prev = S.route;
   S.route = parseHash();
-  if (prev.mid !== S.route.mid) {
+  if (prev.gid !== S.route.gid) {
     S.feeds = {}; S.edit = {}; S.cfgDirty = false;
     S.chat = { sid: null, messages: [], busy: false, live: '', creating: false };
   }
   renderSidebar();
   try {
-    if (S.route.view === 'mission') await renderMission();
+    if (S.route.view === 'goal') await renderGoal();
     else if (S.route.view === 'workspace') await renderWorkspace();
     else if (S.route.view === 'infra') renderInfra();
     else if (S.route.view === 'agents') await renderAgents();
@@ -230,9 +230,9 @@ function renderHome() {
       workers, evaluates evidence and iterates until the goal is met. You steer with notes and meta-chat, review the report, and merge.</p>
     <div class="row" style="margin-top:14px"><button class="btn primary" id="h-new-ws">new workspace</button></div>
     <div class="ws-cards">${S.workspaces.map(w => {
-      const counts = w.missions.reduce((a, m) => (a[m.status] = (a[m.status] || 0) + 1, a), {});
+      const counts = w.goals.reduce((a, m) => (a[m.status] = (a[m.status] || 0) + 1, a), {});
       return `<a class="card" href="#/ws/${w.name}"><h2>${esc(w.name)}</h2>
-        <div class="row" style="margin-top:6px">${Object.entries(counts).map(([k, v]) => pill(k, `${v} ${label(k)}`)).join('') || '<span class="faint small">no missions</span>'}</div></a>`;
+        <div class="row" style="margin-top:6px">${Object.entries(counts).map(([k, v]) => pill(k, `${v} ${label(k)}`)).join('') || '<span class="faint small">no goals</span>'}</div></a>`;
     }).join('')}</div></div>`;
   $('#h-new-ws').onclick = () => newWorkspaceModal();
 }
@@ -241,12 +241,12 @@ async function renderWorkspace() {
   const [info, state] = [await api(`/api/workspaces/${ws}`), S.workspaces.find(w => w.name === ws)];
   main.innerHTML = `<div class="page">
     <div class="page-head"><div><div class="crumbs">workspace</div><h1>${esc(ws)}</h1><div class="faint small">${esc(info.path)}</div></div>
-      <div class="actions"><button class="btn primary" id="w-new">new mission</button></div></div>
+      <div class="actions"><button class="btn primary" id="w-new">new goal</button></div></div>
     <div class="grid cols-2" style="margin-top:18px">
-      ${box('missions', state && state.missions.length ? `<table class="t"><tr><th>mission</th><th>status</th></tr>
-        ${state.missions.map(m => `<tr><td><a href="#/ws/${ws}/m/${m.id}">${esc(m.title)}</a><div class="faint small">${esc(m.id)}</div></td>
-        <td>${pill(m.status)} ${m.outcome ? pill(m.outcome) : ''}</td></tr>`).join('')}</table>` : '<div class="empty">No missions yet.</div>')}
-      ${box('loop.yaml <span class="dirty" id="w-dirty"></span>', `<div class="row"><span class="hint">Workspace defaults; new missions copy <code>defaults</code>.</span><span class="spacer"></span>
+      ${box('goals', state && state.goals.length ? `<table class="t"><tr><th>goal</th><th>status</th></tr>
+        ${state.goals.map(m => `<tr><td><a href="#/ws/${ws}/g/${m.id}">${esc(m.title)}</a><div class="faint small">${esc(m.id)}</div></td>
+        <td>${pill(m.status)} ${m.outcome ? pill(m.outcome) : ''}</td></tr>`).join('')}</table>` : '<div class="empty">No goals yet.</div>')}
+      ${box('loop.yaml <span class="dirty" id="w-dirty"></span>', `<div class="row"><span class="hint">Workspace defaults; new goals copy <code>defaults</code>.</span><span class="spacer"></span>
         <button class="btn small primary" id="w-save">save</button></div>
         <textarea class="editor" id="w-yaml" spellcheck="false">${esc(info.loop_yaml)}</textarea>`)}
     </div>
@@ -260,7 +260,7 @@ async function renderWorkspace() {
           <textarea class="editor" id="h-text" spellcheck="false" style="margin-top:6px" disabled></textarea></div></div>`)}</div>
     <div style="margin-top:22px">${box('audit log', auditTable(info.log))}</div></div>`;
   wireHarness(ws);
-  $('#w-new').onclick = () => newMissionModal(ws);
+  $('#w-new').onclick = () => newGoalModal(ws);
   $('#w-yaml').oninput = () => $('#w-dirty').textContent = 'unsaved';
   $('#w-save').onclick = () => act(async () => {
     await api(`/api/workspaces/${ws}/config`, { method: 'PUT', body: { text: $('#w-yaml').value } });
@@ -314,77 +314,77 @@ function newWorkspaceModal() {
     } finally { if ($('#nw-ok', m)) $('#nw-ok', m).disabled = false; }
   }, 'Workspace created');
 }
-async function newMissionModal(ws) {
+async function newGoalModal(ws) {
   const info = await api(`/api/workspaces/${ws}`);
-  const m = modal(`<div class="modal-head"><h2>new mission · ${esc(ws)}</h2><button class="icon-btn" data-close>×</button></div>
+  const m = modal(`<div class="modal-head"><h2>new goal · ${esc(ws)}</h2><button class="icon-btn" data-close>×</button></div>
     <div class="grid" style="gap:12px">
       <label class="f">title<input type="text" id="nm-title" placeholder="e.g. Add OAuth login"></label>
       <div class="grid cols-2">
-        <label class="f">spec: goal, context, inputs, constraints<textarea id="nm-spec" style="min-height:190px"></textarea></label>
+        <label class="f">spec: context, requirements, inputs, constraints<textarea id="nm-spec" style="min-height:190px"></textarea></label>
         <label class="f">goal<textarea id="nm-goal" style="min-height:190px" placeholder="- criterion (qualitative ones are judged by the meta-work)&#10;- verify: \`pytest -q\`   (optional command run on the integration branch)"></textarea></label>
       </div>
       <div id="nm-conf">${configForm(info.config.defaults)}</div>
       <div class="row"><label class="inline"><input type="checkbox" id="nm-start" checked> start right away</label><span class="spacer"></span>
-        <button class="btn" data-close>cancel</button><button class="btn primary" id="nm-ok">create mission</button></div></div>`, true);
+        <button class="btn" data-close>cancel</button><button class="btn primary" id="nm-ok">create goal</button></div></div>`, true);
   wireAgentRows($('#nm-conf', m));
   $('#nm-title', m).focus();
   $('#nm-ok', m).onclick = () => act(async () => {
     const config = readConfigForm($('#nm-conf', m));
-    const r = await api(`/api/workspaces/${ws}/missions`, { body: { title: $('#nm-title', m).value, spec: $('#nm-spec', m).value, goal: $('#nm-goal', m).value, config } });
-    if ($('#nm-start', m).checked) await api(`/api/missions/${ws}/${r.id}/start`, { body: {} });
-    closeModal(); await loadState(); location.hash = `#/ws/${ws}/m/${r.id}`;
-  }, 'Mission created');
+    const r = await api(`/api/workspaces/${ws}/goals`, { body: { title: $('#nm-title', m).value, spec: $('#nm-spec', m).value, goal: $('#nm-goal', m).value, config } });
+    if ($('#nm-start', m).checked) await api(`/api/goals/${ws}/${r.id}/start`, { body: {} });
+    closeModal(); await loadState(); location.hash = `#/ws/${ws}/g/${r.id}`;
+  }, 'Goal created');
 }
 
-// ---------- mission page ----------
-async function loadMission() {
-  const { ws, mid } = S.route;
-  S.mission = await api(`/api/missions/${ws}/${mid}`);
+// ---------- goal page ----------
+async function loadGoal() {
+  const { ws, gid } = S.route;
+  S.goal = await api(`/api/goals/${ws}/${gid}`);
 }
-async function renderMission() {
-  await loadMission();
+async function renderGoal() {
+  await loadGoal();
   main.innerHTML = `<div class="page"><div id="m-head"></div><div class="tabs" id="m-tabs"></div><div id="m-tab"></div></div>`;
-  renderMissionHead(); renderTabs(); await renderTab();
+  renderGoalHead(); renderTabs(); await renderTab();
 }
-function renderMissionHead() {
-  const M = S.mission, st = M.row.status, { ws, mid } = S.route;
+function renderGoalHead() {
+  const M = S.goal, st = M.row.status, { ws, gid } = S.route;
   const buttons = [];
-  if (['draft', 'stopped', 'paused'].includes(st)) buttons.push(`<button class="btn primary" data-act="start">${st === 'draft' ? 'start mission' : 'resume'}</button>`);
+  if (['draft', 'stopped', 'paused'].includes(st)) buttons.push(`<button class="btn primary" data-act="start">${st === 'draft' ? 'start goal' : 'resume'}</button>`);
   if (st === 'running') buttons.push('<button class="btn danger" data-act="stop">stop</button>');
   if (st === 'awaiting_review') buttons.push('<button class="btn" data-act="reopen">reopen with note</button><button class="btn primary" data-act="accept">accept</button>');
   $('#m-head').innerHTML = `<div class="page-head"><div>
-      <div class="crumbs"><a href="#/ws/${ws}">${esc(ws)}</a> / ${esc(mid)}</div>
+      <div class="crumbs"><a href="#/ws/${ws}">${esc(ws)}</a> / ${esc(gid)}</div>
       <h1>${esc(M.config.title)}</h1>
       <div class="row" style="margin-top:4px">${pill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''}
         ${M.meta_active ? '<span class="thinking">meta-work is thinking</span>' : ''}</div></div>
     <div class="actions">${buttons.join('')}</div></div>`;
-  $$('[data-act]', $('#m-head')).forEach(b => b.onclick = () => missionAction(b.dataset.act));
+  $$('[data-act]', $('#m-head')).forEach(b => b.onclick = () => goalAction(b.dataset.act));
 }
-async function missionAction(action) {
-  const { ws, mid } = S.route;
+async function goalAction(action) {
+  const { ws, gid } = S.route;
   if (action === 'reopen') return reopenModal();
-  if (action === 'stop' && !window.confirm('Stop the mission? Running sessions are killed; their work is snapshotted.')) return;
+  if (action === 'stop' && !window.confirm('Stop the goal? Running sessions are killed; their work is snapshotted.')) return;
   await act(async () => {
-    const r = await api(`/api/missions/${ws}/${mid}/${action}`, { body: {} });
+    const r = await api(`/api/goals/${ws}/${gid}/${action}`, { body: {} });
     if (action === 'accept' && r.tags?.length) toast(`Unmerged experiments kept as tags: ${r.tags.join(', ')}`, 'info', 9000);
-    await loadState(); await refreshMission(true);
-  }, { start: 'Mission started', stop: 'Mission stopped', accept: 'Mission accepted' }[action]);
+    await loadState(); await refreshGoal(true);
+  }, { start: 'Goal started', stop: 'Goal stopped', accept: 'Goal accepted' }[action]);
 }
 function reopenModal(prefill = '') {
-  const { ws, mid } = S.route;
-  const m = modal(`<div class="modal-head"><h2>reopen mission</h2><button class="icon-btn" data-close>×</button></div>
+  const { ws, gid } = S.route;
+  const m = modal(`<div class="modal-head"><h2>reopen goal</h2><button class="icon-btn" data-close>×</button></div>
     <p class="muted">Tell the meta-work what is missing or what to change. It receives this note immediately.</p>
     <textarea id="ro-text" style="min-height:140px">${esc(prefill)}</textarea>
     <div class="row" style="margin-top:10px"><span class="spacer"></span><button class="btn" data-close>cancel</button><button class="btn primary" id="ro-ok">reopen</button></div>`);
   $('#ro-ok', m).onclick = () => act(async () => {
-    await api(`/api/missions/${ws}/${mid}/reopen`, { body: { text: $('#ro-text', m).value } });
-    closeModal(); await loadState(); await refreshMission(true);
-  }, 'Mission reopened');
+    await api(`/api/goals/${ws}/${gid}/reopen`, { body: { text: $('#ro-text', m).value } });
+    closeModal(); await loadState(); await refreshGoal(true);
+  }, 'Goal reopened');
 }
 function renderTabs() {
-  const M = S.mission, { ws, mid, tab } = S.route;
+  const M = S.goal, { ws, gid, tab } = S.route;
   const counts = { notes: M.notes.filter(n => n.status === 'pending').length || '' };
-  $('#m-tabs').innerHTML = TABS.map(([k, t]) => `<a class="tab ${tab === k ? 'active' : ''}" href="#/ws/${ws}/m/${mid}/${k}">${t}${counts[k] ? `<span class="count">${counts[k]}</span>` : ''}</a>`).join('');
+  $('#m-tabs').innerHTML = TABS.map(([k, t]) => `<a class="tab ${tab === k ? 'active' : ''}" href="#/ws/${ws}/g/${gid}/${k}">${t}${counts[k] ? `<span class="count">${counts[k]}</span>` : ''}</a>`).join('');
 }
 async function renderTab() {
   const t = S.route.tab;
@@ -396,12 +396,12 @@ async function renderTab() {
 }
 function scheduleRefresh() {
   clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(() => refreshMission(false), 350);
+  refreshTimer = setTimeout(() => refreshGoal(false), 350);
 }
-async function refreshMission(force) {
-  if (S.route.view !== 'mission') return;
-  try { await loadMission(); } catch { return; }
-  renderMissionHead(); renderTabs();
+async function refreshGoal(force) {
+  if (S.route.view !== 'goal') return;
+  try { await loadGoal(); } catch { return; }
+  renderGoalHead(); renderTabs();
   const t = S.route.tab;
   if (t === 'overview') return updateOverview(force);
   if (t === 'config') return renderConfigTab(force);
@@ -422,11 +422,11 @@ function updateOverview(force) {
   if (!$('#ov-stats')) return renderOverview();
   renderStats(); renderMetaWorkHead(); renderChatBar(); renderWorkers();
   // A rotated meta-work session joins the same feed
-  const fresh = S.mission.sessions.filter(s => s.kind === 'meta-work' && !S.feeds[s.id]);
+  const fresh = S.goal.sessions.filter(s => s.kind === 'meta-work' && !S.feeds[s.id]);
   if (fresh.length) Promise.all(fresh.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
 }
 function renderStats() {
-  const M = S.mission, b = M.budget, c = M.checklist;
+  const M = S.goal, b = M.budget, c = M.checklist;
   const workers = M.sessions.filter(s => s.kind === 'worker');
   const running = workers.filter(s => simpleStatus(s) === 'running').length;
   const lim = v => v || '∞';
@@ -442,7 +442,7 @@ function renderStats() {
       <div class="value">Total: ${fmtDur(b.hours)}</div></div>`;
 }
 function renderReport() {
-  const M = S.mission, report = M.files['report.md'], el = $('#nt-report');
+  const M = S.goal, report = M.files['report.md'], el = $('#nt-report');
   if (!el) return;
   const review = M.row.status === 'awaiting_review';
   $('#nt-human').hidden = !report;
@@ -453,10 +453,10 @@ function renderReport() {
     <div class="md">${md(report.replace(/^# Completion report\s*\n/, ''))}</div>
     ${review ? `<div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn" id="nt-reopen">reopen with note</button>
       <button class="btn primary" id="nt-accept">accept</button></div>` : ''}</div>`;
-  if (review) { $('#nt-accept').onclick = () => missionAction('accept'); $('#nt-reopen').onclick = () => reopenModal(); }
+  if (review) { $('#nt-accept').onclick = () => goalAction('accept'); $('#nt-reopen').onclick = () => reopenModal(); }
 }
 function renderConfigTab(force) {
-  const M = S.mission, el = $('#cfg-tab');
+  const M = S.goal, el = $('#cfg-tab');
   if (!el) return;
   // Never overwrite what the human is typing, and skip repaints when nothing changed
   if (!force && (S.edit.spec || S.edit.goal || S.cfgDirty) && el.innerHTML) return;
@@ -481,18 +481,18 @@ function renderConfigTab(force) {
   S.cfgDirty = false;
   wireAgentRows($('#ov-cfg'), () => { S.cfgDirty = true; $('#cfg-dirty').textContent = 'unsaved'; });
   $('#cfg-save').onclick = () => act(async () => {
-    const { ws, mid } = S.route;
-    const created = (M.files['mission.yaml'].match(/^created:\s*(.+)$/m) || [])[1];
+    const { ws, gid } = S.route;
+    const created = (M.files['goal.yaml'].match(/^created:\s*(.+)$/m) || [])[1];
     const obj = { title: M.config.title, ...(created ? { created: created.replace(/^['"]|['"]$/g, '') } : {}), ...readConfigForm($('#ov-cfg')) };
-    await api(`/api/missions/${ws}/${mid}/files/mission.yaml`, { method: 'PUT', body: { text: toYaml(obj) } });
-    S.cfgDirty = false; await loadMission(); renderConfigTab(true);
+    await api(`/api/goals/${ws}/${gid}/files/goal.yaml`, { method: 'PUT', body: { text: toYaml(obj) } });
+    S.cfgDirty = false; await loadGoal(); renderConfigTab(true);
   }, 'Configuration saved');
   $$('[data-edit]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.edit] = true; renderConfigTab(true); });
   $$('[data-cancel]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.cancel] = false; renderConfigTab(true); });
   $$('[data-save-doc]', el).forEach(b => b.onclick = () => act(async () => {
-    const name = b.dataset.saveDoc, { ws, mid } = S.route;
-    await api(`/api/missions/${ws}/${mid}/files/${name}.md`, { method: 'PUT', body: { text: $(`[data-doc="${name}"]`, el).value } });
-    S.edit[name] = false; await loadMission(); renderConfigTab(true);
+    const name = b.dataset.saveDoc, { ws, gid } = S.route;
+    await api(`/api/goals/${ws}/${gid}/files/${name}.md`, { method: 'PUT', body: { text: $(`[data-doc="${name}"]`, el).value } });
+    S.edit[name] = false; await loadGoal(); renderConfigTab(true);
   }, `${b.dataset.saveDoc}.md saved`));
 }
 
@@ -537,10 +537,10 @@ function paintFeed(key) {
     if (!el) return;
     const atBottom = !el.dataset.painted || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     if (key === 'meta-work') {
-      const sessions = S.mission.sessions.filter(s => s.kind === 'meta-work');
+      const sessions = S.goal.sessions.filter(s => s.kind === 'meta-work');
       el.innerHTML = feedHtml(sessions.flatMap(s => S.feeds[s.id] || []), { prompt: 'platform → meta-work', reply: 'meta-work' });
     } else {
-      const s = S.mission.sessions.find(x => x.id === key);
+      const s = S.goal.sessions.find(x => x.id === key);
       if (s) el.innerHTML = feedHtml(S.feeds[key] || [], { prompt: 'meta-work → worker', reply: s.agent });
     }
     el.dataset.painted = '1';
@@ -549,27 +549,27 @@ function paintFeed(key) {
 }
 function agentLine(s) { return `${esc(s.agent)} · ${esc(s.model || 'default')} · ${esc(s.effort || 'default')}`; }
 
-// META-WORK: every meta-work session of the mission, oldest first, as one continuous feed
+// META-WORK: every meta-work session of the goal, oldest first, as one continuous feed
 function renderMetaWork() {
   $('#ov-mw').innerHTML = `<div class="lt">meta-work</div><div id="mw-head" class="row small" style="margin-bottom:4px"></div>
     <div class="feed" data-feed="meta-work"></div>`;
   renderMetaWorkHead();
-  const sessions = S.mission.sessions.filter(s => s.kind === 'meta-work');
+  const sessions = S.goal.sessions.filter(s => s.kind === 'meta-work');
   Promise.all(sessions.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
 }
 function renderMetaWorkHead() {
   const el = $('#mw-head');
   if (!el) return;
-  const sessions = S.mission.sessions.filter(s => s.kind === 'meta-work');
-  const cur = sessions.find(s => s.id === S.mission.row.meta_work) || sessions[sessions.length - 1];
-  if (!cur) { el.innerHTML = `<span class="muted">${agentLine({ agent: S.mission.config.meta_work.agent, ...S.mission.config.meta_work })}</span>`; return; }
+  const sessions = S.goal.sessions.filter(s => s.kind === 'meta-work');
+  const cur = sessions.find(s => s.id === S.goal.row.meta_work) || sessions[sessions.length - 1];
+  if (!cur) { el.innerHTML = `<span class="muted">${agentLine({ agent: S.goal.config.meta_work.agent, ...S.goal.config.meta_work })}</span>`; return; }
   const tokens = sessions.reduce((a, s) => a + (s.tokens || 0), 0);
   el.innerHTML = `<span class="muted">${agentLine(cur)}</span><span class="faint">·</span><span>${fmtTok(tokens)} tokens</span>
     <span class="spacer"></span>${pill(simpleStatus(cur))}<a href="#" data-log="${cur.id}" class="small">log</a>`;
   $('[data-log]', el).onclick = e => { e.preventDefault(); sessionModal(cur.id); };
 }
 
-// META-CHAT: chats bound to this mission; agent/model/effort chosen per chat
+// META-CHAT: chats bound to this goal; agent/model/effort chosen per chat
 function renderChat() {
   $('#ov-chat').innerHTML = `<div class="lt">meta-chat</div>
     <div class="chat-bar" id="chat-bar"></div><div id="chat-new"></div>
@@ -588,7 +588,7 @@ function renderChat() {
 function renderChatBar() {
   const bar = $('#chat-bar');
   if (!bar) return;
-  const chats = S.mission.sessions.filter(s => s.kind === 'meta-chat');
+  const chats = S.goal.sessions.filter(s => s.kind === 'meta-chat');
   if (!S.chat.sid && chats.length) S.chat.sid = chats[chats.length - 1].id;
   bar.innerHTML = `<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
       chat ${i + 1} · ${esc(c.agent)}/${esc(c.model || 'default')}/${esc(c.effort || 'default')} · ${c.turns} turns</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
@@ -601,22 +601,22 @@ function renderNewChat() {
   const el = $('#chat-new');
   if (!S.chat.creating) { el.innerHTML = ''; return; }
   if (el.innerHTML) return;
-  el.innerHTML = `<div class="new-chat">${agentHeader()}${agentRow('meta_chat', S.mission.config.meta_work, { title: 'meta-chat', noAutocompact: true })}
-    <div class="row" style="margin-top:6px"><span class="hint">Read-only on the mission; proposes notes you approve.</span><span class="spacer"></span>
+  el.innerHTML = `<div class="new-chat">${agentHeader()}${agentRow('meta_chat', S.goal.config.meta_work, { title: 'meta-chat', noAutocompact: true })}
+    <div class="row" style="margin-top:6px"><span class="hint">Read-only on the goal; proposes notes you approve.</span><span class="spacer"></span>
       <button class="btn small" id="nc-cancel">cancel</button><button class="btn small primary" id="nc-ok">create</button></div></div>`;
   wireAgentRows(el);
   $('#nc-cancel').onclick = () => { S.chat.creating = false; renderNewChat(); };
   $('#nc-ok').onclick = () => act(async () => {
-    const { ws, mid } = S.route;
-    const r = await api(`/api/missions/${ws}/${mid}/meta-chats`, { body: readAgentRow($('.agent-row[data-key]', el)) });
+    const { ws, gid } = S.route;
+    const r = await api(`/api/goals/${ws}/${gid}/meta-chats`, { body: readAgentRow($('.agent-row[data-key]', el)) });
     S.chat = { ...S.chat, sid: r.id, creating: false };
-    await loadMission(); renderChatBar(); await loadChatMessages();
+    await loadGoal(); renderChatBar(); await loadChatMessages();
   }, 'Meta-chat created');
 }
 async function loadChatMessages() {
   const feed = $('#chat-feed');
   if (!feed) return;
-  if (!S.chat.sid) { feed.innerHTML = '<div class="empty">Create a chat to talk with a meta-agent about this mission.</div>'; setComposer(false); return; }
+  if (!S.chat.sid) { feed.innerHTML = '<div class="empty">Create a chat to talk with a meta-agent about this goal.</div>'; setComposer(false); return; }
   const r = await api(`/api/meta-chats/${S.chat.sid}/messages`);
   S.chat.messages = r.messages; S.chat.busy = r.busy;
   feed.innerHTML = r.messages.map((m, i) => m.role === 'user'
@@ -644,15 +644,15 @@ async function sendChat() {
   });
 }
 function saveNoteModal(text) {
-  const { ws, mid } = S.route;
+  const { ws, gid } = S.route;
   const m = modal(`<div class="modal-head"><h2>save as note for the meta-work</h2><button class="icon-btn" data-close>×</button></div>
     <textarea id="sn-text" style="min-height:180px">${esc(text)}</textarea>
     <div class="row" style="margin-top:10px"><label class="inline"><input type="radio" name="snmode" value="queue" checked> queue</label>
       <label class="inline"><input type="radio" name="snmode" value="now"> deliver now</label><span class="spacer"></span>
       <button class="btn" data-close>cancel</button><button class="btn primary" id="sn-ok">save note</button></div>`);
   $('#sn-ok', m).onclick = () => act(async () => {
-    await api(`/api/missions/${ws}/${mid}/notes`, { body: { text: $('#sn-text', m).value, mode: $('input[name=snmode]:checked', m).value } });
-    closeModal(); await loadMission(); renderTabs();
+    await api(`/api/goals/${ws}/${gid}/notes`, { body: { text: $('#sn-text', m).value, mode: $('input[name=snmode]:checked', m).value } });
+    closeModal(); await loadGoal(); renderTabs();
   }, 'Note saved');
 }
 
@@ -668,7 +668,7 @@ function workerLeft(w) {
 function renderWorkers() {
   const el = $('#ov-workers');
   if (!el) return;
-  const workers = S.mission.sessions.filter(s => s.kind === 'worker').sort((a, b) => b.created - a.created);
+  const workers = S.goal.sessions.filter(s => s.kind === 'worker').sort((a, b) => b.created - a.created);
   $('#ov-wcount').textContent = workers.length ? `(${workers.length})` : '';
   const ids = workers.map(w => w.id).join();
   if (el.dataset.ids !== ids) {
@@ -705,10 +705,10 @@ function evHtml(e) {
   }
 }
 async function sessionModal(sid) {
-  const { ws, mid } = S.route;
-  const s = S.mission.sessions.find(x => x.id === sid) || { id: sid };
+  const { ws, gid } = S.route;
+  const s = S.goal.sessions.find(x => x.id === sid) || { id: sid };
   const [turns, evs] = await Promise.all([api(`/api/sessions/${sid}/turns`), api(`/api/sessions/${sid}/events?limit=3000`)]);
-  const file = (n, ext) => `<a href="/api/runs/${ws}/${mid}/${sid}/t${n}.${ext}" target="_blank">${ext}</a>`;
+  const file = (n, ext) => `<a href="/api/runs/${ws}/${gid}/${sid}/t${n}.${ext}" target="_blank">${ext}</a>`;
   const title = s.kind === 'worker' ? `${s.role} · ${s.label}` : s.kind;
   const m = modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s)}</div><h2>${esc(title)}</h2></div>
       <button class="icon-btn" data-close>×</button></div>
@@ -722,19 +722,19 @@ async function sessionModal(sid) {
 
 // ---------- plan, human report & notes, git ----------
 function planHtml() {
-  const f = S.mission.files;
+  const f = S.goal.files;
   return `<div class="grid cols-2" style="margin-top:18px">${box('plan.md <span class="x">owned by the meta-work</span>', `<div class="md">${md(f['plan.md'])}</div>`)}
     ${box('journal.md <span class="x">decision log, written by the meta-work</span>', `<div class="md">${md(f['journal.md'])}</div>`)}</div>`;
 }
 function renderNotes(update = false) {
-  const el = $('#m-tab'), notes = S.mission.notes, review = S.mission.row.status === 'awaiting_review';
+  const el = $('#m-tab'), notes = S.goal.notes, review = S.goal.row.status === 'awaiting_review';
   const list = notes.length ? notes.map(n => `<div class="box" style="margin-top:18px"><div class="lt">note #${n.id}
         <span class="chip ${n.author === 'human' ? 'human' : 'meta-chat'}">${esc(n.author)}</span>${pill(n.status)}</div>
       <div class="row small faint">${n.status === 'approved' ? (n.mode === 'now' ? 'delivered immediately' : 'queued with the next event') : ''}<span class="spacer"></span>${fmtTime(n.ts)}</div>
       ${n.status === 'pending' ? `<textarea data-note-text="${n.id}" style="margin-top:6px;min-height:70px">${esc(n.text)}</textarea>
         <div class="row" style="margin-top:6px"><span class="hint">proposed by a meta-chat; approve to send it to the meta-work</span><span class="spacer"></span>
         <button class="btn small danger" data-note="${n.id}" data-v="reject">reject</button>
-        ${review ? `<button class="btn small primary" data-note="${n.id}" data-v="approve" data-reopen="1">approve & reopen mission</button>`
+        ${review ? `<button class="btn small primary" data-note="${n.id}" data-v="approve" data-reopen="1">approve & reopen goal</button>`
           : `<button class="btn small" data-note="${n.id}" data-v="approve" data-mode="queue">approve (queue)</button>
         <button class="btn small primary" data-note="${n.id}" data-v="approve" data-mode="now">approve & deliver now</button>`}</div>`
       : `<div class="md" style="margin-top:4px">${md(n.text)}</div>`}</div>`).join('') : '<div class="empty">No notes yet.</div>';
@@ -750,14 +750,14 @@ function renderNotes(update = false) {
     <div id="notes-list">${list}</div></div>`;
   renderReport();
   $('#note-add').onclick = () => act(async () => {
-    const { ws, mid } = S.route;
-    if (S.mission.row.status === 'awaiting_review') {
-      await api(`/api/missions/${ws}/${mid}/reopen`, { body: { text: $('#note-text').value } });
+    const { ws, gid } = S.route;
+    if (S.goal.row.status === 'awaiting_review') {
+      await api(`/api/goals/${ws}/${gid}/reopen`, { body: { text: $('#note-text').value } });
       await loadState();
     } else {
-      await api(`/api/missions/${ws}/${mid}/notes`, { body: { text: $('#note-text').value, mode: $('input[name=nmode]:checked').value } });
+      await api(`/api/goals/${ws}/${gid}/notes`, { body: { text: $('#note-text').value, mode: $('input[name=nmode]:checked').value } });
     }
-    $('#note-text').value = ''; await refreshMission(true);
+    $('#note-text').value = ''; await refreshGoal(true);
   }, 'Note added');
   el.onclick = e => {
     const b = e.target.closest('[data-note]');
@@ -766,20 +766,20 @@ function renderNotes(update = false) {
     act(async () => {
       await api(`/api/notes/${b.dataset.note}/${b.dataset.v}`, { body: { mode: b.dataset.mode || 'queue', text, reopen: !!b.dataset.reopen } });
       if (b.dataset.reopen) await loadState();
-      await refreshMission(true);
-    }, b.dataset.reopen ? 'Note approved; mission reopened' : b.dataset.v === 'approve' ? 'Note approved' : 'Note rejected');
+      await refreshGoal(true);
+    }, b.dataset.reopen ? 'Note approved; goal reopened' : b.dataset.v === 'approve' ? 'Note approved' : 'Note rejected');
   };
 }
 async function renderGit() {
-  const { ws, mid } = S.route;
-  const g = await api(`/api/missions/${ws}/${mid}/git`);
+  const { ws, gid } = S.route;
+  const g = await api(`/api/goals/${ws}/${gid}/git`);
   $('#m-tab').innerHTML = `<div class="grid cols-2" style="align-items:start;margin-top:18px">
     ${box('branches', `${g.branches.length ? `<table class="t"><tr><th>branch</th><th>ahead</th><th>state</th><th>last commit</th></tr>
       ${g.branches.map(b => `<tr><td class="small">${esc(b.branch)}</td><td>${b.ahead}</td><td>${b.branch.endsWith('/integration') ? pill('running', 'integration') : b.merged ? pill('ok', 'merged') : pill('pending', 'not merged')}</td>
-      <td class="small">${esc(b.subject)}<div class="faint">${esc(b.when)}</div></td></tr>`).join('')}</table>` : '<div class="empty">No branches yet (created when the mission starts).</div>'}
+      <td class="small">${esc(b.subject)}<div class="faint">${esc(b.when)}</div></td></tr>`).join('')}</table>` : '<div class="empty">No branches yet (created when the goal starts).</div>'}
       <p class="hint">Only you merge the integration branch into your main branch.</p>`)}
     ${box(`integration branch <span class="x">commits not in ${esc(g.base)}</span>`, g.integration_log.length ? `<table class="t">${g.integration_log.map(c => `<tr><td class="small">${esc(c.hash)}</td><td class="small">${esc(c.subject)}</td><td class="faint small">${esc(c.when)}</td></tr>`).join('')}</table>` : '<div class="empty">Empty.</div>')}</div>
-    <div style="margin-top:22px">${box('workspace audit log (this mission)', auditTable(g.workspace_log))}</div>`;
+    <div style="margin-top:22px">${box('workspace audit log (this goal)', auditTable(g.workspace_log))}</div>`;
 }
 
 // ---------- infra ----------
@@ -798,8 +798,8 @@ function renderInfra() {
     </div>
     <div style="margin-top:22px">${box('last 10 minutes', `<div class="legend"><span><i style="background:var(--accent)"></i>cpu %</span><span><i style="background:var(--reply)"></i>ram %</span>${s.gpus.length ? '<span><i style="background:var(--warn)"></i>vram %</span>' : ''}</div>
       <canvas class="chart" id="infra-chart"></canvas>`)}</div>
-    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>mission</th><th>memory</th></tr>
-      ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)} ${esc(x.role || '')}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/m/${x.mission}">${esc(x.ws)}/${esc(x.mission)}</a>` : ''}</td><td>${x.rss_gb} GB</td></tr>`).join('')}</table>`
+    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>goal</th><th>memory</th></tr>
+      ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)} ${esc(x.role || '')}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td></tr>`).join('')}</table>`
         : '<div class="empty">No agent sessions running.</div>'}
       <p class="hint">Workers run in a systemd scope capped by infra.worker_memory_max_gb (loop.yaml); new workers are refused below min_free_ram_gb.</p>`)}</div></div>`;
   drawChart();
@@ -858,7 +858,7 @@ async function renderAgents() {
 // ---------- live events ----------
 function handle(evt) {
   const r = S.route;
-  const inMission = r.view === 'mission' && evt.ws === r.ws && evt.mission === r.mid;
+  const inGoal = r.view === 'goal' && evt.ws === r.ws && evt.goal === r.gid;
   switch (evt.type) {
     case 'infra':
       S.infra = evt.data; S.history.push(evt.data); if (S.history.length > 600) S.history.shift();
@@ -866,11 +866,11 @@ function handle(evt) {
       if (r.view === 'infra') renderInfra();
       break;
     case 'session_event': {
-      if (!inMission) break;
+      if (!inGoal) break;
       const e = evt.event;
       if (S.feeds[evt.session] && FEED_TYPES.includes(e.type)) {
         S.feeds[evt.session].push(e);
-        const s = S.mission?.sessions.find(x => x.id === evt.session);
+        const s = S.goal?.sessions.find(x => x.id === evt.session);
         paintFeed(s?.kind === 'meta-work' ? 'meta-work' : evt.session);
       } else if (!S.feeds[evt.session] && e.type === 'turn') {
         S.feeds[evt.session] = [e];  // a session that started after the page loaded
@@ -883,17 +883,17 @@ function handle(evt) {
       break;
     }
     case 'meta_chat_message':
-      if (inMission && evt.session === S.chat.sid) loadChatMessages();
-      if (inMission) scheduleRefresh();
+      if (inGoal && evt.session === S.chat.sid) loadChatMessages();
+      if (inGoal) scheduleRefresh();
       break;
-    case 'mission_status':
+    case 'goal_status':
       loadState();
-      if (inMission) scheduleRefresh();
+      if (inGoal) scheduleRefresh();
       break;
     case 'alert':
-      toast(`${evt.mission}: ${evt.text}`, 'warn', 9000);
+      toast(`${evt.goal}: ${evt.text}`, 'warn', 9000);
       loadState();
-      if (inMission) scheduleRefresh();
+      if (inGoal) scheduleRefresh();
       break;
     case 'agents':
       if (r.view === 'agents') renderAgents();
@@ -905,7 +905,7 @@ function handle(evt) {
       toast(evt.text, 'error', 9000);
       break;
     default:
-      if (inMission) scheduleRefresh();
+      if (inGoal) scheduleRefresh();
   }
 }
 function connect() {

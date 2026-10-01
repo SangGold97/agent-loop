@@ -2,11 +2,11 @@
 
 A local, human-on-the-loop platform that wraps **Claude Code** and **Codex** (headless CLIs).
 You write a **spec** and a **goal**; a **meta-work** session (meta-agent) plans, writes prompts for
-**worker** sessions, evaluates their evidence against the goal, and keeps iterating until it decides the mission is
+**worker** sessions, evaluates their evidence against the goal, and keeps iterating until it decides the goal is
 done. You steer with notes, chat with a **meta-chat** session (meta-agent), review the report, and merge.
 
 ```
-Human ──► UI (missions, live sessions, notes, meta-chat, infra)
+Human ──► UI (goals, live sessions, notes, meta-chat, infra)
             │
      control plane (FastAPI + SQLite)  ── budgets · guard · git · digests · infra caps
             │
@@ -29,23 +29,23 @@ The platform uses your existing CLI logins; it never asks for keys.
 
 | | |
 |---|---|
-| **Workspace** (`workspaces/<name>/`, own git) | One project: `repo/` (the project, cloned or empty), `meta/` + `worker/` harnesses, `missions/`, `data/`, `wt/` worktrees. Every change is committed with its actor (`human`, `meta-work(<sid>)`, `control-plane`, `meta-chat(<sid>)`). |
-| **Mission** (`missions/<date>-<slug>/`) | `spec.md`, `goal.md`, `mission.yaml` (human-owned), `plan.md` + `journal.md` (meta-work), `notes.md`, `report.md`, `runs/<worker>/` evidence. |
-| **Meta-work** | One meta session per mission, driven by events (kickoff, worker finished, note, goal changed, budget). It never executes project work. |
-| **Meta-chat** | Prompt-by-prompt chat bound to a mission (agent/model/effort chosen per chat); read-only; proposes notes you approve. |
-| **Worker** | A Claude Code or Codex session (the meta-work picks the CLI and role; model/effort come from `mission.yaml` → `workers`), in its own worktree on `loop/<mission>/<label>-<sid>`; accepted work is merged into `loop/<mission>/integration`. |
+| **Workspace** (`workspaces/<name>/`, own git) | One project: `repo/` (the project, cloned or empty), `meta/` + `worker/` harnesses, `goals/`, `data/`, `wt/` worktrees. Every change is committed with its actor (`human`, `meta-work(<sid>)`, `control-plane`, `meta-chat(<sid>)`). |
+| **Goal** (`goals/<date>-<slug>/`) | `spec.md`, `goal.md`, `goal.yaml` (human-owned), `plan.md` + `journal.md` (meta-work), `notes.md`, `report.md`, `runs/<worker>/` evidence. |
+| **Meta-work** | One meta session per goal, driven by events (kickoff, worker finished, note, goal changed, budget). It never executes project work. |
+| **Meta-chat** | Prompt-by-prompt chat bound to a goal (agent/model/effort chosen per chat); read-only; proposes notes you approve. |
+| **Worker** | A Claude Code or Codex session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<label>-<sid>`; accepted work is merged into `loop/<goal>/integration`. |
 | **Digest** | What a finished worker turn sends to the meta-work: final report + diff, trimmed per `loop.yaml → digest`, full versions in `runs/`. |
-| **Goal** | Free text. Lines `- verify: \`cmd\`` are run on the integration branch before a `success` close; everything else is judged by the meta-work. |
+| **goal.md** | Success criteria, free text. Lines `- verify: \`cmd\`` are run on the integration branch before a `success` close; everything else is judged by the meta-work. |
 
 ## Guardrails (mistakes, not adversaries)
 
 - One PreToolUse guard (`agentloop/guard.py`) serves both CLIs: no `git push`, no writes to human-owned files,
   meta-agents read-only on code, workers confined to their worktree/run dir/`data/`, extra regexes from `loop.yaml → guard`.
 - Git hooks in the project repo block agent commits to protected branches and any agent push.
-- After every agent turn the control plane reverts edits to `spec.md`, `goal.md`, `mission.yaml`, `loop.yaml`, `hooks.json`
+- After every agent turn the control plane reverts edits to `spec.md`, `goal.md`, `goal.yaml`, `loop.yaml`, `hooks.json`
   (the changed copy is kept in `.loop/reverted/<time>/`, and the UI shows an alert).
 - Budgets (concurrency, worker/meta turns) are enforced by the control plane; on exhaustion the
-  meta-work gets one final turn to close the mission.
+  meta-work gets one final turn to close the goal.
 - Every session runs in its own `systemd-run --user --scope` (orphans are stopped on restart); workers also get
   `MemoryMax`. Spawns are refused under `min_free_ram_gb`; GPUs are hidden unless a worker is spawned with `--gpu`
   (slots in `loop.yaml → infra`).
