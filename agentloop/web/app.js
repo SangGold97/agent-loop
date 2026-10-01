@@ -190,7 +190,7 @@ function renderSidebar() {
 }
 $('#new-ws').onclick = () => newWorkspaceModal();
 
-const TABS = [['overview', 'Overview'], ['config', 'Config'], ['plan', 'Plan & journal'], ['notes', 'Notes'], ['git', 'Git']];
+const TABS = [['overview', 'OVERVIEW'], ['config', 'CONFIG'], ['plan', 'PLAN & JOURNAL'], ['notes', 'HUMAN REPORT & NOTES'], ['git', 'GIT']];
 function parseHash() {
   const p = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   if (p[0] === 'ws' && p[2] === 'm') {
@@ -410,18 +410,17 @@ async function refreshMission(force) {
   await renderTab();
 }
 
-// ---------- overview: stats, then HUMAN / META-AGENTS / WORKER-AGENTS layers ----------
+// ---------- overview: stats, then META-AGENTS / WORKER-AGENTS layers ----------
 function renderOverview() {
   $('#m-tab').innerHTML = `<div id="ov-stats" class="stats"></div>
-    <div class="layer human" id="ov-human" hidden><div class="lt">human</div><div id="ov-report"></div></div>
     <div class="layer"><div class="lt">meta-agents</div><div class="meta-grid">
       <div class="box" id="ov-mw"></div><div class="box" id="ov-chat"></div></div></div>
     <div class="layer"><div class="lt">worker-agents <span class="x faint" id="ov-wcount"></span></div><div id="ov-workers"></div></div>`;
-  renderStats(); renderReport(); renderMetaWork(); renderChat(); renderWorkers();
+  renderStats(); renderMetaWork(); renderChat(); renderWorkers();
 }
 function updateOverview(force) {
   if (!$('#ov-stats')) return renderOverview();
-  renderStats(); renderReport(); renderMetaWorkHead(); renderChatBar(); renderWorkers();
+  renderStats(); renderMetaWorkHead(); renderChatBar(); renderWorkers();
   // A rotated meta-work session joins the same feed
   const fresh = S.mission.sessions.filter(s => s.kind === 'meta-work' && !S.feeds[s.id]);
   if (fresh.length) Promise.all(fresh.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
@@ -443,17 +442,18 @@ function renderStats() {
       <div class="value">Total: ${fmtDur(b.hours)}</div></div>`;
 }
 function renderReport() {
-  const M = S.mission, report = M.files['report.md'], el = $('#ov-report');
+  const M = S.mission, report = M.files['report.md'], el = $('#nt-report');
+  if (!el) return;
   const review = M.row.status === 'awaiting_review';
-  $('#ov-human').hidden = !report;
+  $('#nt-human').hidden = !report;
   if (!report) { el.innerHTML = ''; return; }
   if (el.dataset.report === report + review) return;
   el.dataset.report = report + review;
   el.innerHTML = `<div class="box report"><div class="lt">report${review ? ' · awaiting your review' : ''}</div>
     <div class="md">${md(report.replace(/^# Completion report\s*\n/, ''))}</div>
-    ${review ? `<div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn" id="ov-reopen">reopen with note</button>
-      <button class="btn primary" id="ov-accept">accept</button></div>` : ''}</div>`;
-  if (review) { $('#ov-accept').onclick = () => missionAction('accept'); $('#ov-reopen').onclick = () => reopenModal(); }
+    ${review ? `<div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn" id="nt-reopen">reopen with note</button>
+      <button class="btn primary" id="nt-accept">accept</button></div>` : ''}</div>`;
+  if (review) { $('#nt-accept').onclick = () => missionAction('accept'); $('#nt-reopen').onclick = () => reopenModal(); }
 }
 function renderConfigTab(force) {
   const M = S.mission, el = $('#cfg-tab');
@@ -720,7 +720,7 @@ async function sessionModal(sid) {
   const log = $('.feed', m); log.scrollTop = log.scrollHeight;
 }
 
-// ---------- plan, notes, git ----------
+// ---------- plan, human report & notes, git ----------
 function planHtml() {
   const f = S.mission.files;
   return `<div class="grid cols-2" style="margin-top:18px">${box('plan.md <span class="x">owned by the meta-work</span>', `<div class="md">${md(f['plan.md'])}</div>`)}
@@ -738,8 +738,9 @@ function renderNotes(update = false) {
           : `<button class="btn small" data-note="${n.id}" data-v="approve" data-mode="queue">approve (queue)</button>
         <button class="btn small primary" data-note="${n.id}" data-v="approve" data-mode="now">approve & deliver now</button>`}</div>`
       : `<div class="md" style="margin-top:4px">${md(n.text)}</div>`}</div>`).join('') : '<div class="empty">No notes yet.</div>';
-  if (update && $('#notes-list')) { $('#notes-list').innerHTML = list; return; }
-  el.innerHTML = `<div class="grid cols-2" style="align-items:start;margin-top:18px">
+  if (update && $('#notes-list')) { $('#notes-list').innerHTML = list; renderReport(); return; }
+  el.innerHTML = `<div class="layer human" id="nt-human" hidden><div class="lt">human report</div><div id="nt-report"></div></div>
+    <div class="grid cols-2" style="align-items:start;margin-top:18px">
     ${box('steer the meta-work', `<p class="hint">Notes override the meta-work's plan. They are appended to <code>notes.md</code> and delivered to the meta-work.</p>
       <textarea id="note-text" style="min-height:130px" placeholder="e.g. prefer a simpler approach; skip the caching layer for now."></textarea>
       <div class="row" style="margin-top:8px">
@@ -747,6 +748,7 @@ function renderNotes(update = false) {
         <label class="inline"><input type="radio" name="nmode" value="now"> now: wake the meta-work</label>
         <span class="spacer"></span><button class="btn primary" id="note-add">${review ? 'add note & reopen' : 'add note'}</button></div>`)}
     <div id="notes-list">${list}</div></div>`;
+  renderReport();
   $('#note-add').onclick = () => act(async () => {
     const { ws, mid } = S.route;
     if (S.mission.row.status === 'awaiting_review') {
