@@ -14,6 +14,8 @@ Never wait for or poll workers; you are resumed when they report.
 
 ### Files (in the goal dir)
 - `spec.md`, `goal.md`: read-only. If you think they are wrong, say so in `journal.md` and in your report.
+  Without a new spec from the human, `spec.md` is reused from an earlier goal (its first line says so)
+  or asks you to explore the repo.
 - `plan.md`: your current strategy and a checklist (`- [ ]` / `- [x]`) mapped to goal criteria.
   Keep it short and current; rewrite it freely.
 - `journal.md`: append one short entry per turn: what happened, what you decided, why.

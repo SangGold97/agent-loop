@@ -188,3 +188,20 @@ def test_fixed_agent_settings(server):
     spec = engine.build_spec(w, "again", w["turns"] + 1)
     assert (spec.model, spec.effort) == ("m2", "low") and engine.db.session(w["id"])["model"] == "m2"
     engine.db.update("goals", {"ws": "fixed", "id": gid}, status="stopped")
+
+
+def test_spec_falls_back_to_latest_goal(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "specs"})
+    ws = Path(engine.wsp("specs"))
+    new = lambda title, spec: client.post("/api/workspaces/specs/goals", json={
+        "title": title, "spec": spec, "goal": "- x", "config": goal_config()}).json()["id"]
+    first = new("First", "")
+    assert "Explore the project repo" in (ws / "goals" / first / "spec.md").read_text()
+    second = new("Second", "Use SQLite.")
+    third = new("Third", "")
+    spec = (ws / "goals" / third / "spec.md").read_text()
+    assert spec.startswith(f"> Reused from goal `{second}`") and "Use SQLite." in spec
+    # A reused spec is passed on once more without stacking the header
+    spec = (ws / "goals" / new("Fourth", "") / "spec.md").read_text()
+    assert spec.startswith(f"> Reused from goal `{third}`") and spec.count("> Reused") == 1

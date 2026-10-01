@@ -252,6 +252,8 @@ def create_app(api_url: str) -> FastAPI:
     @app.post("/api/agent/{cmd}")
     async def agent_cmd(cmd: str, req: Request, x_loop_token: str | None = Header(None)):
         caller, b = engine.caller(x_loop_token), await body(req)
+        if cmd in ("spawn", "send", "stop", "merge", "done") and caller["kind"] != "meta-work":
+            raise AgentError(f"`loop {cmd}` belongs to the meta-work; propose a note with `loop note` instead")
         if cmd == "spawn":
             text = await engine.spawn_worker(caller, b.get("agent", ""), b.get("role", ""), b.get("label", ""),
                                              b.get("prompt", ""), bool(b.get("gpu")))

@@ -155,15 +155,37 @@ def create_goal(ws: Path, title: str, spec: str, goal_text: str, config: dict | 
     gdir = ws / "goals" / gid
     shutil.copytree(TEMPLATES / "goal", gdir)
     (gdir / "runs").mkdir()
-    (gdir / "spec.md").write_text(spec.strip() + "\n" if spec.strip() else (gdir / "spec.md").read_text())
+    (gdir / "spec.md").write_text(spec.strip() + "\n" if spec.strip() else fallback_spec(ws, gid))
     (gdir / "goal.md").write_text(goal_text.strip() + "\n" if goal_text.strip() else (gdir / "goal.md").read_text())
     defaults = workspace_config(ws)["defaults"]
-    doc = {"title": title, "created": time.strftime("%Y-%m-%d %H:%M")}
+    doc = {"title": title, "created": time.strftime("%Y-%m-%d %H:%M:%S")}
     for key in GOAL_KEYS:
         doc[key] = (config or {}).get(key, defaults[key])
     (gdir / "goal.yaml").write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
     commit(ws, "control-plane", f"control-plane: new goal {gid}")
     return gid
+
+
+REUSED_SPEC = "> Reused from goal `{gid}`: no spec was given for this goal.\n\n"
+
+
+def fallback_spec(ws: Path, new_gid: str) -> str:
+    """Spec for a goal created without one: the latest real spec of this workspace, else the template
+    (which tells the meta-work to explore the repo and infer the context from goal.md)."""
+    blank = (TEMPLATES / "goal" / "spec.md").read_text()
+    # Newest goal first (created time, then when its spec was written); skip goals without a spec of their own
+    goals = []
+    for g in list_goals(ws):
+        spec_path = ws / "goals" / g / "spec.md"
+        if g != new_gid and spec_path.exists():
+            created = str((yaml.safe_load((ws / "goals" / g / "goal.yaml").read_text()) or {}).get("created", ""))
+            goals.append((created, spec_path.stat().st_mtime_ns, g))
+    for *_, gid in sorted(goals, reverse=True):
+        text = (ws / "goals" / gid / "spec.md").read_text()
+        text = re.sub(r"^> Reused from goal `[^`]+`.*\n\n", "", text)
+        if text.strip() and text != blank:
+            return REUSED_SPEC.format(gid=gid) + text
+    return blank
 
 
 def read_goal_files(ws: Path, gid: str) -> dict:

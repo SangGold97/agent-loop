@@ -320,7 +320,7 @@ async function newGoalModal(ws) {
     <div class="grid" style="gap:12px">
       <label class="f">title<input type="text" id="nm-title" placeholder="e.g. Add OAuth login"></label>
       <div class="grid cols-2">
-        <label class="f">spec: context, requirements, inputs, constraints<textarea id="nm-spec" style="min-height:190px"></textarea></label>
+        <label class="f">spec: context, requirements, inputs, constraints<textarea id="nm-spec" style="min-height:190px" placeholder="empty = reuse the latest goal's spec; with none, the meta-work explores the repo"></textarea></label>
         <label class="f">goal<textarea id="nm-goal" style="min-height:190px" placeholder="- criterion (qualitative ones are judged by the meta-work)&#10;- verify: \`pytest -q\`   (optional command run on the integration branch)"></textarea></label>
       </div>
       <div id="nm-conf">${configForm(info.config.defaults)}</div>
