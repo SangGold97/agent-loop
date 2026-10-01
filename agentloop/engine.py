@@ -157,6 +157,14 @@ class Engine:
                 "[System] The platform restarted. " + (f"Interrupted workers: {', '.join(names)} "
                 "(continue them with `loop send`)." if names else "No workers were interrupted."))})
             self.kick(m["ws"], m["id"])
+        # Harness prompts follow the platform templates unless the human customised them
+        for name in workspace.list_workspaces():
+            p = self.wsp(name)
+            res = workspace.sync_harness(p)
+            if res["updated"]:
+                workspace.commit(p, "control-plane", "control-plane: sync harness " + ", ".join(res["updated"]))
+            if res["kept"]:
+                log.info("%s: customised harness files kept: %s", name, ", ".join(res["kept"]))
         self.spawn(self.infra_loop())
         self.spawn(agents.refresh_models())  # model lists follow the installed CLI versions
 

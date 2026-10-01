@@ -1,6 +1,7 @@
 """Workspace and mission files: creation from templates, actor-tagged commits, protection."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -134,6 +135,7 @@ def create_workspace(name: str, repo: str | None = None, base_branch: str | None
             gitops.git(ws / "repo", *gitops.BOT, "commit", "-q", "-m", "init")
         base = gitops.current_branch(ws / "repo")
         install_git_hooks(ws / "repo", sorted({"main", "master", base}))
+        sync_harness(ws)
         gitops.git(ws, "init", "-q", "-b", "main")
         commit(ws, "control-plane", f"control-plane: create workspace {name}")
     except Exception:
@@ -261,3 +263,46 @@ def harness_write(ws: Path, rel: str, text: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text if text.endswith("\n") else text + "\n")
     commit(ws, "human", f"human: harness {rel}")
+
+
+TEMPLATE_STATE = Path(".loop") / "template.json"
+
+
+def _template_files() -> dict[str, str]:
+    """Template-managed harness files, rendered as a new workspace would get them."""
+    root, out = TEMPLATES / "workspace", {}
+    for path in [root / "PLATFORM.md", *sorted(p for r in HARNESS_ROOTS for p in (root / r).rglob("*"))]:
+        if path.is_file() and not any(p.is_symlink() for p in [path, *path.parents]):
+            text = path.read_text()
+            out[path.relative_to(root).as_posix()] = text.replace("{{PY}}", PYTHON) \
+                if path.name == "hooks.json" else text
+    return out
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def sync_harness(ws: Path) -> dict[str, list[str]]:
+    """Bring template-managed harness files up to date without clobbering human edits.
+
+    .loop/template.json records the template hash each file was last synced to. A file still at that
+    hash (or missing and never synced) takes the new template; a file the human changed is kept."""
+    state_path = ws / TEMPLATE_STATE
+    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    report = {"updated": [], "kept": []}
+    for rel, text in _template_files().items():
+        target, new = ws / rel, _sha(text)
+        cur = _sha(target.read_text()) if target.is_file() else None
+        if cur == new:
+            state[rel] = new
+        elif cur == state.get(rel) or (cur is None and rel not in state):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+            state[rel] = new
+            report["updated"].append(rel)
+        elif cur is not None and state.get(rel) != new:
+            report["kept"].append(rel)
+    state_path.parent.mkdir(exist_ok=True)
+    state_path.write_text(json.dumps(state, indent=1, sort_keys=True))
+    return report

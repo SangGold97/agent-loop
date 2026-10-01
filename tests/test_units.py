@@ -174,3 +174,22 @@ def test_guard_blocks_global_installs(tmp_path):
     assert guard.check(ev("conda install numpy"), w)
     assert not guard.check(ev("python -m venv .venv && .venv/bin/pip install pytest"), w)
     assert not guard.check(ev("conda install -p ./env numpy"), w)
+
+
+def test_sync_harness_keeps_human_edits(tmp_path, monkeypatch):
+    from agentloop import workspace
+    tpl = tmp_path / "tpl" / "workspace"
+    for rel, text in (("PLATFORM.md", "p1"), ("meta/AGENTS.md", "m1"), ("worker/AGENTS.md", "w1")):
+        (tpl / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tpl / rel).write_text(text)
+    monkeypatch.setattr(workspace, "TEMPLATES", tmp_path / "tpl")
+    ws = tmp_path / "ws"
+    assert sorted(workspace.sync_harness(ws)["updated"]) == ["PLATFORM.md", "meta/AGENTS.md", "worker/AGENTS.md"]
+    # Human customises meta, deletes PLATFORM.md; the template then changes everywhere
+    (ws / "meta/AGENTS.md").write_text("mine")
+    (ws / "PLATFORM.md").unlink()
+    for rel, text in (("PLATFORM.md", "p2"), ("meta/AGENTS.md", "m2"), ("worker/AGENTS.md", "w2")):
+        (tpl / rel).write_text(text)
+    assert workspace.sync_harness(ws) == {"updated": ["worker/AGENTS.md"], "kept": ["meta/AGENTS.md"]}
+    assert (ws / "worker/AGENTS.md").read_text() == "w2" and (ws / "meta/AGENTS.md").read_text() == "mine"
+    assert not (ws / "PLATFORM.md").exists()

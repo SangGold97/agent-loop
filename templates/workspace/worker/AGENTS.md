@@ -17,7 +17,9 @@ Workspace map: `$LOOP_WS/PLATFORM.md`.
 
 ## Final message (required)
 
-End every turn with a concise report (at most 300 words):
+End every turn with a concise report. The meta-agent receives it as a digest that cuts long reports
+from the middle, so keep it to what the meta-agent needs for its next decision and put longer detail
+in artifact files:
 
 **Result:** what was done, or the answer.
 **Evidence:** commands run and their outcomes, key numbers, artifact paths.
