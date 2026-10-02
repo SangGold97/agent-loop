@@ -22,9 +22,13 @@
       </div>
       <nav id="ws-list" class="ws-list"></nav>
       <div class="side-foot">
-        <a href="#/infra" class="btn side-btn" id="nav-infra">Infra</a>
-        <a href="#/agents" class="btn side-btn" id="nav-agents">Agent CLIs</a>
-        <span class="conn" id="conn" title="Live connection"></span>
+        <a href="#/infra" class="side-infra" id="nav-infra" title="Open the infra page">
+          <div class="si-head"><span>infra</span><span id="si-ts"></span></div>
+          <canvas class="chart side" id="side-chart"></canvas>
+          <div class="si-vals" id="si-vals"></div>
+        </a>
+        <div class="row"><a href="#/agents" class="btn side-btn" id="nav-agents">Agent CLIs</a>
+          <span class="conn" id="conn" title="Live connection"></span></div>
       </div>
     </aside>
     <main id="main" class="main"></main>

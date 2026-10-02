@@ -188,15 +188,24 @@ async function loadState() {
   S.workspaces = (await api('/api/state')).workspaces;
   renderSidebar();
 }
+const folded = (() => { try { return JSON.parse(localStorage.getItem('agentloop.folded') || '{}'); } catch { return {}; } })();
+function toggleWs(name) {
+  folded[name] = !folded[name];
+  try { localStorage.setItem('agentloop.folded', JSON.stringify(folded)); } catch { /* storage blocked: fold for this page only */ }
+  renderSidebar();
+}
 function renderSidebar() {
   const r = S.route;
   $('#ws-list').innerHTML = S.workspaces.map(w => `<div>
-      <a class="ws-name ${r.view === 'workspace' && r.ws === w.name ? 'active' : ''}" href="#/ws/${w.name}">
-        <span>${esc(w.name)}</span><button class="icon-btn" data-new-goal="${esc(w.name)}" title="New goal">+</button></a>
-      ${w.goals.map(m => `<a class="m-link ${r.gid === m.id && r.ws === w.name ? 'active' : ''}" href="#/ws/${w.name}/g/${m.id}" title="${esc(m.title)}">
+      <div class="ws-name ${r.view === 'workspace' && r.ws === w.name ? 'active' : ''}">
+        <button class="icon-btn fold" data-fold="${esc(w.name)}" title="${folded[w.name] ? 'Show' : 'Hide'} goals">${folded[w.name] ? '▸' : '▾'}</button>
+        <a class="ws-link" href="#/ws/${w.name}">${esc(w.name)}</a>${folded[w.name] ? `<span class="faint small">${w.goals.length}</span>` : ''}
+        <button class="icon-btn" data-new-goal="${esc(w.name)}" title="New goal">+</button></div>
+      ${folded[w.name] ? '' : w.goals.map(m => `<a class="m-link ${r.gid === m.id && r.ws === w.name ? 'active' : ''}" href="#/ws/${w.name}/g/${m.id}" title="${esc(m.title)}">
         <span class="dot ${m.status}"></span><span class="title">${esc(m.title)}</span></a>`).join('') || '<div class="m-link faint">no goals yet</div>'}
     </div>`).join('') || '<div class="empty small">No workspace yet</div>';
   $$('[data-new-goal]').forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); newGoalModal(b.dataset.newGoal); });
+  $$('[data-fold]').forEach(b => b.onclick = () => toggleWs(b.dataset.fold));
   $('#nav-infra').classList.toggle('active', r.view === 'infra');
   $('#nav-agents').classList.toggle('active', r.view === 'agents');
 }
@@ -424,13 +433,13 @@ async function refreshGoal(force) {
 // ---------- overview: stats + infra, then META-AGENTS (left) and WORKER-AGENTS (right) ----------
 function renderOverview() {
   if (S.chatOut) closeModal();
-  $('#m-tab').innerHTML = `<div class="strip"><div id="ov-stats" class="strip-stats"></div><div class="seg infra" id="ov-infra"></div></div>
+  $('#m-tab').innerHTML = `<div class="strip" id="ov-stats"></div>
     <div class="ov-main" id="ov-main">
       <div class="layer col"><div class="lt">meta-agents</div>
         <div class="box mw" id="ov-mw"></div><div class="box chat" id="ov-chat"></div></div>
       <div class="layer col"><div class="lt">worker-agents <span class="x faint" id="ov-wcount"></span></div>
         <div id="ov-workers" class="wlist"></div></div></div>`;
-  renderStats(); renderOvInfra(); renderMetaWork(); renderChat(); renderWorkers();
+  renderStats(); renderMetaWork(); renderChat(); renderWorkers();
   fitOverview();
 }
 // The overview fills the window; each pane scrolls on its own
@@ -459,21 +468,16 @@ function renderStats() {
     + seg('turns', `worker ${b.worker_turns}/${lim(b.max_worker_turns)}`, `meta ${b.meta_turns}/${lim(b.max_meta_turns)}`)
     + seg('time', fmtDur(b.hours), b.from ? `${fmtTime(b.from)} → ${b.to ? fmtTime(b.to) : 'now'}` : '', 'active time of the goal');
 }
-// INFRA: a sparkline of the last two minutes, redrawn with every 1 s sample; click for the infra page
-function renderOvInfra() {
-  const el = $('#ov-infra'), s = S.infra;
-  if (!el) return;
-  if (!el.dataset.ready) {
-    el.dataset.ready = '1';
-    el.innerHTML = '<span class="k">infra</span><canvas class="chart spark" id="ov-chart"></canvas><span class="s" id="oi-legend"></span>';
-    el.onclick = () => { location.hash = '#/infra'; };
-  }
+// Sidebar INFRA: the host's last two minutes, redrawn with every 1 s sample; click for the infra page
+function renderSideInfra() {
+  const s = S.infra;
   if (!s) return;
   const gpu = s.gpus[0];
-  $('#oi-legend').innerHTML = `<b class="c-cpu">cpu ${s.cpu_pct.toFixed(0)}%</b> · <b class="c-ram">ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb}G</b>`
-    + (gpu ? ` · <b class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G</b>` : '');
-  el.title = `${s.sessions?.length || 0} agent sessions using ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB · open the infra page`;
-  drawChart($('#ov-chart'), 120);
+  $('#si-ts').textContent = hhmm(s.ts);
+  $('#si-vals').innerHTML = `<span class="c-cpu">cpu ${s.cpu_pct.toFixed(0)}%</span><span class="c-ram">ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb}G</span>`
+    + (gpu ? `<span class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G</span>` : '');
+  $('#nav-infra').title = `${s.sessions?.length || 0} agent sessions using ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB · open the infra page`;
+  drawChart($('#side-chart'), 120);
 }
 function renderReport() {
   const M = S.goal, report = M.files['report.md'], el = $('#nt-report');
@@ -970,9 +974,8 @@ function handle(evt) {
   switch (evt.type) {
     case 'infra':
       S.infra = evt.data; S.history.push(evt.data); if (S.history.length > 600) S.history.shift();
-      $('#nav-infra').title = `CPU ${evt.data.cpu_pct.toFixed(0)}% · RAM ${evt.data.ram_pct}%`;
       if (r.view === 'infra') renderInfra();
-      renderOvInfra();
+      renderSideInfra();
       break;
     case 'session_event': {
       if (!inGoal) break;
@@ -1035,12 +1038,12 @@ function connect() {
 }
 window.addEventListener('resize', () => {
   if (S.route.view === 'infra') drawChart($('#infra-chart'), 600);
-  fitOverview(); renderOvInfra();
+  fitOverview(); renderSideInfra();
 });
 
 (async function boot() {
   try { const r = await api('/api/infra'); S.history = r.history; S.infra = r.latest; } catch { /* first sample arrives over SSE */ }
   await Promise.all([loadState(), loadModels()]);
   connect();
-  render();
+  render(); renderSideInfra();
 })();
