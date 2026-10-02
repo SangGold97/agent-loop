@@ -424,7 +424,7 @@ async function refreshGoal(force) {
 // ---------- overview: stats + infra, then META-AGENTS (left) and WORKER-AGENTS (right) ----------
 function renderOverview() {
   if (S.chatOut) closeModal();
-  $('#m-tab').innerHTML = `<div class="ov-top"><div id="ov-stats" class="stats"></div><div class="box infra-box" id="ov-infra"></div></div>
+  $('#m-tab').innerHTML = `<div class="strip"><div id="ov-stats" class="strip-stats"></div><div class="seg infra" id="ov-infra"></div></div>
     <div class="ov-main" id="ov-main">
       <div class="layer col"><div class="lt">meta-agents</div>
         <div class="box mw" id="ov-mw"></div><div class="box chat" id="ov-chat"></div></div>
@@ -436,7 +436,7 @@ function renderOverview() {
 // The overview fills the window; each pane scrolls on its own
 function fitOverview() {
   const el = $('#ov-main');
-  if (el) el.style.height = window.innerWidth <= 1000 ? '' : Math.max(380, window.innerHeight - el.getBoundingClientRect().top - 12) + 'px';
+  if (el) el.style.height = window.innerWidth <= 1000 ? '' : Math.max(380, window.innerHeight - el.getBoundingClientRect().top - 17) + 'px';
 }
 function updateOverview(force) {
   if (!$('#ov-stats')) return renderOverview();
@@ -446,37 +446,33 @@ function updateOverview(force) {
   if (fresh.length) Promise.all(fresh.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
   liveKeys().forEach(paintLive);
 }
+// One status line instead of five cards: the feeds below get the height
 function renderStats() {
   const M = S.goal, b = M.budget, c = M.checklist;
   const workers = M.sessions.filter(s => s.kind === 'worker');
   const running = workers.filter(s => simpleStatus(s) === 'running').length;
   const lim = v => v || '∞';
-  $('#ov-stats').innerHTML = `
-    <div class="card stat"><div class="label">plan</div><div class="value">${c.done}/${c.total}</div>${meter(c.done, c.total || 1, true)}
-      <div class="sub">${c.total ? 'items checked by the meta-work' : 'no checklist yet'}</div></div>
-    <div class="card stat"><div class="label">workers</div><div class="value">${running} running</div>
-      <div class="sub">${workers.length} sessions · max ${lim(b.max_concurrent_workers)} at once</div></div>
-    <div class="card stat"><div class="label">turns</div><div class="value">worker ${b.worker_turns}/${lim(b.max_worker_turns)}</div>
-      <div class="sub">meta-work ${b.meta_turns}/${lim(b.max_meta_turns)}</div></div>
-    <div class="card stat"><div class="label">time</div><div class="value">${fmtDur(b.hours)}</div>
-      <div class="sub">From ${fmtTime(b.from)}\nTo ${b.from ? (b.to ? fmtTime(b.to) : 'now') : '–'}</div></div>`;
+  const seg = (k, v, sub = '', title = '') => `<div class="seg" title="${esc(title)}"><span class="k">${k}</span><span class="v">${v}</span>${sub ? `<span class="s">${sub}</span>` : ''}</div>`;
+  $('#ov-stats').innerHTML =
+    seg('plan', `${c.done}/${c.total}`, c.total ? meter(c.done, c.total, true) : 'no checklist', 'checklist items in plan.md checked by the meta-work')
+    + seg('workers', `${running} running`, `${workers.length} total`, `at most ${lim(b.max_concurrent_workers)} at once`)
+    + seg('turns', `worker ${b.worker_turns}/${lim(b.max_worker_turns)}`, `meta ${b.meta_turns}/${lim(b.max_meta_turns)}`)
+    + seg('time', fmtDur(b.hours), b.from ? `${fmtTime(b.from)} → ${b.to ? fmtTime(b.to) : 'now'}` : '', 'active time of the goal');
 }
-// INFRA: the host's last two minutes, redrawn with every 1 s sample
+// INFRA: a sparkline of the last two minutes, redrawn with every 1 s sample; click for the infra page
 function renderOvInfra() {
   const el = $('#ov-infra'), s = S.infra;
   if (!el) return;
   if (!el.dataset.ready) {
     el.dataset.ready = '1';
-    el.innerHTML = `<div class="lt">infra <span class="x" id="oi-ts"></span></div><div class="legend" id="oi-legend"></div>
-      <canvas class="chart mini" id="ov-chart"></canvas>`;
+    el.innerHTML = '<span class="k">infra</span><canvas class="chart spark" id="ov-chart"></canvas><span class="s" id="oi-legend"></span>';
+    el.onclick = () => { location.hash = '#/infra'; };
   }
   if (!s) return;
   const gpu = s.gpus[0];
-  $('#oi-ts').textContent = hhmm(s.ts);
-  $('#oi-legend').innerHTML = `<span><i style="background:var(--accent)"></i>cpu ${s.cpu_pct.toFixed(0)}%</span>
-    <span><i style="background:var(--reply)"></i>ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb} GB</span>
-    ${gpu ? `<span><i style="background:var(--warn)"></i>vram ${gpu.mem_used_gb}/${gpu.mem_total_gb} GB</span>` : ''}
-    <span class="faint">${s.sessions?.length || 0} sessions · ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB</span>`;
+  $('#oi-legend').innerHTML = `<b class="c-cpu">cpu ${s.cpu_pct.toFixed(0)}%</b> · <b class="c-ram">ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb}G</b>`
+    + (gpu ? ` · <b class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G</b>` : '');
+  el.title = `${s.sessions?.length || 0} agent sessions using ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB · open the infra page`;
   drawChart($('#ov-chart'), 120);
 }
 function renderReport() {
@@ -767,7 +763,7 @@ const workerOpen = w => simpleStatus(w) === 'running' || !!S.open[w.id];
 function workerHead(w) {
   const st = simpleStatus(w);
   return `<span class="fold">${workerOpen(w) ? '▾' : '▸'}</span><span class="role">${esc(w.role)}</span><span class="faint">·</span><span class="wlabel">${esc(w.label)}</span>${pill(st)}
-    <span class="spacer"></span><span class="faint">${agentLine(w, w.context)}</span>
+    <span class="spacer"></span><span class="faint wmeta">${agentLine(w, w.context)}</span>
     <button class="btn small" data-log="${w.id}">expand</button>${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}`;
 }
 function paintHeads() { renderMetaWorkHead(); renderWorkers(); if (!$('#chat-sel:focus')) renderChatBar(); }
@@ -920,10 +916,11 @@ function drawChart(c, points) {
   c.width = w * dpr; c.height = h * dpr;
   const g = c.getContext('2d'); g.scale(dpr, dpr);
   const css = getComputedStyle(document.documentElement);
-  const top = 6, bottom = 6, left = 28, y = v => h - bottom - (h - top - bottom) * Math.min(100, v) / 100;
+  const spark = h < 40, top = spark ? 2 : 6, bottom = spark ? 2 : 6, left = spark ? 0 : 28;
+  const y = v => h - bottom - (h - top - bottom) * Math.min(100, v) / 100;
   g.strokeStyle = css.getPropertyValue('--border'); g.fillStyle = css.getPropertyValue('--faint');
   g.font = `10px ${css.getPropertyValue('--font')}`; g.lineWidth = 1;
-  (h < 120 ? [0, 50, 100] : [0, 25, 50, 75, 100]).forEach(v => { g.beginPath(); g.moveTo(left, y(v)); g.lineTo(w, y(v)); g.stroke(); g.fillText(v, 2, y(v) + 3); });
+  (spark ? [] : h < 120 ? [0, 50, 100] : [0, 25, 50, 75, 100]).forEach(v => { g.beginPath(); g.moveTo(left, y(v)); g.lineTo(w, y(v)); g.stroke(); g.fillText(v, 2, y(v) + 3); });
   const hist = S.history.slice(-points);
   const series = [[css.getPropertyValue('--accent'), x => x.cpu_pct], [css.getPropertyValue('--reply'), x => x.ram_pct]];
   if (hist.some(x => x.gpus?.length)) series.push([css.getPropertyValue('--warn'), x => x.gpus?.[0] ? 100 * x.gpus[0].mem_used_gb / x.gpus[0].mem_total_gb : 0]);

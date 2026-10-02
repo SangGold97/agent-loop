@@ -151,17 +151,28 @@ table.t { width: 100%; border-collapse: collapse; }
 .md blockquote { margin: 4px 0; padding-left: 10px; border-left: 2px solid var(--border-2); color: var(--muted); }
 
 /* goal overview */
-.ov-top { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 2fr); gap: 10px; margin-top: 8px; }
-.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-.infra-box { padding: 12px 10px 4px; }
-.infra-box .legend { flex-wrap: wrap; gap: 4px 12px; }
-.chart.mini { height: 58px; margin-top: 2px; }
-.ov-main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 20px; }
+/* status line: plan │ workers │ turns │ time │ infra */
+.strip { display: flex; align-items: stretch; border: 1px solid var(--border); margin-top: 8px; min-height: 32px; }
+.strip-stats { display: flex; flex: 1; min-width: 0; overflow: hidden; }
+.seg { display: flex; align-items: center; gap: 7px; padding: 0 12px; border-right: 1px solid var(--border); white-space: nowrap; min-width: 0; }
+/* on narrow windows the secondary text goes first, the values stay */
+.seg .s { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.strip-stats .seg { flex: 0 1 auto; }
+.seg .k { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.seg .v { font-weight: 600; }
+.seg .s { color: var(--muted); font-size: 11px; }
+.seg .meter { width: 60px; margin: 0; }
+.seg.infra { border-right: 0; border-left: 1px solid var(--border); cursor: pointer; }
+.seg.infra:hover { background: var(--panel-2); }
+.seg.infra b { font-weight: 400; }
+.c-cpu { color: var(--accent); } .c-ram { color: var(--reply); } .c-gpu { color: var(--warn); }
+.chart.spark { width: 120px; height: 22px; flex: none; }
+.ov-main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 18px; }
 .layer.col { margin-top: 0; padding: 18px 10px 10px; display: flex; flex-direction: column; gap: 18px; min-height: 0; }
 .box.mw, .box.chat { display: flex; flex-direction: column; min-height: 0; padding: 14px 10px 8px; }
 .box.mw { flex: 3 1 0; } .box.chat { flex: 2 1 0; }
 .pane-head { margin-bottom: 4px; }
-.wlist { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
+.wlist { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
 .cfg { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 12px; align-items: center; }
 .cfg > .k { color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
 .agent-row { display: grid; grid-template-columns: 110px 90px minmax(160px, 1.4fr) 110px minmax(90px, 1fr); gap: 8px; align-items: center; margin: 3px 0; }
@@ -212,7 +223,9 @@ table.t { width: 100%; border-collapse: collapse; }
 .worker .fold { color: var(--faint); width: 10px; }
 .worker .wh { padding: 3px 8px; border-bottom: 1px solid var(--border); gap: 6px; flex-wrap: nowrap; white-space: nowrap; }
 .worker .wh .role { font-weight: 700; }
-.worker .wh .wlabel { color: var(--muted); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.worker .wh .wlabel, .worker .wh .wmeta { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.worker .wh .wlabel { color: var(--muted); }
+.worker .wh > :not(.wlabel):not(.wmeta):not(.spacer) { flex: none; }
 .worker .feed-wrap > .feed { padding: 0 8px; }
 .worker.running { border-color: color-mix(in srgb, var(--run) 50%, var(--border)); }
 .chat-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
@@ -251,7 +264,9 @@ table.t { width: 100%; border-collapse: collapse; }
 @media (max-width: 1000px) {
   .app { grid-template-columns: 1fr; }
   .sidebar { display: none; }
-  .cols-2, .cols-4, .stats, .ov-top, .ov-main { grid-template-columns: 1fr; }
+  .cols-2, .cols-4, .ov-main { grid-template-columns: 1fr; }
+  .strip, .strip-stats { flex-wrap: wrap; }
+  .seg { padding: 4px 10px; }
   .box.mw, .box.chat { min-height: 420px; }
   .wlist { overflow: visible; }
   .agent-row { grid-template-columns: 1fr 1fr; }
