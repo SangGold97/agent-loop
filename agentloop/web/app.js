@@ -477,7 +477,7 @@ function renderSideInfra() {
   $('#si-vals').innerHTML = `<span class="c-cpu">cpu ${s.cpu_pct.toFixed(0)}%</span><span class="c-ram">ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb}G</span>`
     + (gpu ? `<span class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G</span>` : '');
   $('#nav-infra').title = `${s.sessions?.length || 0} agent sessions using ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB · open the infra page`;
-  drawChart($('#side-chart'), 120);
+  drawChart($('#side-chart'), 120, true);
 }
 function renderReport() {
   const M = S.goal, report = M.files['report.md'], el = $('#nt-report');
@@ -914,17 +914,21 @@ function renderInfra() {
       <p class="hint">Workers run in a systemd scope capped by infra.worker_memory_max_gb (loop.yaml); new workers are refused below min_free_ram_gb.</p>`)}</div></div>`;
   drawChart($('#infra-chart'), 600);
 }
-function drawChart(c, points) {
+// Line chart of cpu/ram(/vram) %; `pct` labels the grid lines as 0%…100% (sidebar)
+function drawChart(c, points, pct = false) {
   if (!c) return;
   const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
   c.width = w * dpr; c.height = h * dpr;
   const g = c.getContext('2d'); g.scale(dpr, dpr);
   const css = getComputedStyle(document.documentElement);
-  const spark = h < 40, top = spark ? 2 : 6, bottom = spark ? 2 : 6, left = spark ? 0 : 28;
+  const spark = h < 40, top = spark ? 2 : 6, bottom = spark ? 2 : 6, left = spark ? 0 : pct ? 30 : 28;
   const y = v => h - bottom - (h - top - bottom) * Math.min(100, v) / 100;
   g.strokeStyle = css.getPropertyValue('--border'); g.fillStyle = css.getPropertyValue('--faint');
   g.font = `10px ${css.getPropertyValue('--font')}`; g.lineWidth = 1;
-  (spark ? [] : h < 120 ? [0, 50, 100] : [0, 25, 50, 75, 100]).forEach(v => { g.beginPath(); g.moveTo(left, y(v)); g.lineTo(w, y(v)); g.stroke(); g.fillText(v, 2, y(v) + 3); });
+  (spark ? [] : h < 120 && !pct ? [0, 50, 100] : [0, 25, 50, 75, 100]).forEach(v => {
+    g.beginPath(); g.moveTo(left, y(v)); g.lineTo(w, y(v)); g.stroke();
+    g.fillText(pct ? `${v}%` : v, 0, y(v) + 3);
+  });
   const hist = S.history.slice(-points);
   const series = [[css.getPropertyValue('--accent'), x => x.cpu_pct], [css.getPropertyValue('--reply'), x => x.ram_pct]];
   if (hist.some(x => x.gpus?.length)) series.push([css.getPropertyValue('--warn'), x => x.gpus?.[0] ? 100 * x.gpus[0].mem_used_gb / x.gpus[0].mem_total_gb : 0]);
