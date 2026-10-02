@@ -230,6 +230,7 @@ def test_claude_settings_exclude_instructions_above_the_agent(tmp_path):
     for doc in (worker, meta):
         assert str(tmp_path / "home" / "CLAUDE.md") in doc["claudeMdExcludes"]
         assert str(tmp_path / "home" / "AGENTS.md") in doc["claudeMdExcludes"]
+        assert str(tmp_path / "home" / ".claude" / "AGENTS.md") in doc["claudeMdExcludes"]
         assert str(ws / "CLAUDE.md") in doc["claudeMdExcludes"]
         assert not any(x.startswith((str(ws / "meta"), str(ws / "wt" / "w-1"))) for x in doc["claudeMdExcludes"])
     assert str(ws / "wt" / "AGENTS.md") in worker["claudeMdExcludes"]

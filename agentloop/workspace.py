@@ -256,7 +256,7 @@ def codex_home(ws: Path, layer: str) -> Path:
 
 
 # Instruction files Claude Code loads from every directory above its cwd
-CLAUDE_MEMORY_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLAUDE.md")
+CLAUDE_MEMORY_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLAUDE.md", ".claude/AGENTS.md")
 
 
 def claude_settings_doc(ws: Path, layer: str) -> dict:
