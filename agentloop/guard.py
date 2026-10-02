@@ -1,7 +1,8 @@
 """PreToolUse guard shared by Claude Code and Codex (same hook protocol): exit code 2 blocks a call.
 
 Guards against mistakes, not adversaries: agents never push, never touch human-owned files or
-the user's Python, and workers stay inside their own worktree.
+the user's Python, and workers stay inside their own worktree. Messages shown to workers name no platform
+concepts, so a worker experiences these as ordinary limits of its environment.
 """
 from __future__ import annotations
 
@@ -44,15 +45,14 @@ def check_path(path: Path, env: dict) -> str | None:
     if not path.is_relative_to(ws):
         return None
     rel = path.relative_to(ws)
+    worker = env.get("LOOP_ROLE") == "worker"
     if PROTECTED_RE.match(rel.as_posix()):
-        return f"{rel} is human-owned; propose changes in your journal/report instead"
-    role = env.get("LOOP_ROLE")
-    if role == "worker":
-        own = [ws / "wt" / env.get("LOOP_SESSION", "?"), ws / "data"]
-        if env.get("LOOP_RUN_DIR"):
-            own.append(Path(env["LOOP_RUN_DIR"]).resolve())
-        if not any(path.is_relative_to(o.resolve()) for o in own):
-            return f"workers may only write inside their worktree, their run dir and data/ (not {rel})"
+        return (f"{path} is read-only" if worker
+                else f"{rel} is human-owned; propose changes in your journal/report instead")
+    if worker:
+        data = ws / "data"
+        if not any(path.is_relative_to(o) for o in (ws / "wt" / env.get("LOOP_SESSION", "?"), data)):
+            return f"writes are limited to the current checkout, {data} and /tmp (not {path})"
     return None
 
 
@@ -79,12 +79,12 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
     code = strip_heredocs(cmd)
     bare = strip_quotes(code)  # git checks ignore quoted text such as commit messages or prompts
     if re.search(r"\bgit\b[^|;&\n]*\bpush\b", bare):
-        return "agents never push; the human (or the goal push policy) handles remotes"
+        return "pushing is disabled here; commit locally and leave remotes to the repository owner"
     if re.search(WRITE_OPS, code) and re.search(PROTECTED_IN_CMD, code):
-        return "this command would modify a human-owned file (spec/goal/goal.yaml/loop.yaml/hooks.json)"
+        return "this command would modify a read-only file (spec.md, goal.md, goal.yaml, loop.yaml, hooks.json)"
     if GLOBAL_INSTALL.search(bare):
-        return ("do not install into the user or system Python; create a venv in your worktree or "
-                "$LOOP_RUN_DIR (python -m venv .venv) and install there")
+        return ("do not install into the user or system Python; create a virtualenv in the project directory "
+                "(python -m venv .venv) and install there")
     cmd = code
     for match in re.finditer(r"\brm\s+((?:-\S+\s+)*)(.+?)(?:$|[;&|])", cmd, re.M):
         if "r" not in match.group(1) and "f" not in match.group(1):
@@ -110,7 +110,7 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
                     return reason or f"rm outside the workspace is not allowed: {t}"
     for pattern in json.loads(env.get("LOOP_GUARD_PATTERNS") or "[]"):
         if re.search(pattern, cmd):
-            return f"blocked by workspace guard pattern: {pattern}"
+            return f"blocked by guard pattern: {pattern}"
     return None
 
 

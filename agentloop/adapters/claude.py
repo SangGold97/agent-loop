@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .base import Adapter, ParseState, RunSpec, short, to_tokens
+from .base import Adapter, ParseState, RunSpec, short, to_tokens, tool_result
 
 USER_SETTINGS = Path.home() / ".claude" / "settings.json"
 
@@ -91,7 +91,7 @@ class ClaudeAdapter(Adapter):
                     body = c.get("content")
                     if isinstance(body, list):
                         body = "\n".join(x.get("text", "") for x in body if isinstance(x, dict))
-                    out.append({"type": "tool_result", "text": short(body or ""), "error": bool(c.get("is_error"))})
+                    out.append(tool_result(body or "", bool(c.get("is_error"))))
         elif kind == "result":
             st.vendor_id = o.get("session_id") or st.vendor_id
             st.final = o.get("result") if o.get("result") is not None else st.last_text

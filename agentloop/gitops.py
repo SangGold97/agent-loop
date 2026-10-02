@@ -50,11 +50,28 @@ def ensure_integration(ws: Path, gid: str, base: str | None) -> Path:
     return wt
 
 
+# Worker-local dirs: a virtualenv, and outputs the platform collects into runs/<sid>/artifacts/
+WORKER_EXCLUDES = (".venv/", ".artifacts/")
+
+
 def add_worker_worktree(ws: Path, gid: str, sid: str, label: str) -> tuple[Path, str]:
     repo, wt = ws / "repo", ws / "wt" / sid
     branch = f"loop/{gid}/{slug(label)}-{sid}"
     git(repo, "worktree", "add", "-b", branch, str(wt), int_branch(gid))
+    ensure_excluded(repo, WORKER_EXCLUDES)
     return wt, branch
+
+
+def ensure_excluded(repo: Path, patterns: tuple[str, ...]) -> None:
+    """Keep patterns out of every snapshot via the shared, never-committed info/exclude of the repo."""
+    path = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text() if path.exists() else ""
+    missing = [p for p in patterns if p not in text.splitlines()]
+    if missing:
+        sep = "\n" if text and not text.endswith("\n") else ""
+        with path.open("a") as fh:
+            fh.write(sep + "".join(f"{p}\n" for p in missing))
 
 
 def head(path: Path) -> str:

@@ -33,14 +33,14 @@ The platform uses your existing CLI logins; it never asks for keys.
 | **Goal** (`goals/<date>-<slug>/`) | `spec.md`, `goal.md`, `goal.yaml` (human-owned), `plan.md` + `journal.md` (meta-work), `notes.md`, `report.md`, `runs/<worker>/` evidence. |
 | **Meta-work** | One meta session per goal, driven by events (kickoff, worker finished, note, goal changed, budget). It never executes project work. |
 | **Meta-chat** | Prompt-by-prompt chat bound to a goal (agent/model/effort chosen per chat); runs commands and tools freely, steers workers only through notes you approve. |
-| **Worker** | A Claude Code or Codex session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<label>-<sid>`; accepted work is merged into `loop/<goal>/integration`. |
-| **Digest** | What a finished worker turn sends to the meta-work: final report + diff, trimmed per `loop.yaml → digest`, full versions in `runs/`. |
+| **Worker** | A Claude Code or Codex session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<label>-<sid>`; accepted work is merged into `loop/<goal>/integration`. It receives the meta-work's prompt as is and a generic `worker/AGENTS.md`, nothing about the platform; `.venv/` and `.artifacts/` stay out of git, and `.artifacts/` is kept in `runs/<sid>/artifacts/`. |
+| **Digest** | What a finished worker turn sends to the meta-work: final reply + diff, trimmed per `loop.yaml → digest`, full versions in `runs/`. The commands a worker ran are pulled on demand with `loop show W --log`. |
 | **goal.md** | Success criteria, free text. Lines `- verify: \`cmd\`` are run on the integration branch before a `success` close; everything else is judged by the meta-work. |
 
 ## Guardrails (mistakes, not adversaries)
 
 - One PreToolUse guard (`agentloop/guard.py`) serves both CLIs: no `git push`, no writes to human-owned files,
-  workers confined to their worktree/run dir/`data/`, extra regexes from `loop.yaml → guard`.
+  workers confined to their worktree and `data/`, extra regexes from `loop.yaml → guard`.
 - Git hooks in the project repo block agent commits to protected branches and any agent push.
 - After every agent turn the control plane reverts edits to `spec.md`, `goal.md`, `goal.yaml`, `loop.yaml`, `hooks.json`
   (the changed copy is kept in `.loop/reverted/<time>/`, and the UI shows an alert).

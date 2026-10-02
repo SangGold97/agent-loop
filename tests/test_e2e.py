@@ -36,6 +36,11 @@ def test_full_goal(server):
     sid = workers[0]["id"]
     run = ws / "goals" / gid / "runs" / sid
     assert (run / "t1.prompt.md").exists() and "hello.py" in (run / "t1.diff").read_text()
+    # The worker got the meta-work's prompt as is; its outputs are kept, its .venv/ and .artifacts/ never committed
+    assert (run / "artifacts" / "prompt.txt").read_text() == "Create hello.py"
+    assert ".venv" not in (run / "t1.diff").read_text() and ".artifacts" not in (run / "t1.diff").read_text()
+    log = engine.turn_log("demo", sid, 1)
+    assert "$ Bash python hello.py" in log and "  hello" in log
     assert (ws / "wt" / f"_int-{gid}" / "hello.py").exists()
     authors = subprocess.run(["git", "log", "--format=%an"], cwd=ws, capture_output=True, text=True).stdout
     assert "control-plane" in authors and "meta-work(" in authors
@@ -61,6 +66,21 @@ def test_full_goal(server):
                               text=True).stdout
     assert f"loop/{gid}/integration" in branches and sid not in branches
     assert client.get(f"/api/goals/demo/{gid}").json()["row"]["status"] == "done"
+
+
+def test_worker_edit_to_human_file_is_reverted(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "tamper"})
+    ws = Path(engine.wsp("tamper"))
+    goal_text = "- hello.py exists\n- verify: `test -f hello.py`"
+    gid = client.post("/api/workspaces/tamper/goals", json={
+        "title": "Tamper", "spec": "Create hello.py TAMPER", "goal": goal_text, "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/tamper/{gid}/start")
+    wait_for(lambda: client.get(f"/api/goals/tamper/{gid}").json()["row"]["status"] == "awaiting_review")
+    assert (ws / "goals" / gid / "goal.md").read_text() == goal_text + "\n"
+    assert list((ws / ".loop" / "reverted").rglob("goal.md"))
+    digests = engine.db.q("SELECT payload FROM inbox WHERE ws=? AND goal=? AND kind='worker_done'", "tamper", gid)
+    assert any("Reverted this worker's edits" in d["payload"] for d in digests)
 
 
 def test_agent_api_requires_token(server):

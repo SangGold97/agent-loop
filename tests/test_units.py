@@ -93,7 +93,7 @@ def test_trim_words_keeps_tail():
 
 def guard_env(tmp_path: Path, role: str) -> dict:
     return {"LOOP_ROLE": role, "LOOP_WS": str(tmp_path), "LOOP_SESSION": "w-1",
-            "LOOP_RUN_DIR": str(tmp_path / "goals/m1/runs/w-1"), "LOOP_GUARD_PATTERNS": json.dumps(["aws .*prod"])}
+            "LOOP_GUARD_PATTERNS": json.dumps(["aws .*prod"])}
 
 
 def test_guard_rules(tmp_path):
@@ -109,7 +109,12 @@ def test_guard_rules(tmp_path):
     assert guard.check(ev("Bash", command="rm -rf /"), w)
     assert guard.check(ev("Bash", command="rm -rf /home/other/stuff"), w)
     assert not guard.check(ev("Write", file_path="hello.py"), w)
-    assert not guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/runs/w-1/artifacts/a.txt")), w)
+    assert not guard.check(ev("Write", file_path=".artifacts/plot.png"), w)
+    assert not guard.check(ev("Write", file_path=str(tmp_path / "data/raw.csv")), w)
+    # Workers write only in their checkout and data/, and messages name no platform concepts
+    reason = guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/runs/w-1/a.txt")), w)
+    assert reason and "worktree" not in reason and "run dir" not in reason
+    assert "journal" not in guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/spec.md")), w)
     assert not guard.check(ev("Bash", command="rm -rf build && pytest -q"), w)
     # Meta-agents may change code and git state; push and human-owned files stay blocked
     assert not guard.check(ev("Edit", file_path=str(tmp_path / "repo/app.py")), m)
@@ -197,6 +202,20 @@ def test_guard_blocks_global_installs(tmp_path):
     assert guard.check(ev("conda install numpy"), w)
     assert not guard.check(ev("python -m venv .venv && .venv/bin/pip install pytest"), w)
     assert not guard.check(ev("conda install -p ./env numpy"), w)
+
+
+def test_enforce_protected_reverts_a_single_edit(tmp_path):
+    from agentloop import gitops, workspace
+    gitops.git(tmp_path, "init", "-q")
+    (tmp_path / "goals/g").mkdir(parents=True)
+    (tmp_path / "goals/g/goal.md").write_text("- criterion\n")
+    workspace.commit(tmp_path, "human", "init")
+    # One unstaged edit: the first (and only) porcelain line, the case a fixed-column parse got wrong
+    (tmp_path / "goals/g/goal.md").write_text("- nothing\n")
+    (tmp_path / "goals/g/spec.md").write_text("new\n")
+    assert sorted(workspace.enforce_protected(tmp_path)) == ["goals/g/goal.md", "goals/g/spec.md"]
+    assert (tmp_path / "goals/g/goal.md").read_text() == "- criterion\n" and not (tmp_path / "goals/g/spec.md").exists()
+    assert list((tmp_path / ".loop/reverted").rglob("goal.md"))
 
 
 def test_sync_harness_keeps_human_edits(tmp_path, monkeypatch):

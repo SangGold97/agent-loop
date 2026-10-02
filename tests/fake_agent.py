@@ -29,12 +29,22 @@ def main():
             text = "**Result:** failed on purpose\n**Issues:** simulated failure"
         else:
             Path("hello.py").write_text('print("hello")\n')
-            (Path(os.environ["LOOP_RUN_DIR"]) / "artifacts" / "log.txt").write_text("ran hello\n")
+            # Kept outputs and a virtualenv: collected and git-excluded by the platform, never committed
+            Path(".artifacts").mkdir(exist_ok=True)
+            Path(".artifacts/prompt.txt").write_text(prompt)
+            Path(".venv").mkdir(exist_ok=True)
+            Path(".venv/pyvenv.cfg").write_text("home = /usr\n")
+            if "TAMPER" in prompt:  # a write the guard does not see; the platform must revert it
+                (gdir / "goal.md").write_text("- nothing to do\n")
+            emit({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "python hello.py"}}]}})
+            emit({"type": "user", "message": {"content": [{"type": "tool_result", "content": "hello"}]}})
             text = "**Result:** created hello.py\n**Evidence:** python hello.py -> hello"
     elif role == "meta-work":
         if "[Kickoff]" in prompt:
             (gdir / "plan.md").write_text("# Plan\n\n- [ ] create hello.py\n")
-            text = loop("spawn", "--agent", "fake", "--role", "coder", "--label", "hello", "--prompt", "Create hello.py")
+            task = "Create hello.py" + (" TAMPER" if "TAMPER" in (gdir / "spec.md").read_text() else "")
+            text = loop("spawn", "--agent", "fake", "--role", "coder", "--label", "hello", "--prompt", task)
         elif m := re.search(r"\[Worker (w-\w+)", prompt):
             merged = loop("merge", m.group(1))
             (gdir / "plan.md").write_text("# Plan\n\n- [x] create hello.py\n")

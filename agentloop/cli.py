@@ -13,7 +13,7 @@ HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   send    continue an idle worker              loop send w-1a2b3c <<'EOF' ... EOF
   stop    stop a running worker                loop stop w-1a2b3c
   ls      list this goal's workers
-  show    worker details / a turn's evidence   loop show w-1a2b3c --turn 2 [--full]
+  show    worker details / a turn's evidence   loop show w-1a2b3c --turn 2 [--full] [--log]
   merge   merge a worker branch into loop/<goal>/integration
   done    close the goal with a report      loop done --status success <<'EOF' ... EOF
   status  goal overview (meta-chat)
@@ -76,6 +76,7 @@ def main(argv: list[str] | None = None) -> None:
     show.add_argument("sid")
     show.add_argument("--turn", type=int)
     show.add_argument("--full", action="store_true")
+    show.add_argument("--log", action="store_true", help="commands the worker ran, with the end of each output")
     done = sub.add_parser("done")
     done.add_argument("--status", required=True, choices=["success", "partial", "blocked"])
     done.add_argument("--report")
@@ -91,7 +92,7 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd in ("stop", "merge"):
         payload = {"sid": a.sid}
     elif a.cmd == "show":
-        payload = {"sid": a.sid, "turn": a.turn, "full": a.full}
+        payload = {"sid": a.sid, "turn": a.turn, "full": a.full, "log": a.log}
     elif a.cmd == "done":
         payload = {"status": a.status, "report": text_arg(a, "report")}
     elif a.cmd == "note":

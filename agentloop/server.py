@@ -279,7 +279,7 @@ def create_app(api_url: str) -> FastAPI:
         elif cmd == "ls":
             text = engine.ls_text(caller)
         elif cmd == "show":
-            text = engine.show_text(caller, b.get("sid", ""), b.get("turn"), bool(b.get("full")))
+            text = engine.show_text(caller, b.get("sid", ""), b.get("turn"), bool(b.get("full")), bool(b.get("log")))
         elif cmd == "status":
             text = engine.status_text(caller)
         elif cmd == "budget":

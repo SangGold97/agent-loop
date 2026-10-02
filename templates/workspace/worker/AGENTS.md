@@ -1,36 +1,20 @@
-# Worker
+# Working style
 
-You are a worker in agent-loop. A meta-agent, not a human, writes your prompts. Work autonomously:
-nobody answers questions gid-turn, so make reasonable decisions and state them.
-Workspace map: `$LOOP_WS/PLATFORM.md`.
-
-- Your cwd is your own git worktree on a `loop/<goal>/...` branch. Commit meaningful steps with
-  clear messages. Never push, and never check out or commit to `main`.
-- The human's spec and goal (read-only): `$LOOP_GOAL_DIR/spec.md`, `$LOOP_GOAL_DIR/goal.md`.
-- Save evidence (logs, metrics, reports, plots) under `$LOOP_RUN_DIR/artifacts/` and cite the paths.
-- Large shared data lives in `$LOOP_WS/data/`.
-- Missing tools or packages: create a venv in your worktree or `$LOOP_RUN_DIR` and install there; never
-  install into the user or system Python (`pip --user`, `sudo`, conda base).
-- Respect the resource limits in your prompt. GPUs are hidden unless your prompt says you were granted one.
-- Check your own work (run tests, inspect outputs) before reporting. Report honestly: failures and
+- You run unattended: nobody answers questions while you work. Make reasonable assumptions, state them,
+  and finish the task. If a decision only the requester can make blocks you, stop and ask it clearly at the end.
+- Commit meaningful steps on the current branch with clear messages. Never push.
+- Missing tools or packages: create a virtualenv in the project directory (`python -m venv .venv`) and install
+  there; never install into the user or system Python (`pip --user`, `sudo`, conda base).
+- Outputs that are not code (logs, metrics, plots, reports) go under `.artifacts/` in the project directory
+  unless the prompt names another place. `.venv/` and `.artifacts/` are never committed.
+- Check your own work (run tests, inspect outputs) before you finish. Report honestly: failures and
   uncertainty are useful information.
 
 ## Coding and editing rules
 
 - Follow PEP 8 for Python. Add a short explanatory comment before any block containing substantial logic.
-- Put temporary experiments and prototypes in `$LOOP_RUN_DIR/tmp/`, not in your worktree, and delete
-  what is no longer needed when you finish.
+- Keep temporary experiments and prototypes out of your commits (for example under `/tmp`), and delete what is
+  no longer needed when you finish.
 - When updating content, completely replace outdated parts without leaving obsolete details behind.
 - Keep code, reports and generated content concise and free of repetition.
 - Stay within the task in your prompt and don't change the behavior of other modules.
-
-## Final message (required)
-
-End every turn with a concise report. The meta-agent receives it as a digest that cuts long reports
-from the middle, so keep it to what the meta-agent needs for its next decision and put longer detail
-in artifact files:
-
-**Result:** what was done, or the answer.
-**Evidence:** commands run and their outcomes, key numbers, artifact paths.
-**Issues:** failures, doubts, blockers.
-**Next:** the suggested next step.

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .base import Adapter, ParseState, RunSpec, short, to_tokens
+from .base import Adapter, ParseState, RunSpec, short, to_tokens, tool_result
 
 
 
@@ -51,8 +51,7 @@ class CodexAdapter(Adapter):
                 out.append({"type": "thinking", "text": short(item["text"], 400)})
             elif itype == "command_execution":
                 code = item.get("exit_code")
-                out.append({"type": "tool_result", "text": short(item.get("aggregated_output") or f"exit {code}"),
-                            "error": code not in (0, None)})
+                out.append(tool_result(item.get("aggregated_output") or f"exit {code}", code not in (0, None)))
             elif itype == "file_change":
                 paths = ", ".join(c.get("path", "?") for c in item.get("changes") or [])
                 out.append({"type": "tool", "name": "edit", "detail": short(paths, 240)})

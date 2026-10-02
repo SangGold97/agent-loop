@@ -80,11 +80,14 @@ def commit_external(ws: Path) -> bool:
 def enforce_protected(ws: Path) -> list[str]:
     """Revert agent changes to human-owned files. Returns the reverted paths.
 
-    The changed copy is kept under .loop/reverted/<ts>/ in case the human edited it gid-turn."""
+    The changed copy is kept under .loop/reverted/<ts>/ in case the human edited it mid-turn."""
     reverted, backup = [], ws / ".loop" / "reverted" / time.strftime("%Y%m%d-%H%M%S")
     with _locks[str(ws)]:
         for line in gitops.git(ws, "status", "--porcelain", "--untracked-files=all").splitlines():
-            code, path = line[:2], line[3:].strip().strip('"')
+            # Split on whitespace, not fixed columns: git() strips the output, so the first line may have lost
+            # the leading space of its status code (" M path" -> "M path")
+            code, path = line.split(maxsplit=1)
+            path = path.strip('"')
             if not PROTECTED_RE.match(path):
                 continue
             if (ws / path).is_file():

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import threading
@@ -296,7 +297,6 @@ class Engine:
                        prompt=prompt, model=conf["model"], effort=conf["effort"], autocompact=conf["autocompact"],
                        resume_id=sess["vendor_id"], env=env)
         if worker:
-            env.update({"LOOP_RUN_DIR": gdir / "runs" / sid})
             if not sess["gpu"]:
                 env["CUDA_VISIBLE_DEVICES"] = ""
             if sess["agent"] == "codex":
@@ -357,7 +357,8 @@ class Engine:
     # ---------- goals ----------
     def kickoff_text(self, ws: str, gid: str) -> str:
         p, gdir = self.wsp(ws), self.gdir(ws, gid)
-        mc = goal_config(p, gid)["goal"]
+        cfg = goal_config(p, gid)
+        mc = cfg["goal"]
         agents = "\n".join(f"  - `--agent {a}`: {c.get('model') or 'default model'} / effort {c.get('effort') or 'default'}"
                            for a, c in mc["workers"].items() if c.get("enabled", True))
         return (f"[Kickoff] Goal \"{mc['title']}\" ({gid}) in workspace {ws}.\n"
@@ -366,6 +367,8 @@ class Engine:
                 f"- Project repo: {p / 'repo'} (its base branch is protected; work lands via the integration branch). Integration branch {gitops.int_branch(gid)} is checked out "
                 f"at {p / 'wt' / ('_int-' + gid)}.\n"
                 f"- Worker agents (the human fixed model and effort; you pick the CLI and name the role):\n{agents}\n"
+                f"- Each worker is capped at {cfg['infra']['worker_memory_max_gb']} GB RAM and sees no GPU unless "
+                "spawned with --gpu.\n"
                 f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.\n"
                 "Write plan.md, add a journal entry, dispatch workers with `loop spawn`, then end your turn.")
 
@@ -684,23 +687,29 @@ class Engine:
         p, rd = self.wsp(ws), self.gdir(ws, gid) / "runs" / sid
         cfg = goal_config(p, gid)
         wt, n = Path(sess["cwd"]), sess["turns"] + 1
-        (rd / "artifacts").mkdir(parents=True, exist_ok=True)
         digest.write_text(rd / f"t{n}.prompt.md", prompt)
-        header = (f"[agent-loop] goal {gid} · role {sess['role']} · worktree {wt} (branch {sess['branch']}) · "
-                  f"run dir {rd} · memory limit {cfg['infra']['worker_memory_max_gb']} GB · GPU "
-                  f"{'granted' if sess['gpu'] else 'not granted'}")
         start = gitops.head(wt)
-        res, n = await self.run_turn(sess, f"{header}\n\n{prompt}", start_commit=start)
+        # The worker gets the meta-work's prompt as is: no platform header, like a prompt typed by the human
+        res, n = await self.run_turn(sess, prompt, start_commit=start)
         try:
-            gitops.snapshot(wt, f"agentloop: {sid} turn {n} snapshot")
+            gitops.snapshot(wt, "WIP: uncommitted changes at end of turn")
         except RuntimeError as exc:
             log.warning("snapshot failed for %s: %s", sid, exc)
+        # Outputs the worker was asked to keep outlive the worktree, which is removed when the goal is accepted
+        if (wt / ".artifacts").is_dir():
+            shutil.copytree(wt / ".artifacts", rd / "artifacts", dirs_exist_ok=True)
         end = gitops.head(wt)
         stat, patch = gitops.diff(wt, start, end)
         paths = {"out": digest.write_text(rd / f"t{n}.out.md", res.final or res.error or "")}
         paths["diff"] = digest.write_text(rd / f"t{n}.diff", patch) if patch else ""
         self.db.x("UPDATE turns SET end_commit=? WHERE session=? AND n=?", end, sid, n)
         text = digest.worker_digest(self.db.session(sid), n, res, stat, patch, paths, cfg["digest"])
+        # The guard can be bypassed (e.g. a script writing goal.md): revert before the evidence commit seals it
+        reverted = workspace.enforce_protected(p)
+        if reverted:
+            text += "\n[System] Reverted this worker's edits to human-owned files: " + ", ".join(reverted)
+            self.publish("alert", ws=ws, goal=gid, text=f"Reverted {sid}'s edits to human-owned files (backup in "
+                                                            ".loop/reverted/): " + ", ".join(reverted))
         m = self.goal_row(ws, gid)
         self.set_goal(ws, gid, tokens=m["tokens"] + res.tokens, cost=m["cost"] + res.cost)
         workspace.commit(p, "control-plane", f"control-plane: {sid} turn {n} evidence")
@@ -770,10 +779,12 @@ class Engine:
                        f"{'yes' if w['merged'] else 'no'} | {w['branch']}")
         return "\n".join(out)
 
-    def show_text(self, caller: dict, sid: str, turn: int | None, full: bool) -> str:
+    def show_text(self, caller: dict, sid: str, turn: int | None, full: bool, with_log: bool = False) -> str:
         w = self.own_worker(caller, sid)
         rd = self.gdir(w["ws"], w["goal"]) / "runs" / sid
         turns = self.db.q("SELECT * FROM turns WHERE session=? ORDER BY n", sid)
+        if with_log and not turn and turns:
+            turn = turns[-1]["n"]
         if not turn:
             lines = [f"{sid}: role {w['role']}, label {w['label']}, {w['agent']}/{w['model']}, status {w['status']}, "
                      f"worktree {w['cwd']}, branch {w['branch']}, run dir {rd}"]
@@ -794,7 +805,31 @@ class Engine:
             out += ["", "## Output", body, "", "## Diff", diff[:200_000]]
         else:
             out += ["", digest.trim_words(body, 400)[0]]
+        if with_log:
+            out += ["", "## Log", self.turn_log(w["ws"], sid, turn)]
         return "\n".join(out)
+
+    def turn_log(self, ws: str, sid: str, n: int, limit: int = 20_000) -> str:
+        """What a worker actually ran in one turn: each tool call with the end of its output.
+
+        Pulled by the meta-work only when it needs to check a claim, so digests stay short."""
+        path, lines, inside = self.logs(ws, sid)[1], [], False
+        with path.open() as fh:
+            for raw in fh:
+                e = json.loads(raw)
+                if e["type"] == "turn":
+                    inside = e["n"] == n
+                elif inside and e["type"] == "turn_end":
+                    break
+                elif inside and e["type"] == "tool":
+                    lines.append(f"$ {e['name']} {e.get('detail') or ''}".rstrip())
+                elif inside and e["type"] == "tool_result":
+                    body = (e.get("tail") or e.get("text") or "").strip().replace("\n", "\n  ")
+                    lines.append(("  [error] " if e.get("error") else "  ") + body)
+                elif inside and e["type"] == "error":
+                    lines.append(f"! {e['text']}")
+        text = "\n".join(lines) or "(no tool calls)"
+        return text if len(text) <= limit else "[… earlier calls cut]\n" + text[-limit:]
 
     def status_text(self, caller: dict) -> str:
         ws, gid = caller["ws"], caller["goal"]

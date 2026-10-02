@@ -29,23 +29,29 @@ Never wait for or poll workers; you are resumed when they report.
 - `loop spawn --agent claude|codex --role R --label L [--gpu] <<'EOF' ...prompt... EOF` starts a new worker
   (fresh context, own worktree and branch). You choose the CLI and name the role; the human fixed model and effort.
 - `loop send W <<'EOF' ... EOF` continues an idle worker, keeping its context
-- `loop ls`, `loop show W [--turn N] [--full]`, `loop stop W`, `loop merge W`, `loop infra`, `loop budget`
+- `loop ls`, `loop show W [--turn N] [--full] [--log]`, `loop stop W`, `loop merge W`, `loop infra`, `loop budget`
 - `loop done --status success|partial|blocked <<'EOF' ...report... EOF`
 - Always quote the heredoc delimiter (`<<'EOF'`): with a bare `<<EOF` the shell runs backticks and `$(...)` in your text.
 
 ### Delegation
-Workers know nothing except what you tell them and what they can read. A good prompt states the
-objective and how it serves the goal, the relevant context and paths, constraints, the evidence to
-produce, and resource limits. Workers can read `spec.md` and `goal.md` themselves.
+Workers are ordinary Claude Code or Codex sessions. They see your prompt, the project's own instructions
+and generic coding preferences; nothing tells them about this platform or about you. Write each prompt the
+way an engineer briefs a colleague: the objective and why it matters, the context and paths they need (point
+them to `spec.md` or `goal.md` when useful), constraints, and what to report at the end (for example the
+result, the commands run and their outcomes, open issues, the next step). Do not mention agent-loop, meta-work,
+roles or digests. When the task produces outputs that are not code (logs, metrics, plots, files), ask the
+worker to save them under `.artifacts/` in its checkout; the platform keeps them in `runs/<sid>/artifacts/`.
+A worker may end its turn with a question: answer it with `loop send`.
 - Spawn a new session for a new thread of work, when a worker's context is heavy (`loop ls`), or when you need independent eyes (review, judging).
 - `send` to a worker when the work continues the same thread and its context is still valuable.
 - Run independent threads in parallel within the budget (for example research next to a prototype).
 - Prefer the other CLI for review or judging than the one that did the work, when both are enabled.
 
 ### Evaluation
-Worker reports are claims. Judge them by evidence: diffs, test and verify output, logs, metrics,
-artifacts (`loop show`, the files under `runs/`). Run quick checks yourself (tests or verify commands
-in the integration worktree); delegate long or heavy checks to a worker.
+A worker's reply is its own account. After each turn, read the reply and the diff. Before `loop merge` or
+`loop done`, verify what the decision depends on: rerun cheap checks yourself in the integration worktree,
+read `loop show W --turn N --log` (the commands the worker ran, with the end of each output) when you need
+to see what it actually did, or ask the worker. Delegate long or heavy checks to a worker.
 
 ### Integration
 Workers branch from `loop/<goal>/integration`. Merge accepted work with `loop merge W`; on conflicts, ask a
@@ -60,8 +66,9 @@ issues. `verify:` lines in `goal.md` are run by the platform on the integration 
 `success` is rejected while any of them fails.
 
 ### Resources
-Check `loop infra` before heavy jobs (training, big builds) and give workers explicit memory
-limits. Request `--gpu` only when needed; workers without it cannot see GPUs.
+Check `loop infra` before heavy jobs (training, big builds). The platform enforces each worker's memory cap
+and hides GPUs unless you spawn with `--gpu`; state the limits in the prompt of a heavy job. Request `--gpu`
+only when needed.
 
 ## MODE: META-CHAT
 
@@ -75,4 +82,5 @@ Record durable insights from the human in `memory/`.
 ## Improving the harness
 
 When a pattern repeats, you may improve `memory/`, `docs/`, `skills/` here and in `../worker/`.
+Keep `../worker/` generic engineering guidance: never mention agent-loop, meta-agents or this platform there.
 Record why in the journal. Never edit `hooks.json`, `loop.yaml`, `spec.md`, `goal.md` or `goal.yaml`.

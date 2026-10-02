@@ -2,7 +2,7 @@
 
 Normalized events emitted while a turn runs:
   init {vendor_id} · text {text} · thinking {text} · tool {name, detail}
-  tool_result {text, error} · usage {context} · error {text}
+  tool_result {text, error, tail?} · usage {context} · error {text}
 """
 from __future__ import annotations
 
@@ -67,6 +67,15 @@ class Adapter:
 def short(text, limit: int = 600) -> str:
     text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
     return text if len(text) <= limit else text[:limit] + " …"
+
+
+def tool_result(body, error: bool, limit: int = 600) -> dict:
+    """A tool_result event; long outputs also keep their end, where test runners and builds print the outcome."""
+    body = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
+    evt = {"type": "tool_result", "text": short(body, limit), "error": error}
+    if len(body) > limit:
+        evt["tail"] = "… " + body[-limit:]
+    return evt
 
 
 def to_tokens(value) -> int | None:
