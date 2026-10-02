@@ -218,6 +218,24 @@ def test_enforce_protected_reverts_a_single_edit(tmp_path):
     assert list((tmp_path / ".loop/reverted").rglob("goal.md"))
 
 
+def test_claude_settings_exclude_instructions_above_the_agent(tmp_path):
+    from agentloop import workspace
+    ws = tmp_path / "home" / "workspaces" / "demo"
+    for layer in ("meta", "worker"):
+        (ws / layer).mkdir(parents=True)
+        (ws / layer / "hooks.json").write_text('{"hooks": {"PreToolUse": []}}')
+    worker, meta = (workspace.claude_settings_doc(ws, layer) for layer in ("worker", "meta"))
+    assert worker["hooks"] == {"PreToolUse": []}
+    # The platform repo (any parent) and the workspace root are hidden; meta/ and the worktree keep their own
+    for doc in (worker, meta):
+        assert str(tmp_path / "home" / "CLAUDE.md") in doc["claudeMdExcludes"]
+        assert str(tmp_path / "home" / "AGENTS.md") in doc["claudeMdExcludes"]
+        assert str(ws / "CLAUDE.md") in doc["claudeMdExcludes"]
+        assert not any(x.startswith((str(ws / "meta"), str(ws / "wt" / "w-1"))) for x in doc["claudeMdExcludes"])
+    assert str(ws / "wt" / "AGENTS.md") in worker["claudeMdExcludes"]
+    assert workspace.claude_settings(ws, "worker").read_text().startswith("{")
+
+
 def test_sync_harness_keeps_human_edits(tmp_path, monkeypatch):
     from agentloop import workspace
     tpl = tmp_path / "tpl" / "workspace"

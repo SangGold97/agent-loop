@@ -42,6 +42,9 @@ The platform uses your existing CLI logins; it never asks for keys.
 - One PreToolUse guard (`agentloop/guard.py`) serves both CLIs: no `git push`, no writes to human-owned files,
   workers confined to their worktree and `data/`, extra regexes from `loop.yaml → guard`.
 - Git hooks in the project repo block agent commits to protected branches and any agent push.
+- Agents read only their own instructions: Claude sessions get `--settings` from `.loop/claude/<layer>-settings.json`
+  (the layer's `hooks.json` plus `claudeMdExcludes` for every directory above `meta/` or the worktree), so a
+  `CLAUDE.md`/`AGENTS.md` in the platform repo or another parent never reaches them; Codex stops at the git root.
 - After every agent turn the control plane reverts edits to `spec.md`, `goal.md`, `goal.yaml`, `loop.yaml`, `hooks.json`
   (the changed copy is kept in `.loop/reverted/<time>/`, and the UI shows an alert).
 - Budgets (concurrency, worker/meta turns) are enforced by the control plane; on exhaustion the

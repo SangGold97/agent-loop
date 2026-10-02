@@ -255,6 +255,32 @@ def codex_home(ws: Path, layer: str) -> Path:
     return home
 
 
+# Instruction files Claude Code loads from every directory above its cwd
+CLAUDE_MEMORY_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLAUDE.md")
+
+
+def claude_settings_doc(ws: Path, layer: str) -> dict:
+    """The layer's hooks.json plus claudeMdExcludes for every directory above the agent's own cwd.
+
+    Claude Code walks up to / for CLAUDE.md/AGENTS.md, and workspaces usually live inside the platform repo,
+    so without this an agent would read the platform's developer docs. Only meta/ and the worktree count:
+    the workspace root, wt/ and all their parents are excluded."""
+    doc = json.loads((ws / layer / "hooks.json").read_text())
+    dirs = {ws / "wt"} if layer == "worker" else set()
+    for base in {ws.absolute(), ws.resolve()}:
+        dirs |= {base, *base.parents}
+    doc["claudeMdExcludes"] = sorted(str(d / name) for d in dirs for name in CLAUDE_MEMORY_NAMES)
+    return doc
+
+
+def claude_settings(ws: Path, layer: str) -> Path:
+    """Write the settings a Claude session of this layer gets via --settings; rebuilt per turn from hooks.json."""
+    path = ws / ".loop" / "claude" / f"{layer}-settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(claude_settings_doc(ws, layer), indent=2) + "\n")
+    return path
+
+
 HARNESS_ROOTS = ("meta", "worker")
 SKIP_DIRS = {"tmp", ".git", "__pycache__", ".system"}
 

@@ -303,14 +303,14 @@ class Engine:
                 spec.codex_home = workspace.codex_home(p, "worker")
             else:
                 spec.plugin_dir, spec.append_file = p / "worker" / "claude-plugin", p / "worker" / "AGENTS.md"
-                spec.settings_file, spec.add_dirs = p / "worker" / "hooks.json", [gdir, p / "data"]
+                spec.settings_file, spec.add_dirs = workspace.claude_settings(p, "worker"), [gdir, p / "data"]
         else:
             env.update({"LOOP_API": self.api_url, "LOOP_TOKEN": sess["token"], "PATH_PREPEND": self.bin_dir})
             spec.system_text = self.mode_text(sess)
             if sess["agent"] == "codex":
                 spec.codex_home = workspace.codex_home(p, "meta")
             else:
-                spec.settings_file, spec.add_dirs = p / "meta" / "hooks.json", [p]
+                spec.settings_file, spec.add_dirs = workspace.claude_settings(p, "meta"), [p]
         if sess["agent"] == "codex":
             spec.last_message_file = self.logs(ws, sid)[0].with_name(f"{sid}.t{n}.last.txt")
         return spec
