@@ -35,6 +35,9 @@ def test_codex_argv_meta_resume(tmp_path):
     assert a[:4] == ["codex", "exec", "resume", "t1"] and a[-1] == "-"
     assert 'model_reasoning_effort="max"' in a and "-C" not in a
     assert "--dangerously-bypass-approvals-and-sandbox" in a and not any("sandbox_mode" in x for x in a)
+    assert "project_root_markers=[]" in a
+    assert "project_root_markers=[]" not in CodexAdapter().argv(RunSpec(agent="codex", kind="worker", cwd=tmp_path,
+                                                                        prompt="x"))
 
 
 def test_codex_parse_stream():

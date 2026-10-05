@@ -25,6 +25,10 @@ class CodexAdapter(Adapter):
         a += ["--dangerously-bypass-approvals-and-sandbox"]
         if s.system_text:
             a += ["-c", f"developer_instructions={json.dumps(s.system_text)}"]
+        if s.kind == "meta":
+            # Codex reads AGENTS.md from the git root down to cwd; the meta's git root is the workspace root, so an
+            # AGENTS.md there would reach Codex but not Claude (claudeMdExcludes). No markers: cwd is the root.
+            a += ["-c", "project_root_markers=[]"]
         if not s.resume_id:
             a += ["-C", str(s.cwd)]
         if s.last_message_file:
