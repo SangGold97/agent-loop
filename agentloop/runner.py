@@ -35,11 +35,9 @@ class TurnResult:
     vendor_id: str | None
     final: str
     tokens: int
-    cost: float
     context: int
     exit_code: int
     error: str
-    duration: float
     stopped: bool = False
 
 
@@ -81,7 +79,7 @@ class Runner:
             caps = ["-p", f"MemoryMax={memory_max_gb}G", "-p", "MemorySwapMax=0"] if memory_max_gb else []
             argv = ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", *caps, "--", *argv]
         env = child_env({**spec.env, **adapter.env(spec)})
-        st, started = ParseState(), time.time()
+        st = ParseState()
         raw_log.parent.mkdir(parents=True, exist_ok=True)
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -155,8 +153,8 @@ class Runner:
         elif rc and not error:
             error = f"exit {rc}: " + "".join(stderr_tail)[-800:].strip()
         adapter.finish(st, spec)
-        return TurnResult(st.vendor_id, adapter.final_text(st, spec) or "", st.tokens, st.cost,
-                          st.context, rc, error, time.time() - started, stopped)
+        return TurnResult(st.vendor_id, adapter.final_text(st, spec) or "", st.tokens, st.context, rc, error,
+                          stopped)
 
     def running(self, key: str) -> bool:
         return key in self.procs

@@ -95,7 +95,6 @@ class ClaudeAdapter(Adapter):
         elif kind == "result":
             st.vendor_id = o.get("session_id") or st.vendor_id
             st.final = o.get("result") if o.get("result") is not None else st.last_text
-            st.cost = float(o.get("total_cost_usd") or 0)
             u = o.get("usage") or {}
             # Like Codex's "tokens used": everything except input served from the prompt cache
             st.tokens = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "output_tokens"))

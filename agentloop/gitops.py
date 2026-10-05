@@ -78,6 +78,16 @@ def head(path: Path) -> str:
     return git(path, "rev-parse", "HEAD")
 
 
+def commits_before(path: Path, start: str, end: str, before: float) -> list[str]:
+    """Commits in start..end committed before `before`: work a turn brought in rather than wrote."""
+    out = []
+    for line in git(path, "log", "--format=%ct %h %s", f"{start}..{end}").splitlines():
+        ts, rest = line.split(" ", 1)
+        if int(ts) < int(before):
+            out.append(rest)
+    return out
+
+
 def snapshot(path: Path, message: str) -> bool:
     """Commit any uncommitted work (bypassing project hooks). Returns True if a commit was made."""
     if not git(path, "status", "--porcelain"):

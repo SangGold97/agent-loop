@@ -339,12 +339,12 @@ class Engine:
         status = "stopped" if res.stopped else ("failed" if res.error else "idle")
         cur = self.db.session(sid)
         self.db.update("sessions", {"id": sid}, vendor_id=res.vendor_id or cur["vendor_id"], turns=n,
-                       tokens=cur["tokens"] + res.tokens, cost=cur["cost"] + res.cost,
+                       tokens=cur["tokens"] + res.tokens,
                        context=res.context or cur["context"], status=status, updated=time.time())
         self.db.update("turns", {"id": turn_id}, ended=time.time(), status=status, exit_code=res.exit_code,
-                       tokens=res.tokens, cost=res.cost, final=(res.final or res.error)[:20000])
+                       tokens=res.tokens, final=(res.final or res.error)[:20000])
         self._log_event(ws, gid, sid, n, events, {"type": "turn_end", "n": n, "status": status, "error": res.error,
-                                                   "tokens": res.tokens, "cost": res.cost})
+                                                   "tokens": res.tokens})
         self.publish("session_status", ws=ws, goal=gid, session=sid, status=status, turn=n)
         return res, n
 
@@ -462,8 +462,7 @@ class Engine:
         reverted = workspace.enforce_protected(p)
         workspace.commit(p, f"meta-work({orch['id']})", f"meta-work({orch['id']}): {gid} turn {n}")
         m = self.goal_row(ws, gid)
-        fields = {"meta_turns": m["meta_turns"] + 1, "tokens": m["tokens"] + res.tokens,
-                  "cost": m["cost"] + res.cost}
+        fields = {"meta_turns": m["meta_turns"] + 1, "tokens": m["tokens"] + res.tokens}
         if reverted:
             self.db.push_inbox(ws, gid, "system", {"text": "[System] Reverted your edits to human-owned files: "
                                                            + ", ".join(reverted)}, deferred=True)
@@ -688,7 +687,7 @@ class Engine:
         cfg = goal_config(p, gid)
         wt, n = Path(sess["cwd"]), sess["turns"] + 1
         digest.write_text(rd / f"t{n}.prompt.md", prompt)
-        start = gitops.head(wt)
+        start, began = gitops.head(wt), time.time()
         # The worker gets the meta-work's prompt as is: no platform header, like a prompt typed by the human
         res, n = await self.run_turn(sess, prompt, start_commit=start)
         try:
@@ -703,7 +702,9 @@ class Engine:
         paths = {"out": digest.write_text(rd / f"t{n}.out.md", res.final or res.error or "")}
         paths["diff"] = digest.write_text(rd / f"t{n}.diff", patch) if patch else ""
         self.db.x("UPDATE turns SET end_commit=? WHERE session=? AND n=?", end, sid, n)
-        text = digest.worker_digest(self.db.session(sid), n, res, stat, patch, paths, cfg["digest"])
+        # A fast-forward or merge puts other workers' commits in this turn's diff; the digest says so
+        earlier = gitops.commits_before(wt, start, end, began) if stat else []
+        text = digest.worker_digest(self.db.session(sid), n, res, stat, patch, paths, cfg["digest"], earlier)
         # The guard can be bypassed (e.g. a script writing goal.md): revert before the evidence commit seals it
         reverted = workspace.enforce_protected(p)
         if reverted:
@@ -711,7 +712,7 @@ class Engine:
             self.publish("alert", ws=ws, goal=gid, text=f"Reverted {sid}'s edits to human-owned files (backup in "
                                                             ".loop/reverted/): " + ", ".join(reverted))
         m = self.goal_row(ws, gid)
-        self.set_goal(ws, gid, tokens=m["tokens"] + res.tokens, cost=m["cost"] + res.cost)
+        self.set_goal(ws, gid, tokens=m["tokens"] + res.tokens)
         workspace.commit(p, "control-plane", f"control-plane: {sid} turn {n} evidence")
         return text, n
 

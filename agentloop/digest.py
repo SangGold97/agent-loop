@@ -24,12 +24,11 @@ def fmt_tokens(n: int | None) -> str:
     return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k"
 
 
-def worker_digest(sess: dict, n: int, res, stat: str, patch: str, paths: dict, cfg: dict) -> str:
+def worker_digest(sess: dict, n: int, res, stat: str, patch: str, paths: dict, cfg: dict,
+                  earlier: list[str] | None = None) -> str:
+    """`earlier`: commits in the diff that existed before the turn (fast-forwarded or merged in)."""
     status = "stopped" if res.stopped else ("failed: " + res.error if res.error else "ok")
-    head = (f"[Worker {sess['id']} · role {sess['role']} · label {sess['label']} · turn {n}] "
-            f"{status} · {res.duration / 60:.1f} min · {fmt_tokens(res.tokens)} tokens"
-            + (f" · ${res.cost:.2f}" if res.cost else "")
-            + (f" · context ~{fmt_tokens(res.context)}" if res.context else ""))
+    head = f"[Worker {sess['id']} · role {sess['role']} · label {sess['label']} · turn {n}] {status}"
     out, cut = trim_words(res.final or "(no final message)", cfg["max_output_words"])
     parts = [head, f"[Final output]{' (trimmed; full: ' + paths['out'] + ')' if cut else ''}\n{out}"]
     if stat:
@@ -37,7 +36,12 @@ def worker_digest(sess: dict, n: int, res, stat: str, patch: str, paths: dict, c
         shown = "\n".join(lines[:cfg["max_diff_lines"]])
         more = f" (showing {cfg['max_diff_lines']}/{len(lines)} lines; full: {paths['diff']})" \
             if len(lines) > cfg["max_diff_lines"] else ""
-        parts.append(f"[Diff] {stat.splitlines()[-1].strip()}{more}\n{stat}\n```diff\n{shown}\n```")
+        parts.append(f"[Diff] {stat.splitlines()[-1].strip()}{more}")
+        if earlier:
+            listed = "; ".join(earlier[:5]) + (f"; … {len(earlier) - 5} more" if len(earlier) > 5 else "")
+            parts.append(f"[Note] This diff includes {len(earlier)} commit(s) made before this turn and brought in "
+                         f"by a fast-forward or merge, not written in it: {listed}")
+        parts.append(f"{stat}\n```diff\n{shown}\n```")
     else:
         parts.append("[Diff] no code changes")
     return "\n".join(parts)

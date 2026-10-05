@@ -38,7 +38,6 @@ class ParseState:
     last_text: str = ""
     final: str | None = None
     tokens: int = 0
-    cost: float = 0.0
     context: int = 0
     is_error: bool = False
     error: str = ""

@@ -65,7 +65,8 @@ def test_claude_parse_result():
                                                               "input": {"command": "ls"}}]}}, st)
     ad.parse({"type": "result", "subtype": "success", "result": "ok", "session_id": "S", "total_cost_usd": 0.5,
               "usage": {"input_tokens": 1, "cache_creation_input_tokens": 4, "cache_read_input_tokens": 90, "output_tokens": 2}}, st)
-    assert (st.vendor_id, st.final, st.cost, st.tokens, st.is_error) == ("S", "ok", 0.5, 7, False)
+    assert (st.vendor_id, st.final, st.tokens, st.is_error) == ("S", "ok", 7, False)
+    assert not hasattr(st, "cost")
 
 
 
@@ -82,6 +83,51 @@ def test_verify_and_checklist():
     goal = "- tests pass\n- verify: `make test`\nverify: python -c 'print(1)'\n"
     assert digest.verify_commands(goal) == ["make test", "python -c 'print(1)'"]
     assert digest.checklist("- [x] a\n- [ ] b\n* [X] c") == (2, 3)
+
+
+def test_worker_digest_names_the_worker_and_earlier_commits():
+    from types import SimpleNamespace
+    sess = {"id": "w-1", "role": "reviewer", "label": "review"}
+    res = SimpleNamespace(stopped=False, error="", final="**Result:** approved", tokens=88_000, context=23_000)
+    cfg = {"max_output_words": 500, "max_diff_lines": 80}
+    stat = " a.py | 1 +\n 1 file changed, 1 insertion(+)"
+    text = digest.worker_digest(sess, 1, res, stat, "+x", {"out": "o", "diff": "d"}, cfg, ["b63d497 add a"])
+    # Identity and outcome only: no duration, tokens or cost
+    assert text.splitlines()[0] == "[Worker w-1 · role reviewer · label review · turn 1] ok"
+    assert "tokens" not in text and "min" not in text and "$" not in text
+    assert "[Note] This diff includes 1 commit(s) made before this turn" in text and "b63d497 add a" in text
+    assert "[Note]" not in digest.worker_digest(sess, 1, res, stat, "+x", {"out": "o", "diff": "d"}, cfg)
+
+
+def test_commits_before_separates_brought_in_work(tmp_path):
+    import time
+    from agentloop import gitops
+    gitops.git(tmp_path, "init", "-q")
+    commit = lambda msg, when: gitops.git(tmp_path, *gitops.BOT, "commit", "-q", "--allow-empty", "-m", msg,
+                                          env={"GIT_COMMITTER_DATE": f"@{when} +0000"})
+    now = int(time.time())
+    commit("base", now - 300)
+    start = gitops.head(tmp_path)
+    commit("by another worker", now - 100)
+    commit("by this worker", now + 5)
+    assert [c.split(" ", 1)[1] for c in gitops.commits_before(tmp_path, start, gitops.head(tmp_path), now)] \
+        == ["by another worker"]
+
+
+def test_db_drops_cost_columns(tmp_path):
+    import sqlite3
+    from agentloop.db import DB
+    old = sqlite3.connect(tmp_path / "s.db")
+    old.execute("CREATE TABLE turns(id INTEGER PRIMARY KEY, session TEXT, n INT, started REAL, ended REAL, status TEXT, "
+                "start_commit TEXT, end_commit TEXT, exit_code INT, tokens INT, cost REAL, final TEXT)")
+    old.execute("INSERT INTO turns(session, n, tokens, cost) VALUES('w-1', 1, 7, 0.5)")
+    old.commit()
+    old.close()
+    db = DB(tmp_path / "s.db")
+    assert db.q("SELECT * FROM turns") == [{"id": 1, "session": "w-1", "n": 1, "started": None, "ended": None,
+                                            "status": None, "start_commit": None, "end_commit": None,
+                                            "exit_code": None, "tokens": 7, "final": None}]
+    assert all("cost" not in [r["name"] for r in db.q(f"PRAGMA table_info({t})")] for t in ("goals", "sessions"))
 
 
 def test_trim_words_keeps_tail():
