@@ -80,6 +80,11 @@ def create_app(api_url: str) -> FastAPI:
         return {"name": ws, "loop_yaml": (p / "loop.yaml").read_text(), "config": workspace_config(p),
                 "path": str(p), "log": gitops.log(p, n=40)}
 
+    @app.delete("/api/workspaces/{ws}")
+    async def delete_ws(ws: str):
+        await engine.delete_workspace(ws)
+        return {"ok": True}
+
     @app.get("/api/workspaces/{ws}/harness")
     def harness(ws: str, path: str | None = None):
         p = workspace.ws_path(ws)
@@ -130,7 +135,14 @@ def create_app(api_url: str) -> FastAPI:
                 "budget": engine.budget(ws, gid), "checklist": {"done": done, "total": total},
                 "sessions": sessions,
                 "notes": engine.db.q("SELECT * FROM notes WHERE ws=? AND goal=? ORDER BY id DESC", ws, gid),
-                "verify": digest.verify_commands(files["goal.md"]), "meta_active": (ws, gid) in engine.meta_active}
+                "verify": digest.verify_commands(files["goal.md"]), "meta_active": (ws, gid) in engine.meta_active,
+                "base": engine.goal_base(ws, gid),
+                "remote": row["status"] == "done" and gitops.has_origin(p / "repo")}
+
+    @app.delete("/api/goals/{ws}/{gid}")
+    async def delete_goal(ws: str, gid: str):
+        await engine.delete_goal(ws, gid)
+        return {"ok": True}
 
     @app.put("/api/goals/{ws}/{gid}/files/{name}")
     async def put_file(ws: str, gid: str, name: str, req: Request):
@@ -146,6 +158,8 @@ def create_app(api_url: str) -> FastAPI:
             await engine.stop_goal(ws, gid)
         elif action == "accept":
             return {"tags": await engine.accept(ws, gid)}
+        elif action == "push":
+            return await engine.push_goal(ws, gid)
         elif action == "reopen":
             await engine.reopen(ws, gid, b.get("text", ""))
         elif action == "notes":
@@ -161,7 +175,7 @@ def create_app(api_url: str) -> FastAPI:
     def goal_git(ws: str, gid: str):
         p = workspace.ws_path(ws)
         branch, repo = gitops.int_branch(gid), p / "repo"
-        base = goal_config(p, gid)["goal"].get("base_branch") or gitops.current_branch(repo)
+        base = engine.goal_base(ws, gid)
         return {"branches": gitops.branches(p, gid), "base": base,
                 "integration_log": gitops.log(repo, f"{base}..{branch}") if gitops.branch_exists(repo, branch) else [],
                 "workspace_log": [c for c in gitops.log(p, n=80) if gid in c["subject"] or c["author"] == "human"]}

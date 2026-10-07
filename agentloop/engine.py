@@ -27,6 +27,20 @@ from .runner import Runner, child_env, unit_prefix
 log = logging.getLogger("agentloop")
 VERIFY_TIMEOUT_S = 900
 PREFIX = {"meta-work": "mw", "worker": "w", "meta-chat": "mc"}
+LIMIT_SLACK_S = 60  # retry this long after a vendor's announced usage-limit reset
+
+
+def clock(ts: float) -> str:
+    """Local wall time for agent-facing messages: HH:MM today, with the date otherwise."""
+    fmt = "%H:%M" if time.strftime("%x", time.localtime(ts)) == time.strftime("%x") else "%Y-%m-%d %H:%M"
+    return time.strftime(fmt, time.localtime(ts))
+
+
+def leftover_note(cmds: tuple[str, ...], whose: str) -> str:
+    """Tell the meta-work that a turn ended with processes still running, which the platform stopped."""
+    more = f" (+{len(cmds) - 5} more)" if len(cmds) > 5 else ""
+    return (f"[System] Processes still running when {whose} ended were stopped; their results may be "
+            "incomplete: " + "; ".join(f"`{c}`" for c in cmds[:5]) + more)
 
 
 class AgentError(Exception):
@@ -64,8 +78,11 @@ class Engine:
         self.runner = Runner()
         self.infra = Infra(str(home()))
         self.meta_active: set[tuple[str, str]] = set()
+        self.vendor_limits: dict[str, float] = {}  # agent CLI -> when its usage limit resets
+        self.waking: set[tuple[str, str]] = set()  # goals whose meta-work waits for a usage-limit reset
         self.merge_locks: dict[tuple[str, str], threading.Lock] = {}
         self.tasks: set[asyncio.Task] = set()
+        self.task_goal: dict[asyncio.Task, tuple[str, str]] = {}  # tasks working on a goal, awaited by deletes
         self.agent_ops: dict[str, dict] = {}
         self.bin_dir = state_dir() / "bin"
         self.bin_dir.mkdir(exist_ok=True)
@@ -74,17 +91,44 @@ class Engine:
         shim.chmod(0o755)
 
     # ---------- plumbing ----------
-    def spawn(self, coro) -> asyncio.Task:
+    def spawn(self, coro, goal: tuple[str, str] | None = None) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self.tasks.add(task)
+        if goal:
+            self.task_goal[task] = goal
         task.add_done_callback(self._task_done)
         return task
 
     def _task_done(self, task: asyncio.Task) -> None:
         self.tasks.discard(task)
+        self.task_goal.pop(task, None)
         if not task.cancelled() and task.exception():
             log.error("background task failed", exc_info=task.exception())
             self.bus.publish({"type": "error", "text": repr(task.exception())})
+
+    def limit_until(self, agent: str) -> float | None:
+        """Reset time of the agent CLI's usage limit while it is still in force."""
+        until = self.vendor_limits.get(agent)
+        if until and until > time.time():
+            return until
+        self.vendor_limits.pop(agent, None)
+        return None
+
+    def wake_at(self, ws: str, gid: str, until: float) -> None:
+        """Resume a goal's meta-work once its CLI's usage limit resets. The task is not tied to the goal, so a
+        delete does not wait for it."""
+        if (ws, gid) in self.waking:
+            return
+        self.waking.add((ws, gid))
+
+        async def wake():
+            try:
+                await asyncio.sleep(max(0.0, until - time.time()) + LIMIT_SLACK_S)
+            finally:
+                self.waking.discard((ws, gid))
+            if self.db.one("SELECT 1 FROM goals WHERE ws=? AND id=? AND status='running'", ws, gid):
+                self.kick(ws, gid)
+        self.spawn(wake())
 
     def publish(self, kind: str, **data) -> None:
         self.bus.publish({"type": kind, **data})
@@ -381,7 +425,14 @@ class Engine:
         if running >= limit:
             raise AgentError(f"{running} goals already running in this workspace (max_running_goals={limit})")
         mc = goal_config(p, gid)["goal"]
-        gitops.ensure_integration(p, gid, mc.get("base_branch"))
+        # The base is recorded once, so the PR targets the branch the integration branch was cut from
+        base = mc.get("base_branch") or m["base"] or gitops.current_branch(p / "repo")
+        # A new goal starts from the latest base: work merged through earlier goals' PRs is pulled first
+        if not gitops.branch_exists(p / "repo", gitops.int_branch(gid)):
+            await asyncio.to_thread(gitops.pull_base, p, base)
+        gitops.ensure_integration(p, gid, base)
+        if not m["base"]:
+            self.set_goal(ws, gid, base=base)
         if not m["meta_work"]:
             orch = self.new_session(ws, gid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
             self.set_goal(ws, gid, meta_work=orch["id"])
@@ -408,7 +459,7 @@ class Engine:
 
     def kick(self, ws: str, gid: str) -> None:
         if (ws, gid) not in self.meta_active:
-            self.spawn(self.meta_loop(ws, gid))
+            self.spawn(self.meta_loop(ws, gid), goal=(ws, gid))
 
     async def meta_loop(self, ws: str, gid: str) -> None:
         key = (ws, gid)
@@ -422,6 +473,11 @@ class Engine:
                     return
                 if not self.db.one("SELECT id FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0",
                                    ws, gid):
+                    return
+                # The events wait for the reset; workers on another CLI keep running meanwhile
+                until = self.limit_until(goal_config(self.wsp(ws), gid)["goal"]["meta_work"]["agent"])
+                if until:
+                    self.wake_at(ws, gid, until)
                     return
                 items = self.db.q("SELECT * FROM inbox WHERE ws=? AND goal=? AND consumed=0 ORDER BY id",
                                   ws, gid)
@@ -456,11 +512,28 @@ class Engine:
                 "[Handoff] You are a fresh meta-work session replacing a previous one (its context grew too "
                 "large, or the human switched the meta-work agent). Regain state from plan.md, journal.md, notes.md and `loop ls`.\n\n"
                 + self.kickoff_text(ws, gid))})}] + items
-        workspace.commit_external(p)
+        # A running agent's pending edit to a human-owned file is not the human's: its own turn end reverts it
+        busy = self.db.one("SELECT 1 FROM sessions WHERE ws=? AND status='running'", ws)
+        workspace.commit_external(p, protected=not busy)
         text = digest.envelope(items, digest.budget_line(self.budget(ws, gid)), self.infra.summary())
         res, n = await self.run_turn(orch, text)
         reverted = workspace.enforce_protected(p)
-        workspace.commit(p, f"meta-work({orch['id']})", f"meta-work({orch['id']}): {gid} turn {n}")
+        if res.leftover:
+            self.db.push_inbox(ws, gid, "system", {"text": leftover_note(res.leftover, "your last turn")},
+                               deferred=True)
+        workspace.commit(p, f"meta-work({orch['id']})", f"meta-work({orch['id']}): {gid} turn {n}", protected=False)
+        ids = ",".join(str(i["id"]) for i in items if "id" in i)
+        if res.limited_until:
+            # The CLI refused to run: no meta turn spent and no failure counted; the same events are redelivered
+            self.vendor_limits[orch["agent"]] = res.limited_until
+            if ids:
+                self.db.x(f"UPDATE inbox SET consumed=0 WHERE id IN ({ids})")
+            for i in items:  # a handoff built for this turn only must reach the session's first real turn
+                if "id" not in i:
+                    self.db.push_inbox(ws, gid, i["kind"], json.loads(i["payload"]))
+            self.publish("alert", ws=ws, goal=gid, text=f"Meta-work CLI {orch['agent']} hit its usage limit; the goal "
+                                                        f"resumes after {clock(res.limited_until)}.")
+            return
         m = self.goal_row(ws, gid)
         fields = {"meta_turns": m["meta_turns"] + 1, "tokens": m["tokens"] + res.tokens}
         if reverted:
@@ -468,7 +541,6 @@ class Engine:
                                                            + ", ".join(reverted)}, deferred=True)
             self.publish("alert", ws=ws, goal=gid, text="Reverted edits to human-owned files (backup in "
                                                             ".loop/reverted/): " + ", ".join(reverted))
-        ids = ",".join(str(i["id"]) for i in items if "id" in i)
         if res.stopped and ids:  # a human-stopped turn: keep its events for the next trigger
             self.db.x(f"UPDATE inbox SET consumed=0, deferred=1 WHERE id IN ({ids})")
         if res.error and not res.stopped:
@@ -526,11 +598,27 @@ class Engine:
         if m["status"] != "awaiting_review":
             raise AgentError("only a goal awaiting review can be accepted")
         tags = gitops.cleanup(p, gid, self.workers(ws, gid))
-        if goal_config(p, gid)["goal"]["push"] == "branch" and gitops.git(p / "repo", "remote", check=False):
-            gitops.git(p / "repo", "push", "origin", gitops.int_branch(gid), check=False)
         self.set_goal(ws, gid, status="done")
         workspace.commit(p, "human", f"human: accepted {gid}")
         return tags
+
+    def goal_base(self, ws: str, gid: str) -> str:
+        """Branch the goal's work targets: goal.yaml base_branch, else the branch repo/ had checked out at start."""
+        return (goal_config(self.wsp(ws), gid)["goal"].get("base_branch") or self.goal_row(ws, gid)["base"]
+                or gitops.current_branch(self.wsp(ws) / "repo"))
+
+    async def push_goal(self, ws: str, gid: str) -> dict:
+        """Push an accepted goal's integration branch and open a PR into its base; the base branch is never touched."""
+        m = self.goal_row(ws, gid)
+        if m["status"] != "done":
+            raise AgentError("accept the goal before pushing it")
+        report = self.gdir(ws, gid) / "report.md"
+        res = await asyncio.to_thread(gitops.push_goal, self.wsp(ws), gid, self.goal_base(ws, gid),
+                                      goal_config(self.wsp(ws), gid)["goal"]["title"],
+                                      report.read_text() if report.exists() else "")
+        self.set_goal(ws, gid, pushed=time.time(), pr=res["pr"] or m["pr"])
+        self.publish("goal_status", ws=ws, goal=gid, status="done")
+        return res
 
     async def reopen(self, ws: str, gid: str, text: str, nid: int | None = None) -> None:
         """Back to running after review; the human's note (new, or an approved pending one) is delivered now."""
@@ -545,6 +633,54 @@ class Engine:
         else:
             self.add_note(ws, gid, text or "Reopened after review.", mode="now")
         self.kick(ws, gid)
+
+    # ---------- deletes ----------
+    async def _quiesce(self, ws: str, gids: list[str]) -> list[dict]:
+        """Stop every session of the goals and wait for their turns to wrap up, so nothing writes after a delete."""
+        for gid in gids:
+            await self.stop_goal(ws, gid)
+        sessions = [s for gid in gids for s in self.db.q("SELECT * FROM sessions WHERE ws=? AND goal=?", ws, gid)]
+        for s in sessions:
+            await self.runner.kill(s["id"], stopped=True)
+        # A killed turn still snapshots its worktree and writes its digest; finishing ones may kick the meta loop
+        keys, end = {(ws, gid) for gid in gids}, time.time() + 120
+        while pending := [t for t, k in self.task_goal.items() if k in keys]:
+            if time.time() > end:
+                raise AgentError("sessions are still finishing their turns; try the delete again shortly")
+            await asyncio.wait(pending, timeout=end - time.time())
+        return sessions
+
+    def _forget(self, ws: str, gid: str | None = None) -> None:
+        """Drop the runtime rows of one goal, or of every goal in the workspace when gid is None."""
+        cond, args = ("ws=? AND goal=?", (ws, gid)) if gid else ("ws=?", (ws,))
+        for table in ("turns", "messages"):
+            self.db.x(f"DELETE FROM {table} WHERE session IN (SELECT id FROM sessions WHERE {cond})", *args)
+        for table in ("sessions", "inbox", "notes"):
+            self.db.x(f"DELETE FROM {table} WHERE {cond}", *args)
+        self.db.x(f"DELETE FROM goals WHERE {cond.replace('goal', 'id')}", *args)
+
+    async def delete_goal(self, ws: str, gid: str) -> None:
+        """Remove a goal with its sessions, worktrees, branches, tags, files and runtime rows."""
+        p = self.wsp(ws)
+        self.goal_row(ws, gid)
+        sessions = await self._quiesce(ws, [gid])
+        await asyncio.to_thread(gitops.remove_goal, p, gid, [s for s in sessions if s["kind"] == "worker"])
+        workspace.delete_goal_dir(p, gid)
+        for s in sessions:
+            for path in self.logs(ws, s["id"]):
+                path.unlink(missing_ok=True)
+        self._forget(ws, gid)
+        self.publish("deleted", ws=ws, goal=gid)
+
+    async def delete_workspace(self, ws: str) -> None:
+        """Remove a workspace directory, project repo included, and the runtime rows of all its goals."""
+        p = self.wsp(ws)
+        if not (p / "loop.yaml").exists():
+            raise AgentError(f"workspace {ws} not found")
+        await self._quiesce(ws, workspace.list_goals(p))
+        await asyncio.to_thread(shutil.rmtree, p)
+        self._forget(ws)
+        self.publish("deleted", ws=ws)
 
     # ---------- notes and human edits ----------
     def add_note(self, ws: str, gid: str, text: str, author: str = "human", mode: str = "queue",
@@ -626,6 +762,7 @@ class Engine:
         enabled = [a for a, c in workers.items() if c.get("enabled", True)]
         if agent not in enabled:
             raise AgentError(f"worker agent {agent!r} is not enabled; use --agent {' or '.join(enabled) or '(none)'}")
+        self.check_limit(agent)
         if not role.strip():
             raise AgentError("--role is required (e.g. coder, reviewer, research)")
         role = gitops.slug(role)
@@ -639,7 +776,7 @@ class Engine:
                                 branch=branch, gpu=gpu, sid=sid)
         self.db.update("sessions", {"id": sid}, status="running")
         self._count_dispatch(ws, gid)
-        self.spawn(self.worker_turn(sid, prompt))
+        self.spawn(self.worker_turn(sid, prompt), goal=(ws, gid))
         return (f"Spawned {sid} (role {role}: {sess['agent']}/{sess['model'] or 'default'}) on branch {branch}. "
                 "End your turn; you will be resumed when it reports.")
 
@@ -652,11 +789,16 @@ class Engine:
             raise AgentError(f"{sid}'s worktree no longer exists; spawn a new worker")
         if not prompt.strip():
             raise AgentError("empty prompt")
+        self.check_limit(w["agent"])
         self.check_dispatch(caller["ws"], caller["goal"], bool(w["gpu"]))
         self.db.update("sessions", {"id": sid}, status="running")
         self._count_dispatch(caller["ws"], caller["goal"])
-        self.spawn(self.worker_turn(sid, prompt))
+        self.spawn(self.worker_turn(sid, prompt), goal=(caller["ws"], caller["goal"]))
         return f"Sent turn {w['turns'] + 1} to {sid}. End your turn; you will be resumed when it reports."
+
+    def check_limit(self, agent: str) -> None:
+        if until := self.limit_until(agent):
+            raise AgentError(f"{agent} is at its usage limit until {clock(until)}; use another --agent or wait")
 
     def _count_dispatch(self, ws: str, gid: str) -> None:
         m = self.goal_row(ws, gid)
@@ -707,13 +849,21 @@ class Engine:
         text = digest.worker_digest(self.db.session(sid), n, res, stat, patch, paths, cfg["digest"], earlier)
         # The guard can be bypassed (e.g. a script writing goal.md): revert before the evidence commit seals it
         reverted = workspace.enforce_protected(p)
+        if res.leftover:
+            text += "\n" + leftover_note(res.leftover, "this worker's turn")
+        if res.limited_until:
+            # The CLI refused the turn: it does not count against the worker budget
+            self.vendor_limits[sess["agent"]] = res.limited_until
+            self.set_goal(ws, gid, worker_turns=max(0, self.goal_row(ws, gid)["worker_turns"] - 1))
+            text += (f"\n[System] {sess['agent']} is at its usage limit until {clock(res.limited_until)}; this turn "
+                     f"was not counted, and `--agent {sess['agent']}` spawns and sends are refused until then.")
         if reverted:
             text += "\n[System] Reverted this worker's edits to human-owned files: " + ", ".join(reverted)
             self.publish("alert", ws=ws, goal=gid, text=f"Reverted {sid}'s edits to human-owned files (backup in "
                                                             ".loop/reverted/): " + ", ".join(reverted))
         m = self.goal_row(ws, gid)
         self.set_goal(ws, gid, tokens=m["tokens"] + res.tokens)
-        workspace.commit(p, "control-plane", f"control-plane: {sid} turn {n} evidence")
+        workspace.commit(p, "control-plane", f"control-plane: {sid} turn {n} evidence", protected=False)
         return text, n
 
     async def stop_worker(self, caller: dict | None, sid: str) -> str:
@@ -895,7 +1045,7 @@ class Engine:
         self.db.update("sessions", {"id": sid}, status="running")  # claimed before the CLI starts
         self.db.x("INSERT INTO messages(session, ts, role, text) VALUES(?,?,?,?)", sid, time.time(), "user", text)
         self.publish("meta_chat_message", session=sid, ws=s["ws"], goal=s["goal"])
-        self.spawn(self._meta_chat_turn(sid, text))
+        self.spawn(self._meta_chat_turn(sid, text), goal=(s["ws"], s["goal"]))
 
     async def _meta_chat_turn(self, sid: str, text: str) -> None:
         s = self.db.session(sid)
@@ -904,7 +1054,7 @@ class Engine:
         try:
             res, n = await self.run_turn(s, prompt)
             workspace.enforce_protected(p)
-            workspace.commit(p, f"meta-chat({sid})", f"meta-chat({sid}): turn {n}")
+            workspace.commit(p, f"meta-chat({sid})", f"meta-chat({sid}): turn {n}", protected=False)
             answer = res.final or f"(error: {res.error})"
         except Exception as exc:  # release the session and show the failure in the chat
             log.exception("meta-chat turn failed for %s", sid)

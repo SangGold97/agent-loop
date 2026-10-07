@@ -7,6 +7,9 @@
   there; never install into the user or system Python (`pip --user`, `sudo`, conda base).
 - Outputs that are not code (logs, metrics, plots, reports) go under `.artifacts/` in the project directory
   unless the prompt names another place. `.venv/` and `.artifacts/` are never committed.
+- Your work ends when you send your final answer, and processes still running then are stopped. Wait for
+  long jobs to finish (in the foreground or by waiting on them) and report their results; never end with
+  "waiting for" a job.
 - Check your own work (run tests, inspect outputs) before you finish. Report honestly: failures and
   uncertainty are useful information.
 

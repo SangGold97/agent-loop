@@ -25,7 +25,8 @@ sessions, merges their work and closes the goal; the human steers from the web U
 - **Worker turn**: runs in its own worktree on `loop/<goal>/<label>-<sid>`, is snapshot-committed, and its final
   report + diff become a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
   `loop/<goal>/integration`, checked out at `wt/_int-<goal>` (`gitops.py`).
-- **Running a CLI**: `runner.py` starts each turn in `systemd-run --user --scope` and streams JSON lines through an
+- **Running a CLI**: `runner.py` starts each turn in `systemd-run --user --scope` (anything left in the scope when
+  the CLI exits is killed and reported as `TurnResult.leftover`) and streams JSON lines through an
   adapter (`adapters/claude.py`, `adapters/codex.py`) that maps vendor events to the normalized events listed in
   `adapters/base.py`. A new CLI means a new `Adapter` registered in `ADAPTERS`.
 - **Guardrails**: `guard.py` is the PreToolUse hook for both CLIs, wired through `templates/workspace/*/hooks.json`

@@ -267,6 +267,21 @@ def test_enforce_protected_reverts_a_single_edit(tmp_path):
     assert list((tmp_path / ".loop/reverted").rglob("goal.md"))
 
 
+def test_agent_commit_leaves_human_files_for_enforce_protected(tmp_path):
+    from agentloop import gitops, workspace
+    gitops.git(tmp_path, "init", "-q")
+    (tmp_path / "goals/g").mkdir(parents=True)
+    (tmp_path / "goals/g/goal.md").write_text("- criterion\n")
+    workspace.commit(tmp_path, "human", "init")
+    # Another agent's commit lands while a worker's edit to goal.md is pending: it must not seal that edit
+    (tmp_path / "goals/g/goal.md").write_text("- nothing\n")
+    (tmp_path / "goals/g/plan.md").write_text("# Plan\n")
+    assert workspace.commit(tmp_path, "meta-work(mw-1)", "turn", protected=False)
+    assert gitops.git(tmp_path, "show", "--name-only", "--format=", "HEAD") == "goals/g/plan.md"
+    assert workspace.enforce_protected(tmp_path) == ["goals/g/goal.md"]
+    assert (tmp_path / "goals/g/goal.md").read_text() == "- criterion\n"
+
+
 def test_claude_settings_exclude_instructions_above_the_agent(tmp_path):
     from agentloop import workspace
     ws = tmp_path / "home" / "workspaces" / "demo"
@@ -325,3 +340,35 @@ def test_codex_context_from_rollout(tmp_path):
     st = ParseState(vendor_id="T1", context=104139)
     CodexAdapter().finish(st, RunSpec(agent="codex", kind="worker", cwd=tmp_path, prompt="x", codex_home=tmp_path))
     assert st.context == 18702
+
+
+def test_reap_scope_stops_what_a_turn_left_running():
+    import subprocess
+    import time
+    import pytest
+    from agentloop import runner
+    if not runner.systemd_available():
+        pytest.skip("needs systemd --user")
+    unit = f"{runner.unit_prefix()}-test-{int(time.time() * 1000)}"
+    # The scope's main process exits at once, leaving a detached job behind, as a CLI ending its turn would
+    subprocess.run(["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", "--",
+                    "bash", "-c", "setsid sleep 300 >/dev/null 2>&1 < /dev/null & exit 0"], check=True)
+    assert runner.reap_scope(unit, 0) == ("sleep 300",)
+    for _ in range(50):
+        if not runner.reap_scope(unit, 0):
+            break
+        time.sleep(0.1)
+    assert runner.reap_scope(unit, 0) == ()
+
+
+def test_usage_limit_until_reads_the_reset():
+    import time
+    from agentloop.adapters.base import usage_limit_until
+    now = time.mktime((2026, 10, 6, 19, 55, 0, 0, 0, -1))
+    assert usage_limit_until("exit 1: rate limit exceeded, retry", now) is None
+    assert usage_limit_until("Claude AI usage limit reached|1791300000", now) == 1791300000.0
+    at = usage_limit_until("You've hit your usage limit. Upgrade to Pro ... or try again at 9:45 PM.", now)
+    assert time.localtime(at)[3:5] == (21, 45) and at > now
+    morning = usage_limit_until("You've hit your limit · resets 3am (Asia/Saigon)", now)
+    assert time.localtime(morning)[2:5] == (7, 3, 0)
+    assert usage_limit_until("usage limit reached", now) == now + 3600

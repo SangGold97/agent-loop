@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -17,12 +18,24 @@ def loop(*args, stdin=None):
     return (out.stdout + out.stderr).strip()
 
 
+def _spec(gdir):
+    return (gdir / "spec.md").read_text() if (gdir / "spec.md").exists() else ""
+
+
 def main():
     resume = sys.argv[sys.argv.index("--resume") + 1] if "--resume" in sys.argv else None
     sid = resume or str(uuid.uuid4())
     prompt = sys.stdin.read()
     role, gdir = os.environ.get("LOOP_ROLE"), Path(os.environ.get("LOOP_GOAL_DIR", "."))
     emit({"type": "system", "subtype": "init", "session_id": sid})
+    # The first meta-work turn of a LIMIT goal (or worker turn of a WLIMIT one) hits a usage limit, as the CLI says it
+    if "LIMIT" in prompt + _spec(gdir) and not (gdir / f".limit-{role}").exists() and \
+            (role == "worker") == ("WLIMIT" in _spec(gdir)):
+        (gdir / f".limit-{role}").write_text("")
+        # The meta-work's limit resets at once so its goal can finish; a worker's lasts while the test checks it
+        text = f"Claude AI usage limit reached|{int(time.time()) + (600 if role == 'worker' else 1)}"
+        emit({"type": "result", "subtype": "success", "is_error": True, "result": text, "session_id": sid})
+        return
     if role == "worker":
         if "FAIL" in prompt:
             Path("broken.txt").write_text("partial\n")

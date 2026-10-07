@@ -161,9 +161,8 @@ function configForm(conf) {
     <div class="k">language</div><div class="row"><select data-lang style="width:160px">${['English', 'Vietnamese'].concat(
         ['English', 'Vietnamese'].includes(conf.language || 'English') ? [] : [conf.language]).map(l => `<option ${l === (conf.language || 'English') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
       <span class="hint">for plan, journal, report and chat replies to you; meta-work and workers talk to each other in English</span></div>
-    <div class="k">git</div><div class="budget-row">
-      <label class="f">base branch<input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo's current"></label>
-      <label class="f">push policy<select data-push>${['manual', 'branch'].map(p => `<option ${p === conf.push ? 'selected' : ''}>${p}</option>`).join('')}</select></label></div>
+    <div class="k">git</div><div class="row"><input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo/'s current branch" style="width:160px">
+      <span class="hint">base branch: the integration branch starts from it and the PR opened by push targets it; empty = the branch repo/ has checked out when the goal starts</span></div>
   </div>`;
 }
 function readConfigForm(root) {
@@ -179,8 +178,7 @@ function readConfigForm(root) {
   const budget = {};
   $$('[data-b]', root).forEach(i => { budget[i.dataset.b] = i.value.trim() === '' ? null : Number(i.value); });
   return { meta_work: metaWork, workers, budget, language: $('[data-lang]', root).value,
-    base_branch: $('[data-base]', root).value.trim() || null,
-    push: $('[data-push]', root).value };
+    base_branch: $('[data-base]', root).value.trim() || null };
 }
 
 // ---------- sidebar & routing ----------
@@ -210,6 +208,17 @@ function renderSidebar() {
   $('#nav-agents').classList.toggle('active', r.view === 'agents');
 }
 $('#new-ws').onclick = () => newWorkspaceModal();
+// The sidebar folds to a thin rail; the choice is remembered per browser
+function setSidebar(off, save = true) {
+  $('.app').classList.toggle('side-off', off);
+  $('#side-toggle').textContent = off ? '»' : '«';
+  $('#side-toggle').title = off ? 'Show sidebar' : 'Hide sidebar';
+  if (!save) return;
+  try { localStorage.setItem('agentloop.sideOff', off ? '1' : ''); } catch { /* storage blocked: this page only */ }
+  window.dispatchEvent(new Event('resize'));  // charts and the overview height follow the new width
+}
+$('#side-toggle').onclick = () => setSidebar(!$('.app').classList.contains('side-off'));
+setSidebar((() => { try { return localStorage.getItem('agentloop.sideOff') === '1'; } catch { return false; } })(), false);
 
 const TABS = [['overview', 'OVERVIEW'], ['config', 'CONFIG'], ['plan', 'PLAN & JOURNAL'], ['notes', 'HUMAN REPORT & NOTES'], ['git', 'GIT']];
 function parseHash() {
@@ -262,7 +271,8 @@ async function renderWorkspace() {
   const [info, state] = [await api(`/api/workspaces/${ws}`), S.workspaces.find(w => w.name === ws)];
   main.innerHTML = `<div class="page">
     <div class="page-head"><div><div class="crumbs">workspace</div><h1>${esc(ws)}</h1><div class="faint small">${esc(info.path)}</div></div>
-      <div class="actions"><button class="btn primary" id="w-new">new goal</button></div></div>
+      <div class="actions"><button class="btn primary" id="w-new">new goal</button>
+        <button class="btn small del" id="w-del" title="Delete this workspace">delete</button></div></div>
     <div class="grid cols-2" style="margin-top:18px">
       ${box('goals', state && state.goals.length ? `<table class="t"><tr><th>goal</th><th>status</th></tr>
         ${state.goals.map(m => `<tr><td><a href="#/ws/${ws}/g/${m.id}">${esc(m.title)}</a><div class="faint small">${esc(m.id)}</div></td>
@@ -282,6 +292,7 @@ async function renderWorkspace() {
     <div style="margin-top:22px">${box('audit log', auditTable(info.log))}</div></div>`;
   wireHarness(ws);
   $('#w-new').onclick = () => newGoalModal(ws);
+  $('#w-del').onclick = () => deleteWorkspaceModal(ws);
   $('#w-yaml').oninput = () => $('#w-dirty').textContent = 'unsaved';
   $('#w-save').onclick = () => act(async () => {
     await api(`/api/workspaces/${ws}/config`, { method: 'PUT', body: { text: $('#w-yaml').value } });
@@ -335,6 +346,21 @@ function newWorkspaceModal() {
     } finally { if ($('#nw-ok', m)) $('#nw-ok', m).disabled = false; }
   }, 'Workspace created');
 }
+function deleteWorkspaceModal(ws) {
+  const m = modal(`<div class="modal-head"><h2>delete workspace</h2><button class="icon-btn" data-close>×</button></div>
+    <p class="muted">Stops every session and deletes <code>workspaces/${esc(ws)}/</code> for good: all goals, the project repo
+      in <code>repo/</code> with any branch not pushed elsewhere, <code>data/</code> and the workspace history.</p>
+    <label class="f">type ${esc(ws)} to confirm<input type="text" id="dw-name" autocomplete="off"></label>
+    <div class="row" style="margin-top:10px"><span class="spacer"></span><button class="btn" data-close>cancel</button>
+      <button class="btn danger" id="dw-ok" disabled>delete workspace</button></div>`);
+  $('#dw-name', m).focus();
+  $('#dw-name', m).oninput = e => { $('#dw-ok', m).disabled = e.target.value.trim() !== ws; };
+  $('#dw-ok', m).onclick = () => act(async () => {
+    $('#dw-ok', m).disabled = true;
+    await api(`/api/workspaces/${ws}`, { method: 'DELETE' });
+    closeModal(); await loadState(); location.hash = '#/';
+  }, `Workspace ${ws} deleted`);
+}
 async function newGoalModal(ws) {
   const info = await api(`/api/workspaces/${ws}`);
   const m = modal(`<div class="modal-head"><h2>new goal · ${esc(ws)}</h2><button class="icon-btn" data-close>×</button></div>
@@ -372,23 +398,59 @@ function renderGoalHead() {
   const buttons = [];
   if (['draft', 'stopped', 'paused'].includes(st)) buttons.push(`<button class="btn primary" data-act="start">${st === 'draft' ? 'start goal' : 'resume'}</button>`);
   if (st === 'running') buttons.push('<button class="btn danger" data-act="stop">stop</button>');
-  if (st === 'awaiting_review') buttons.push('<button class="btn" data-act="reopen">reopen with note</button><button class="btn primary" data-act="accept">accept</button>');
-  $('#m-head').innerHTML = `<div class="page-head"><div>
-      <div class="crumbs"><a href="#/ws/${ws}">${esc(ws)}</a> / ${esc(gid)}</div>
-      <div class="row"><h1>${esc(M.config.title)}</h1>${pill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''}
-        ${M.meta_active ? '<span class="thinking">meta-work is thinking</span>' : ''}</div></div>
+  buttons.push('<button class="btn small del" data-act="delete" title="Delete this goal with its sessions">delete</button>');
+  $('#m-head').innerHTML = `<div class="page-head"><div class="row goal-title" title="${esc(gid)}">
+      <a href="#/ws/${ws}">${esc(ws)}</a><span class="faint">/</span><span class="gt">${esc(M.config.title)}</span>
+      ${pill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''}
+      ${M.meta_active ? '<span class="thinking">meta-work is thinking</span>' : ''}</div>
     <div class="actions">${buttons.join('')}</div></div>`;
   $$('[data-act]', $('#m-head')).forEach(b => b.onclick = () => goalAction(b.dataset.act));
+}
+// Review actions sit at the right end of the tabs row; push lights up once the goal is accepted and repo/ has a remote
+function reviewButtons() {
+  const M = S.goal, st = M.row.status, canPush = st === 'done' && M.remote;
+  const why = st !== 'done' ? 'accept the goal first' : !M.remote ? "repo/ has no remote 'origin'"
+    : `push loop/${S.route.gid}/integration to origin and open a PR into ${M.base}` + (M.row.pushed ? ` (last pushed ${fmtTime(M.row.pushed)})` : '');
+  return (st === 'awaiting_review' ? '<button class="btn small" data-act="reopen">reopen with note</button><button class="btn small primary" data-act="accept">accept</button>' : '')
+    + (M.row.pr ? `<a class="btn small" href="${esc(M.row.pr)}" target="_blank" rel="noopener">PR ↗</a>` : '')
+    + `<button class="btn small ${canPush && !M.row.pushed ? 'primary' : ''}" data-act="push" ${canPush ? '' : 'disabled'} title="${esc(why)}">push</button>`;
 }
 async function goalAction(action) {
   const { ws, gid } = S.route;
   if (action === 'reopen') return reopenModal();
+  if (action === 'delete') return deleteGoal();
+  if (action === 'push') return pushGoal();
   if (action === 'stop' && !window.confirm('Stop the goal? Running sessions are killed; their work is snapshotted.')) return;
   await act(async () => {
     const r = await api(`/api/goals/${ws}/${gid}/${action}`, { body: {} });
     if (action === 'accept' && r.tags?.length) toast(`Unmerged experiments kept as tags: ${r.tags.join(', ')}`, 'info', 9000);
     await loadState(); await refreshGoal(true);
   }, { start: 'Goal started', stop: 'Goal stopped', accept: 'Goal accepted' }[action]);
+}
+async function deleteGoal() {
+  const { ws, gid } = S.route;
+  if (!window.confirm(`Delete the goal "${S.goal.config.title}"? Its sessions are stopped, and its files, worktrees, `
+    + 'branches and logs are deleted for good.')) return;
+  $$('#m-head [data-act], #m-tabs [data-act]').forEach(b => b.disabled = true);
+  await act(async () => {
+    try { await api(`/api/goals/${ws}/${gid}`, { method: 'DELETE' }); }
+    catch (e) { renderGoalHead(); renderTabs(); throw e; }
+    await loadState(); location.hash = `#/ws/${ws}`;
+  }, 'Goal deleted');
+}
+async function pushGoal() {
+  const { ws, gid } = S.route;
+  if (!window.confirm(`Push loop/${gid}/integration to origin and open a pull request into ${S.goal.base}? `
+    + `${S.goal.base} itself is not touched.`)) return;
+  const b = $('#m-tabs [data-act=push]');
+  b.disabled = true; b.textContent = 'pushing…';
+  await act(async () => {
+    try {
+      const r = await api(`/api/goals/${ws}/${gid}/push`, { body: {} });
+      if (r.pr) toast(`Pushed ${r.branch}; PR into ${r.base}: ${r.pr}`, 'ok', 9000);
+      else toast(`Pushed ${r.branch}; no PR opened: ${r.pr_error}`, 'warn', 12000);
+    } finally { await refreshGoal(true); }
+  });
 }
 function reopenModal(prefill = '') {
   const { ws, gid } = S.route;
@@ -404,7 +466,9 @@ function reopenModal(prefill = '') {
 function renderTabs() {
   const M = S.goal, { ws, gid, tab } = S.route;
   const counts = { notes: M.notes.filter(n => n.status === 'pending').length || '' };
-  $('#m-tabs').innerHTML = TABS.map(([k, t]) => `<a class="tab ${tab === k ? 'active' : ''}" href="#/ws/${ws}/g/${gid}/${k}">${t}${counts[k] ? `<span class="count">${counts[k]}</span>` : ''}</a>`).join('');
+  $('#m-tabs').innerHTML = TABS.map(([k, t]) => `<a class="tab ${tab === k ? 'active' : ''}" href="#/ws/${ws}/g/${gid}/${k}">${t}${counts[k] ? `<span class="count">${counts[k]}</span>` : ''}</a>`).join('')
+    + `<div class="actions tab-actions">${reviewButtons()}</div>`;
+  $$('[data-act]', $('#m-tabs')).forEach(b => b.onclick = () => goalAction(b.dataset.act));
 }
 async function renderTab() {
   const t = S.route.tab;
@@ -887,7 +951,7 @@ async function renderGit() {
     ${box('branches', `${g.branches.length ? `<table class="t"><tr><th>branch</th><th>ahead</th><th>state</th><th>last commit</th></tr>
       ${g.branches.map(b => `<tr><td class="small">${esc(b.branch)}</td><td>${b.ahead}</td><td>${b.branch.endsWith('/integration') ? pill('running', 'integration') : b.merged ? pill('ok', 'merged') : pill('pending', 'not merged')}</td>
       <td class="small">${esc(b.subject)}<div class="faint">${esc(b.when)}</div></td></tr>`).join('')}</table>` : '<div class="empty">No branches yet (created when the goal starts).</div>'}
-      <p class="hint">Only you merge the integration branch into your main branch.</p>`)}
+      <p class="hint">After accept, push sends the integration branch to origin and opens a PR into ${esc(g.base)}; merging the PR is yours.</p>`)}
     ${box(`integration branch <span class="x">commits not in ${esc(g.base)}</span>`, g.integration_log.length ? `<table class="t">${g.integration_log.map(c => `<tr><td class="small">${esc(c.hash)}</td><td class="small">${esc(c.subject)}</td><td class="faint small">${esc(c.when)}</td></tr>`).join('')}</table>` : '<div class="empty">Empty.</div>')}</div>
     <div style="margin-top:22px">${box('workspace audit log (this goal)', auditTable(g.workspace_log))}</div>`;
 }
@@ -1011,6 +1075,13 @@ function handle(evt) {
     case 'meta_chat_message':
       if (inGoal && evt.session === S.chat.sid) loadChatMessages();
       if (inGoal) scheduleRefresh();
+      break;
+    case 'deleted':
+      // Leave a page whose goal or workspace is gone (deleted here or from another tab)
+      loadState().then(() => {
+        if (r.ws === evt.ws && (!evt.goal || r.gid === evt.goal)) location.hash = evt.goal ? `#/ws/${evt.ws}` : '#/';
+        else if (r.view === 'home') renderHome();
+      });
       break;
     case 'goal_status':
       loadState();

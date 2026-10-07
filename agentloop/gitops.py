@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import unicodedata
 from pathlib import Path
@@ -167,3 +168,80 @@ def cleanup(ws: Path, gid: str, workers: list[dict]) -> list[str]:
     remove_worktree(ws, ws / "wt" / f"_int-{gid}")
     git(repo, "worktree", "prune", check=False)
     return tagged
+
+
+def remove_goal(ws: Path, gid: str, workers: list[dict]) -> None:
+    """Delete what a goal left in the project repo: worktrees, loop/<gid>/* branches and exp/<gid>/* tags."""
+    repo = ws / "repo"
+    for wt in [Path(w["cwd"]) for w in workers] + [ws / "wt" / f"_int-{gid}"]:
+        remove_worktree(ws, wt)
+        shutil.rmtree(wt, ignore_errors=True)  # a worktree git refused to remove would keep its branch alive
+    git(repo, "worktree", "prune", check=False)
+    for kind, prefix in (("branch", f"refs/heads/loop/{gid}/"), ("tag", f"refs/tags/exp/{gid}/")):
+        refs = git(repo, "for-each-ref", "--format=%(refname:short)", prefix, check=False).split()
+        if refs:
+            git(repo, kind, "-D" if kind == "branch" else "-d", *refs, check=False)
+
+
+def has_origin(repo: Path) -> bool:
+    return "origin" in git(repo, "remote", check=False).split()
+
+
+def run_remote(repo: Path, *argv: str) -> subprocess.CompletedProcess:
+    """Run a command that talks to the remote; prompts are disabled so a missing credential fails, not hangs."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LOOP_")}
+    env.update(GIT_TERMINAL_PROMPT="0", GH_PROMPT_DISABLED="1")
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    try:
+        return subprocess.run(argv, cwd=repo, capture_output=True, text=True, env=env, timeout=180)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{argv[0]} {argv[1]} timed out") from None
+
+
+def pull_base(ws: Path, base: str) -> None:
+    """Fast-forward local base to origin/base, so a new goal branches from work merged through earlier PRs.
+
+    No-op without an origin or when origin has no such branch; a base that cannot fast-forward (local commits not
+    on origin, or uncommitted changes in the way) raises instead of being rewritten."""
+    repo = ws / "repo"
+    if not has_origin(repo):
+        return
+    proc = run_remote(repo, "git", "fetch", "-q", "origin", base)
+    if proc.returncode:
+        if "couldn't find remote ref" in proc.stderr:
+            return
+        raise RuntimeError(f"git fetch origin {base}: {proc.stderr.strip()}")
+    if not branch_exists(repo, base):
+        git(repo, "branch", base, "FETCH_HEAD")
+    elif current_branch(repo) == base:
+        proc = subprocess.run(["git", "merge", "--ff-only", "-q", "FETCH_HEAD"], cwd=repo, capture_output=True,
+                              text=True, env={k: v for k, v in os.environ.items() if not k.startswith("LOOP_")})
+        if proc.returncode:
+            raise RuntimeError(f"cannot fast-forward {base} in repo/ to origin/{base}: "
+                               f"{proc.stderr.strip() or proc.stdout.strip()}")
+    elif is_merged(repo, base, "FETCH_HEAD"):
+        git(repo, "update-ref", f"refs/heads/{base}", "FETCH_HEAD")
+    else:
+        raise RuntimeError(f"local {base} has commits that are not on origin/{base}; push or reconcile them first")
+
+
+def push_goal(ws: Path, gid: str, base: str, title: str, body: str) -> dict:
+    """Push loop/<gid>/integration to origin and open a pull request into base with the gh CLI.
+
+    The base branch is left alone. The PR is optional: without gh, or for a non-GitHub remote, the reason comes back in `pr_error`."""
+    repo, branch = ws / "repo", int_branch(gid)
+    if not has_origin(repo):
+        raise RuntimeError("repo/ has no remote 'origin'")
+    if not branch_exists(repo, branch):
+        raise RuntimeError(f"{branch} no longer exists")
+    run = lambda *argv: run_remote(repo, *argv)
+    proc = run("git", "push", "-u", "origin", branch)
+    if proc.returncode:
+        raise RuntimeError(f"git push: {proc.stderr.strip() or proc.stdout.strip()}")
+    if not shutil.which("gh"):
+        return {"branch": branch, "base": base, "pr": None, "pr_error": "gh CLI not found; open the PR yourself"}
+    # An existing PR for the branch is reported with its URL too
+    proc = run("gh", "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body[:60000])
+    url = re.search(r"https://\S+/pull/\d+", proc.stdout + proc.stderr)
+    return {"branch": branch, "base": base, "pr": url.group(0) if url else None,
+            "pr_error": None if url else (proc.stderr.strip() or proc.stdout.strip())[-500:]}

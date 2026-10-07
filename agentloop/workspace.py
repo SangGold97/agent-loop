@@ -32,7 +32,7 @@ fi
 exit 0
 """
 PRE_PUSH = """#!/bin/sh
-# agent-loop: agents never push; the platform pushes only when the goal policy allows it
+# agent-loop: agents never push; the platform pushes a goal's branch when the human asks
 if [ -n "$LOOP_ROLE" ]; then echo "agent-loop: agents cannot push" >&2; exit 1; fi
 [ -x "$0.orig" ] && exec "$0.orig" "$@"
 exit 0
@@ -62,10 +62,17 @@ def list_goals(ws: Path) -> list[str]:
         if root.exists() else []
 
 
-def commit(ws: Path, actor: str, message: str) -> bool:
-    """Stage everything and commit as `actor`; no-op on a clean tree."""
+def commit(ws: Path, actor: str, message: str, protected: bool = True) -> bool:
+    """Stage everything and commit as `actor`; no-op on a clean tree.
+
+    protected=False leaves human-owned files unstaged: a commit made for one agent must not seal another
+    agent's pending edit to them, which `enforce_protected` reverts when that agent's turn ends."""
     with _locks[str(ws)]:
         gitops.git(ws, "add", "-A")
+        if not protected:
+            held = [f for f in gitops.git(ws, "diff", "--cached", "--name-only").splitlines() if PROTECTED_RE.match(f)]
+            if held:
+                gitops.git(ws, "reset", "-q", "--", *held)
         if not gitops.git(ws, "diff", "--cached", "--name-only"):
             return False
         gitops.git(ws, "-c", f"user.name={actor}", "-c", f"user.email={re.sub(r'[^a-z0-9.-]', '', actor)}@agentloop",
@@ -73,8 +80,9 @@ def commit(ws: Path, actor: str, message: str) -> bool:
         return True
 
 
-def commit_external(ws: Path) -> bool:
-    return commit(ws, "human", "human: edits made outside the UI")
+def commit_external(ws: Path, protected: bool = True) -> bool:
+    """Commit edits made outside the UI as the human's; protected=False while agents run (see `commit`)."""
+    return commit(ws, "human", "human: edits made outside the UI", protected=protected)
 
 
 def enforce_protected(ws: Path) -> list[str]:
@@ -170,6 +178,20 @@ def create_goal(ws: Path, title: str, spec: str, goal_text: str, config: dict | 
 
 
 REUSED_SPEC = "> Reused from goal `{gid}`: no spec was given for this goal.\n\n"
+
+
+def delete_goal_dir(ws: Path, gid: str) -> None:
+    """Delete goals/<gid> and commit only that as the human.
+
+    Both happen under the workspace lock: a turn ending in between would otherwise restore the goal's
+    human-owned files through `enforce_protected`."""
+    rel = f"goals/{gid}"
+    with _locks[str(ws)]:
+        shutil.rmtree(goal_dir(ws, gid))
+        gitops.git(ws, "add", "-A", "--", rel, check=False)
+        if gitops.git(ws, "diff", "--cached", "--name-only", "--", rel):
+            gitops.git(ws, "-c", "user.name=human", "-c", "user.email=human@agentloop", "commit", "-q", "--no-verify",
+                       "-m", f"human: deleted goal {gid}", "--", rel)
 
 
 def fallback_spec(ws: Path, new_gid: str) -> str:

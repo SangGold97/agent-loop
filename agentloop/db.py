@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY, session TEXT, ts REAL, role TEXT, text TEXT);
 """
 # Columns added after the first release: (table, column, type)
-ADDED_COLUMNS = [("goals", "first_started", "REAL")]
+ADDED_COLUMNS = [("goals", "first_started", "REAL"), ("goals", "base", "TEXT"), ("goals", "pushed", "REAL"),
+                 ("goals", "pr", "TEXT")]
 # Columns no longer kept: the platform does not track spend
 DROPPED_COLUMNS = [("goals", "cost"), ("sessions", "cost"), ("turns", "cost")]
 

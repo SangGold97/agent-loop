@@ -42,6 +42,12 @@ The platform uses your existing CLI logins; it never asks for keys.
 - One PreToolUse guard (`agentloop/guard.py`) serves both CLIs: no `git push`, no writes to human-owned files,
   workers confined to their worktree and `data/`, extra regexes from `loop.yaml → guard`.
 - Git hooks in the project repo block agent commits to protected branches and any agent push.
+- The platform never touches the base branch. Accepting a goal removes its worktrees and keeps
+  `loop/<goal>/integration`; **push** on the goal page then pushes that branch to `origin` and opens a pull request
+  into the base branch with your `gh` login; merging the PR is yours. Starting a new goal first fast-forwards the
+  local base branch from `origin` (the start is refused when it cannot fast-forward), so the goal builds on merged
+  PRs. The base branch is `base_branch` from `goal.yaml`, or else the branch `repo/` had checked out when the goal
+  started.
 - Agents read only their own instructions: Claude sessions get `--settings` from `.loop/claude/<layer>-settings.json`
   (the layer's `hooks.json` plus `claudeMdExcludes` for every directory above `meta/` or the worktree), so a
   `CLAUDE.md`/`AGENTS.md` in the platform repo or another parent never reaches them. Codex workers stop at the
@@ -50,7 +56,10 @@ The platform uses your existing CLI logins; it never asks for keys.
   (the changed copy is kept in `.loop/reverted/<time>/`, and the UI shows an alert).
 - Budgets (concurrency, worker/meta turns) are enforced by the control plane; on exhaustion the
   meta-work gets one final turn to close the goal.
-- Every session runs in its own `systemd-run --user --scope` (orphans are stopped on restart); workers also get
+- A CLI's usage limit is not a failure: the meta-work waits for the announced reset while workers on the other
+  CLI keep running, a refused worker turn is not counted, and spawns on that CLI are refused until the reset.
+- Every turn runs in its own `systemd-run --user --scope`. Processes still running when the CLI exits (a job the
+  agent backgrounded) are stopped and named in the digest; orphans are stopped on restart. Workers also get
   `MemoryMax`. Spawns are refused under `min_free_ram_gb`; GPUs are hidden unless a worker is spawned with `--gpu`
   (slots in `loop.yaml → infra`).
 - Events handed to a meta-work turn stay "in flight" until it completes; a crash, restart or stop puts them back.

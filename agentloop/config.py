@@ -26,7 +26,6 @@ DEFAULTS: dict = {
         # Language of everything agents write for the human; code and commit messages follow the project
         "language": "English",
         "base_branch": None,
-        "push": "manual",
     },
     "digest": {"max_output_words": 500, "max_diff_lines": 80},
     "infra": {"min_free_ram_gb": 2, "worker_memory_max_gb": 8, "gpu_slots": 1},
@@ -35,7 +34,7 @@ DEFAULTS: dict = {
 }
 
 # Goal-level keys that override workspace defaults
-GOAL_KEYS = ("meta_work", "workers", "budget", "language", "base_branch", "push")
+GOAL_KEYS = ("meta_work", "workers", "budget", "language", "base_branch")
 
 
 def home() -> Path:

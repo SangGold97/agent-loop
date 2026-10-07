@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from .adapters import ADAPTERS, ParseState, RunSpec
+from .adapters.base import usage_limit_until
 from .config import PYTHON, home
 
 # Variables describing the parent agent session; child sessions must not inherit them
@@ -39,6 +40,8 @@ class TurnResult:
     exit_code: int
     error: str
     stopped: bool = False
+    leftover: tuple[str, ...] = ()  # commands still running in the scope when the CLI exited (now stopped)
+    limited_until: float | None = None  # the vendor refused the turn for a usage limit that resets then
 
 
 def systemd_available() -> bool:
@@ -49,6 +52,38 @@ def systemd_available() -> bool:
         ).stdout.strip() in ("running", "degraded")
         _systemd = bool(ok)
     return _systemd
+
+
+def reap_scope(unit: str | None, pgid: int) -> tuple[str, ...]:
+    """Stop what a finished turn left running (e.g. a job the agent backgrounded, then ended its turn).
+
+    Such processes would otherwise outlive the turn: untracked, unstoppable from the UI and still using the
+    worker's CPU. Returns their command lines so the caller can tell the meta-work what was stopped."""
+    cmds: list[str] = []
+    cgroup = subprocess.run(["systemctl", "--user", "show", "-p", "ControlGroup", "--value", f"{unit}.scope"],
+                            capture_output=True, text=True).stdout.strip() if unit else ""
+    procs = Path("/sys/fs/cgroup" + cgroup, "cgroup.procs") if cgroup else None
+    # Claude Code's own housekeeping (e.g. a plugin-catalog git fetch at exit) runs from its config dir:
+    # it is stopped too, but it is not the agent's work, so it is not reported
+    cli_home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").resolve()
+    alive = False
+    for pid in (procs.read_text().split() if procs and procs.exists() else []):
+        try:
+            cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+            cwd = Path(f"/proc/{pid}/cwd").resolve()
+        except OSError:
+            continue
+        alive = True
+        if cmd and not cwd.is_relative_to(cli_home) and cmd[:200] not in cmds:
+            cmds.append(cmd[:200])
+    if not unit:  # without systemd only the CLI's own process group can be reached, and is not reported
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if alive:  # SIGKILL is immediate; `systemctl stop` could block the event loop for the unit's stop timeout
+        subprocess.run(["systemctl", "--user", "kill", "-s", "SIGKILL", f"{unit}.scope"], capture_output=True)
+    return tuple(cmds)
 
 
 def child_env(extra: dict) -> dict:
@@ -86,7 +121,7 @@ class Runner:
                 *argv, cwd=str(spec.cwd), env=env, start_new_session=True, limit=64 * 1024 * 1024,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         except FileNotFoundError as exc:
-            return TurnResult(None, "", 0, 0.0, 0, 127, f"cannot start {argv[0]}: {exc}", 0.0)
+            return TurnResult(None, "", 0, 0, 127, f"cannot start {argv[0]}: {exc}")
         self.procs[key] = (proc, unit)
         stderr_tail: list[str] = []
 
@@ -144,6 +179,7 @@ class Runner:
             self.procs.pop(key, None)
         stopped = key in self.stopping
         self.stopping.discard(key)
+        leftover = () if timed_out or stopped else reap_scope(unit, proc.pid)
         rc = proc.returncode if proc.returncode is not None else -1
         error = st.error
         if timed_out:
@@ -153,8 +189,9 @@ class Runner:
         elif rc and not error:
             error = f"exit {rc}: " + "".join(stderr_tail)[-800:].strip()
         adapter.finish(st, spec)
-        return TurnResult(st.vendor_id, adapter.final_text(st, spec) or "", st.tokens, st.context, rc, error,
-                          stopped)
+        final = adapter.final_text(st, spec) or ""
+        limited = usage_limit_until(f"{error}\n{final}") if error and not (stopped or timed_out) else None
+        return TurnResult(st.vendor_id, final, st.tokens, st.context, rc, error, stopped, leftover, limited)
 
     def running(self, key: str) -> bool:
         return key in self.procs
