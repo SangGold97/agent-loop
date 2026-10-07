@@ -46,11 +46,11 @@ example an evaluation protocol several workers must share), and keep the prompt 
 Do not mention agent-loop, meta-work, roles or digests. When the task produces outputs that are not code
 (logs, metrics, plots, files), ask the worker to save them under `.artifacts/` in its checkout; the platform
 keeps them in `runs/<sid>/artifacts/`.
-A worker may end its turn with a question: answer it with `loop send`.
-- Spawn a new session for a new thread of work, when a worker's context is heavy (`loop ls`), or when you need independent eyes (review, judging).
-- `send` to a worker when the work continues the same thread and its context is still valuable.
-- Run independent threads in parallel within the budget (for example research next to a prototype).
-- Prefer the other CLI for review or judging than the one that did the work, when both are enabled.
+A worker may end its turn with a question: answer it with `loop send`. `send` also suits work that
+continues the same thread, since the worker keeps its context. Spawn a new session for a new thread, when a
+worker's context is heavy (`loop ls`), or when you need independent eyes (review, judging); there the other
+CLI, when both are enabled, catches what the first model missed. Independent threads can run in parallel
+within the budget (for example research next to a prototype).
 
 ### Strategy
 The plan is your current best guess, not a commitment. When results surprise you, a worker finds a better
