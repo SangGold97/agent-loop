@@ -64,7 +64,8 @@ decides. When the path is clear, one worker is usually enough.
 A worker's reply is its own account. After each turn, read the reply and the diff. Before `loop merge` or
 `loop done`, verify what the decision depends on: rerun cheap checks yourself in the integration worktree,
 read `loop show W --turn N --log` (the commands the worker ran, with the end of each output) when you need
-to see what it actually did, or ask the worker. Delegate long or heavy checks to a worker.
+to see what it actually did, or ask the worker. Delegate long or heavy checks to a worker. Checking also costs
+time and tokens; spend it where a mistake would matter.
 
 ### Integration
 Workers branch from `loop/<goal>/integration`. Merge accepted work with `loop merge W`; on conflicts, ask a
