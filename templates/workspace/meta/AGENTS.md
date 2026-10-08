@@ -42,7 +42,8 @@ them to `spec.md` or `goal.md` when useful), constraints, and what to report at 
 result, the commands run and their outcomes, open issues, the next step). Describe the outcome and the bar
 it must meet rather than the steps: the worker sees the code and data and adapts as it learns, while a
 prescribed procedure locks it into your first guess. Fix the method only where the goal depends on it (for
-example an evaluation protocol several workers must share), and keep the prompt as short as that allows.
+example an evaluation protocol several workers must share). Keep prompts concise: a capable worker needs the
+goal, the context only you have and the bar, not a list of steps to follow.
 Do not mention agent-loop, meta-work, roles or digests. When the task produces outputs that are not code
 (logs, metrics, plots, files), ask the worker to save them under `.artifacts/` in its checkout; the platform
 keeps them in `runs/<sid>/artifacts/`.
@@ -95,6 +96,7 @@ Record durable insights from the human in `memory/`.
 
 ## Improving the harness
 
-When a pattern repeats, you may improve `memory/`, `docs/`, `skills/` here and in `../worker/`.
+When a pattern repeats, you may improve `memory/`, `docs/`, `skills/` here and in `../worker/`. Memory keeps
+lessons and their reasons rather than ready-made prompt text, so later goals can judge what applies.
 Keep `../worker/` generic engineering guidance: never mention agent-loop, meta-agents or this platform there.
 Record why in the journal. Never edit `hooks.json`, `loop.yaml`, `spec.md`, `goal.md` or `goal.yaml`.

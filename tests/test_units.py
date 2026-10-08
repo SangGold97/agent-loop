@@ -188,6 +188,24 @@ def test_guard_ignores_prompt_text(tmp_path):
     assert guard.check(ev("cat <<EOF > $LOOP_GOAL_DIR/goal.md\nx\nEOF"), m)
 
 
+def test_guard_blocks_only_writes_to_human_files(tmp_path):
+    (tmp_path / "wt/w-1").mkdir(parents=True)
+    w, m = guard_env(tmp_path, "worker"), guard_env(tmp_path, "meta-work")
+    ev = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path)}
+    # Reads stay allowed even next to stderr redirections or a copy out
+    for cmd in ("cat goals/m1/spec.md; cat goals/m1/goal.yaml 2>/dev/null; ls -la goals/m1/",
+                f"cat {tmp_path}/goals/m1/goal.md && ls tests .artifacts 2>&1; cat .gitignore",
+                "cp goals/m1/goal.md /tmp/g.md", "grep -c x goals/m1/goal.md > /tmp/count"):
+        assert guard.check(ev(cmd), m) is None, cmd
+    for cmd in ("echo x >> goals/m1/goal.md", "echo x 2>/dev/null >goals/m1/spec.md", "sed -i s/a/b/ goals/m1/spec.md",
+                "cp /tmp/g.md goals/m1/goal.md", "date | tee -a goals/m1/goal.md", "mv goals/m1/goal.md /tmp/",
+                "X=1 truncate -s0 loop.yaml", "echo {} > meta/hooks.json"):
+        assert guard.check(ev(cmd), m), cmd
+    # The worker's message is an ordinary environment limit, naming no platform
+    reason = guard.check(ev("echo x > goals/m1/goal.md"), w)
+    assert reason == "goals/m1/goal.md is read-only"
+
+
 def test_guard_rm_edge_cases(tmp_path):
     (tmp_path / "wt/w-1").mkdir(parents=True)
     w = guard_env(tmp_path, "worker")

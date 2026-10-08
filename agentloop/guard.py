@@ -17,8 +17,12 @@ PROTECTED_RE = re.compile(
     r"^(goals/[^/]+/(spec\.md|goal\.md|goal\.yaml)|loop\.yaml|(meta|worker)/hooks\.json)$")
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "shell", "exec_command", "local_shell"}
-WRITE_OPS = r"(>|\btee\b|\bsed\s+-i|\bmv\b|\brm\b|\bcp\b|\btruncate\b|\bchmod\b|\bln\b)"
-PROTECTED_IN_CMD = r"(goals/\S*(spec|goal)\.md|goal\.yaml|LOOP_GOAL_DIR\S*(spec|goal)\.md|hooks\.json|loop\.yaml)"
+PROTECTED_IN_CMD = re.compile(
+    r"(goals/\S*(spec|goal)\.md|goal\.yaml|LOOP_GOAL_DIR\S*(spec|goal)\.md|hooks\.json|loop\.yaml)")
+# Output redirections (`>`, `>>`, `2>`, `&>`, `>|`) and their target; `2>&1` and `>/dev/null` write nothing
+REDIRECT = re.compile(r"(?:\d*|&)>{1,2}\|?\s*(&?[^\s;&|<>()]+)")
+MODIFYING = {"tee", "mv", "rm", "truncate", "chmod", "ln"}  # any argument of these may be written or removed
+IN_PLACE = re.compile(r"-[a-zA-Z]*i|--in-place")  # sed -i, perl -pi
 # Package installs that change the human's own Python instead of a project venv
 GLOBAL_INSTALL = re.compile(r"\bsudo\b|\bpip3?\b[^|;&\n]*\binstall\b[^|;&\n]*(--user|--break-system-packages)\b"
                             r"|\bconda\s+install\b(?![^|;&\n]*(-p|--prefix)\s)")
@@ -75,13 +79,43 @@ def strip_quotes(cmd: str) -> str:
     return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", cmd)
 
 
+def protected_write(code: str) -> str | None:
+    """The human-owned file a shell command would write, if any. Only write targets count, so reading one
+    (`cat goal.md 2>/dev/null`, `cp goal.md /tmp/`) passes."""
+    for m in REDIRECT.finditer(code):
+        target = m.group(1).strip("'\"")
+        if not target.startswith("&") and PROTECTED_IN_CMD.search(target):
+            return target
+    for part in re.split(r"[;&|\n]+", code):
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            words = part.split()
+        while words and re.match(r"\w+=", words[0]):  # leading VAR=value assignments
+            words.pop(0)
+        if not words:
+            continue
+        name, args = os.path.basename(words[0]), words[1:]
+        if name == "cp":
+            targets = [a for a in args if not a.startswith("-")][-1:]  # only the destination is written
+        elif name in MODIFYING or (name in ("sed", "perl") and any(IN_PLACE.match(a) for a in args)):
+            targets = args
+        else:
+            continue
+        for t in targets:
+            if PROTECTED_IN_CMD.search(t):
+                return t
+    return None
+
+
 def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
     code = strip_heredocs(cmd)
     bare = strip_quotes(code)  # git checks ignore quoted text such as commit messages or prompts
     if re.search(r"\bgit\b[^|;&\n]*\bpush\b", bare):
         return "pushing is disabled here; commit locally and leave remotes to the repository owner"
-    if re.search(WRITE_OPS, code) and re.search(PROTECTED_IN_CMD, code):
-        return "this command would modify a read-only file (spec.md, goal.md, goal.yaml, loop.yaml, hooks.json)"
+    if target := protected_write(code):
+        return (f"{target} is read-only" if env.get("LOOP_ROLE") == "worker"
+                else f"{target} is human-owned; propose changes in your journal/report instead")
     if GLOBAL_INSTALL.search(bare):
         return ("do not install into the user or system Python; create a virtualenv in the project directory "
                 "(python -m venv .venv) and install there")
@@ -136,7 +170,7 @@ def main() -> None:
     except Exception:  # never break the agent because the guard itself failed
         return
     if reason:
-        print(f"agent-loop guard: {reason}", file=sys.stderr)
+        print(f"blocked: {reason}", file=sys.stderr)
         sys.exit(2)
 
 
