@@ -236,9 +236,8 @@ table.t { width: 100%; border-collapse: collapse; }
 .worker .fold { color: var(--faint); width: 10px; }
 .worker .wh { padding: 3px 8px; border-bottom: 1px solid var(--border); gap: 6px; flex-wrap: nowrap; white-space: nowrap; }
 .worker .wh .role { font-weight: 700; }
-.worker .wh .wlabel, .worker .wh .wmeta { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.worker .wh .wlabel { color: var(--muted); }
-.worker .wh > :not(.wlabel):not(.wmeta):not(.spacer) { flex: none; }
+.worker .wh .role, .worker .wh .wmeta { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.worker .wh > :not(.role):not(.wmeta):not(.spacer) { flex: none; }
 .worker .feed-wrap > .feed { padding: 0 8px; }
 .worker.running { border-color: color-mix(in srgb, var(--run) 50%, var(--border)); }
 .chat-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }

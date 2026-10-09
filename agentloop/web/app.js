@@ -826,11 +826,11 @@ function saveNoteModal(text) {
   }, 'Note saved');
 }
 
-// WORKER-AGENTS: running first, then newest; header = role · label · status · CLI · model/effort
+// WORKER-AGENTS: running first, then newest; header = role · status · CLI · model/effort
 const workerOpen = w => simpleStatus(w) === 'running' || !!S.open[w.id];
 function workerHead(w) {
   const st = simpleStatus(w);
-  return `<span class="fold">${workerOpen(w) ? '▾' : '▸'}</span><span class="role">${esc(w.role)}</span><span class="faint">·</span><span class="wlabel">${esc(w.label)}</span>${pill(st)}
+  return `<span class="fold">${workerOpen(w) ? '▾' : '▸'}</span><span class="role">${esc(w.role)}</span>${pill(st)}
     <span class="spacer"></span><span class="faint wmeta">${agentLine(w, w.context)}</span>
     <button class="btn small" data-log="${w.id}">expand</button>${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}`;
 }
@@ -879,7 +879,7 @@ function toggleWorker(sid) {
 async function sessionModal(sid) {
   const s = S.goal.sessions.find(x => x.id === sid) || { id: sid };
   const evs = await api(`/api/sessions/${sid}/events?limit=3000`);
-  const title = s.kind === 'worker' ? `${s.role} · ${s.label}` : s.kind;
+  const title = s.kind === 'worker' ? s.role : s.kind;
   modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s, s.context)}</div><h2>${esc(title)}</h2></div>
       <button class="icon-btn" data-close>×</button></div>
     ${s.cwd ? `<div class="faint small">${esc(s.cwd)}${s.branch ? ' · ' + esc(s.branch) : ''}</div>` : ''}

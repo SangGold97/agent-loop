@@ -22,7 +22,7 @@ sessions, merges their work and closes the goal; the human steers from the web U
 - **Event loop per goal**: everything for the meta-work (kickoff, worker digests, notes, budget, system messages)
   goes into the goal's `inbox` table. `Engine.meta_loop` drains it into one meta-work turn; items stay in flight
   (`consumed=2`) until the turn ends and go back to the queue on crash or restart.
-- **Worker turn**: runs in its own worktree on `loop/<goal>/<label>-<sid>`, is snapshot-committed, and its final
+- **Worker turn**: runs in its own worktree on `loop/<goal>/<role>-<sid>`, is snapshot-committed, and its final
   report + diff become a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
   `loop/<goal>/integration`, checked out at `wt/_int-<goal>` (`gitops.py`).
 - **Running a CLI**: `runner.py` starts each turn in `systemd-run --user --scope` (anything left in the scope when

@@ -28,7 +28,7 @@ def worker_digest(sess: dict, n: int, res, stat: str, patch: str, paths: dict, c
                   earlier: list[str] | None = None) -> str:
     """`earlier`: commits in the diff that existed before the turn (fast-forwarded or merged in)."""
     status = "stopped" if res.stopped else ("failed: " + res.error if res.error else "ok")
-    head = f"[Worker {sess['id']} · role {sess['role']} · label {sess['label']} · turn {n}] {status}"
+    head = f"[Worker {sess['id']} · role {sess['role']} · turn {n}] {status}"
     out, cut = trim_words(res.final or "(no final message)", cfg["max_output_words"])
     parts = [head, f"[Final output]{' (trimmed; full: ' + paths['out'] + ')' if cut else ''}\n{out}"]
     if stat:

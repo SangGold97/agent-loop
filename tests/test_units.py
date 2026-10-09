@@ -89,13 +89,13 @@ def test_verify_and_checklist():
 
 def test_worker_digest_names_the_worker_and_earlier_commits():
     from types import SimpleNamespace
-    sess = {"id": "w-1", "role": "reviewer", "label": "review"}
+    sess = {"id": "w-1", "role": "reviewer"}
     res = SimpleNamespace(stopped=False, error="", final="**Result:** approved", tokens=88_000, context=23_000)
     cfg = {"max_output_words": 500, "max_diff_lines": 80}
     stat = " a.py | 1 +\n 1 file changed, 1 insertion(+)"
     text = digest.worker_digest(sess, 1, res, stat, "+x", {"out": "o", "diff": "d"}, cfg, ["b63d497 add a"])
     # Identity and outcome only: no duration, tokens or cost
-    assert text.splitlines()[0] == "[Worker w-1 · role reviewer · label review · turn 1] ok"
+    assert text.splitlines()[0] == "[Worker w-1 · role reviewer · turn 1] ok"
     assert "tokens" not in text and "min" not in text and "$" not in text
     assert "[Note] This diff includes 1 commit(s) made before this turn" in text and "b63d497 add a" in text
     assert "[Note]" not in digest.worker_digest(sess, 1, res, stat, "+x", {"out": "o", "diff": "d"}, cfg)

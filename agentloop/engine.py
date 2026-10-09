@@ -164,15 +164,15 @@ class Engine:
                          ws, gid)
         return [r for r in rows if r["status"] == "running"] if running_only else rows
 
-    def new_session(self, ws: str, gid: str, kind: str, role: str, label: str, conf: dict, cwd: Path,
+    def new_session(self, ws: str, gid: str, kind: str, role: str, conf: dict, cwd: Path,
                     parent: str | None = None, branch: str | None = None, gpu: bool = False,
                     sid: str | None = None) -> dict:
         sid = sid or f"{PREFIX[kind]}-{secrets.token_hex(3)}"
         now = time.time()
-        self.db.x("INSERT INTO sessions(id, ws, goal, kind, parent, role, label, agent, model, effort, "
+        self.db.x("INSERT INTO sessions(id, ws, goal, kind, parent, role, agent, model, effort, "
                   "autocompact, cwd, branch, status, token, gpu, created, updated) "
-                  "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  sid, ws, gid, kind, parent, role, label, conf["agent"], conf.get("model"), conf.get("effort"),
+                  "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  sid, ws, gid, kind, parent, role, conf["agent"], conf.get("model"), conf.get("effort"),
                   None if conf.get("autocompact") is None else str(conf.get("autocompact")), str(cwd), branch,
                   "idle", secrets.token_hex(16) if kind != "worker" else None, int(gpu), now, now)
         self.publish("session_status", ws=ws, goal=gid, session=sid, status="idle")
@@ -434,7 +434,7 @@ class Engine:
         if not m["base"]:
             self.set_goal(ws, gid, base=base)
         if not m["meta_work"]:
-            orch = self.new_session(ws, gid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
+            orch = self.new_session(ws, gid, "meta-work", "meta-work", mc["meta_work"], p / "meta")
             self.set_goal(ws, gid, meta_work=orch["id"])
             self.db.push_inbox(ws, gid, "kickoff", {"text": self.kickoff_text(ws, gid)})
         else:
@@ -506,7 +506,7 @@ class Engine:
         if orch["agent"] != mc["meta_work"]["agent"] or (rotate and orch["context"] > rotate):
             # Fresh meta-work session; plan.md/journal.md carry the state across
             self.db.update("sessions", {"id": orch["id"]}, status="retired")
-            orch = self.new_session(ws, gid, "meta-work", "meta-work", "meta-work", mc["meta_work"], p / "meta")
+            orch = self.new_session(ws, gid, "meta-work", "meta-work", mc["meta_work"], p / "meta")
             self.set_goal(ws, gid, meta_work=orch["id"])
             items = [{"kind": "handoff", "payload": json.dumps({"text": (
                 "[Handoff] You are a fresh meta-work session replacing a previous one (its context grew too "
@@ -753,8 +753,7 @@ class Engine:
             raise AgentError(f"goal is {m['status']}")
         return m
 
-    async def spawn_worker(self, caller: dict, agent: str, role: str, label: str, prompt: str,
-                           gpu: bool = False) -> str:
+    async def spawn_worker(self, caller: dict, agent: str, role: str, prompt: str, gpu: bool = False) -> str:
         self.require_meta_work(caller)
         ws, gid = caller["ws"], caller["goal"]
         p = self.wsp(ws)
@@ -770,9 +769,8 @@ class Engine:
             raise AgentError("empty prompt")
         self.check_dispatch(ws, gid, gpu)
         sid = f"w-{secrets.token_hex(3)}"
-        wt, branch = gitops.add_worker_worktree(p, gid, sid, label or role)
-        sess = self.new_session(ws, gid, "worker", role, label or role, {"agent": agent, **workers[agent]}, wt,
-                                parent=caller["id"],
+        wt, branch = gitops.add_worker_worktree(p, gid, sid, role)
+        sess = self.new_session(ws, gid, "worker", role, {"agent": agent, **workers[agent]}, wt, parent=caller["id"],
                                 branch=branch, gpu=gpu, sid=sid)
         self.db.update("sessions", {"id": sid}, status="running")
         self._count_dispatch(ws, gid)
@@ -923,9 +921,9 @@ class Engine:
         rows = self.workers(caller["ws"], caller["goal"])
         if not rows:
             return "No workers yet."
-        out = ["id | role | label | agent/model | status | turns | context | tokens | merged | branch"]
+        out = ["id | role | agent/model | status | turns | context | tokens | merged | branch"]
         for w in rows:
-            out.append(f"{w['id']} | {w['role']} | {w['label']} | {w['agent']}/{w['model'] or '-'} | {w['status']} | "
+            out.append(f"{w['id']} | {w['role']} | {w['agent']}/{w['model'] or '-'} | {w['status']} | "
                        f"{w['turns']} | ~{digest.fmt_tokens(w['context'])} | {digest.fmt_tokens(w['tokens'])} | "
                        f"{'yes' if w['merged'] else 'no'} | {w['branch']}")
         return "\n".join(out)
@@ -937,7 +935,7 @@ class Engine:
         if with_log and not turn and turns:
             turn = turns[-1]["n"]
         if not turn:
-            lines = [f"{sid}: role {w['role']}, label {w['label']}, {w['agent']}/{w['model']}, status {w['status']}, "
+            lines = [f"{sid}: role {w['role']}, {w['agent']}/{w['model']}, status {w['status']}, "
                      f"worktree {w['cwd']}, branch {w['branch']}, run dir {rd}"]
             for t in turns:
                 first = (t["final"] or "").strip().splitlines()[:1]
@@ -1032,7 +1030,7 @@ class Engine:
         reason = agents.check_agent_conf(conf["agent"], conf, agents.load_models())
         if reason:
             raise AgentError(reason)
-        return self.new_session(ws, gid, "meta-chat", "meta-chat", "meta-chat", conf, self.wsp(ws) / "meta")
+        return self.new_session(ws, gid, "meta-chat", "meta-chat", conf, self.wsp(ws) / "meta")
 
     def meta_chat_send(self, sid: str, text: str) -> None:
         s = self.db.session(sid)

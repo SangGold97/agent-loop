@@ -57,7 +57,7 @@ def main():
         if "[Kickoff]" in prompt:
             (gdir / "plan.md").write_text("# Plan\n\n- [ ] create hello.py\n")
             task = "Create hello.py" + (" TAMPER" if "TAMPER" in (gdir / "spec.md").read_text() else "")
-            text = loop("spawn", "--agent", "fake", "--role", "coder", "--label", "hello", "--prompt", task)
+            text = loop("spawn", "--agent", "fake", "--role", "coder", "--prompt", task)
         elif m := re.search(r"\[Worker (w-\w+)", prompt):
             merged = loop("merge", m.group(1))
             (gdir / "plan.md").write_text("# Plan\n\n- [x] create hello.py\n")

@@ -27,7 +27,7 @@ Never wait for or poll workers; you are resumed when they report.
   updating, replace outdated content completely; only the journal is append-only.
 
 ### Commands
-- `loop spawn --agent claude|codex --role R --label L [--gpu] <<'EOF' ...prompt... EOF` starts a new worker
+- `loop spawn --agent claude|codex --role R [--gpu] <<'EOF' ...prompt... EOF` starts a new worker
   (fresh context, own worktree and branch). You choose the CLI and name the role; the human fixed model and effort.
 - `loop send W <<'EOF' ... EOF` continues an idle worker, keeping its context
 - `loop ls`, `loop show W [--turn N] [--full] [--log]`, `loop stop W`, `loop merge W`, `loop infra`, `loop budget`

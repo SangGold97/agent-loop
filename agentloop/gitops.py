@@ -55,9 +55,9 @@ def ensure_integration(ws: Path, gid: str, base: str | None) -> Path:
 WORKER_EXCLUDES = (".venv/", ".artifacts/")
 
 
-def add_worker_worktree(ws: Path, gid: str, sid: str, label: str) -> tuple[Path, str]:
+def add_worker_worktree(ws: Path, gid: str, sid: str, role: str) -> tuple[Path, str]:
     repo, wt = ws / "repo", ws / "wt" / sid
-    branch = f"loop/{gid}/{slug(label)}-{sid}"
+    branch = f"loop/{gid}/{role}-{sid}"
     git(repo, "worktree", "add", "-b", branch, str(wt), int_branch(gid))
     ensure_excluded(repo, WORKER_EXCLUDES)
     return wt, branch

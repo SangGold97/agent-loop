@@ -274,8 +274,8 @@ def create_app(api_url: str) -> FastAPI:
         if cmd in ("spawn", "send", "stop", "merge", "done") and caller["kind"] != "meta-work":
             raise AgentError(f"`loop {cmd}` belongs to the meta-work; propose a note with `loop note` instead")
         if cmd == "spawn":
-            text = await engine.spawn_worker(caller, b.get("agent", ""), b.get("role", ""), b.get("label", ""),
-                                             b.get("prompt", ""), bool(b.get("gpu")))
+            text = await engine.spawn_worker(caller, b.get("agent", ""), b.get("role", ""), b.get("prompt", ""),
+                                             bool(b.get("gpu")))
         elif cmd == "send":
             text = await engine.send_worker(caller, b.get("sid", ""), b.get("prompt", ""))
         elif cmd == "stop":
