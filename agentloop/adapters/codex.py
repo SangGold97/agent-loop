@@ -2,10 +2,18 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
-from .base import Adapter, ParseState, RunSpec, short, to_tokens, tool_result
+from .base import Adapter, ParseState, RunSpec, billed_tokens, short, to_tokens, tool_result
 
+
+def epoch(stamp) -> float:
+    """A rollout timestamp ('2026-10-06T09:45:19.356Z') as epoch seconds; 0 when missing or malformed."""
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return 0.0
 
 
 class CodexAdapter(Adapter):
@@ -69,8 +77,8 @@ class CodexAdapter(Adapter):
                 out.append({"type": "error", "text": short(item.get("message", ""), 400)})
         elif kind == "turn.completed":
             u = o.get("usage") or {}
-            # Same figure as the CLI's "tokens used": cached input is not counted
-            st.tokens += (u.get("input_tokens") or 0) - (u.get("cached_input_tokens") or 0) + (u.get("output_tokens") or 0)
+            # The thread's running total, not this turn's share: finish() narrows it down from the rollout
+            st.tokens = billed_tokens(u)
             st.context = u.get("input_tokens") or st.context
             out.append({"type": "usage", "context": st.context})
         elif kind == "turn.failed":
@@ -82,18 +90,32 @@ class CodexAdapter(Adapter):
         return out
 
     def finish(self, st: ParseState, s: RunSpec) -> None:
-        # exec --json only reports per-turn sums; the TUI's context figure is the last call in the rollout file
-        if not (s.codex_home and st.vendor_id):
+        vendor_id = st.vendor_id or s.resume_id
+        if not (s.codex_home and vendor_id):
             return
-        files = sorted(Path(s.codex_home, "sessions").rglob(f"rollout-*{st.vendor_id}.jsonl"))
-        for line in reversed(files[-1].read_text().splitlines() if files else []):
-            if '"token_count"' in line:
-                try:
-                    last = (json.loads(line)["payload"].get("info") or {}).get("last_token_usage") or {}
-                except (ValueError, KeyError):
-                    continue
-                st.context = last.get("total_tokens") or st.context
-                return
+        files = sorted(Path(s.codex_home, "sessions").rglob(f"rollout-*{vendor_id}.jsonl"))
+        # The rollout logs the thread's running total after every model call, also for a turn stopped before
+        # turn.completed: this turn's tokens are its growth since this run's first task started. The TUI's context
+        # figure is the last call's size.
+        total = before = last = None
+        in_turn = False
+        for line in files[-1].read_text().splitlines() if files else []:
+            if '"task_started"' not in line and '"token_count"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            payload = o.get("payload") or {}
+            if payload.get("type") == "task_started" and not in_turn and epoch(o.get("timestamp")) >= st.started:
+                in_turn, before = True, total
+            elif payload.get("type") == "token_count" and payload.get("info"):
+                total = payload["info"].get("total_token_usage") or total
+                last = payload["info"].get("last_token_usage") or last
+        if last:
+            st.context = last.get("total_tokens") or st.context
+        if in_turn and total:
+            st.tokens = billed_tokens(total) - (billed_tokens(before) if before else 0)
 
     def final_text(self, st: ParseState, s: RunSpec) -> str:
         if s.last_message_file and s.last_message_file.exists():

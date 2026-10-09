@@ -1,4 +1,6 @@
 import json
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agentloop import digest, guard
@@ -358,6 +360,42 @@ def test_codex_context_from_rollout(tmp_path):
     st = ParseState(vendor_id="T1", context=104139)
     CodexAdapter().finish(st, RunSpec(agent="codex", kind="worker", cwd=tmp_path, prompt="x", codex_home=tmp_path))
     assert st.context == 18702
+
+
+def test_codex_turn_tokens_from_rollout(tmp_path):
+    # The rollout holds the thread's running total: a turn gets its growth, whether it completed or was stopped
+    day = tmp_path / "sessions/2026/10/06"
+    day.mkdir(parents=True)
+    stamp = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
+    task = lambda t: json.dumps({"timestamp": stamp(t), "type": "event_msg", "payload": {"type": "task_started"}})
+    count = lambda t, n: json.dumps({"timestamp": stamp(t), "type": "event_msg", "payload": {"type": "token_count", "info": {
+        "total_token_usage": {"input_tokens": n, "cached_input_tokens": n // 2, "output_tokens": 10},
+        "last_token_usage": {"total_tokens": 70}}}})
+    start = time.time()
+    (day / "rollout-2026-10-06T16-45-19-T1.jsonl").write_text("\n".join(
+        [task(start - 100), count(start - 90, 1000), task(start + 1), count(start + 2, 1400), count(start + 3, 1600)]))
+    spec = RunSpec(agent="codex", kind="worker", cwd=tmp_path, prompt="x", codex_home=tmp_path)
+    for reported in (810, 0):  # turn.completed's running total, or nothing for a stopped turn
+        st = ParseState(vendor_id="T1", started=start, tokens=reported)
+        CodexAdapter().finish(st, spec)
+        assert (st.tokens, st.context) == (810 - 510, 70)
+    st = ParseState(vendor_id="T1", started=start + 10)  # stopped before its task started
+    CodexAdapter().finish(st, spec)
+    assert st.tokens == 0
+
+
+def test_claude_stopped_turn_counts_its_calls():
+    # Without `result` the turn keeps what its model calls used; `result` then has the final word
+    st, ad = ParseState(), ClaudeAdapter()
+    usage = {"input_tokens": 2, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 900, "output_tokens": 1}
+    for _ in range(2):
+        ad.parse({"type": "stream_event", "event": {"type": "message_start", "message": {"usage": usage}}}, st)
+        ad.parse({"type": "stream_event", "event": {"type": "message_delta", "usage": {**usage, "output_tokens": 8}}}, st)
+    ad.parse({"type": "stream_event", "parent_tool_use_id": "t",
+              "event": {"type": "message_start", "message": {"usage": usage}}}, st)
+    assert st.tokens == 2 * (2 + 100 + 8)
+    ad.parse({"type": "result", "subtype": "success", "result": "ok", "usage": {"input_tokens": 4, "output_tokens": 16}}, st)
+    assert st.tokens == 20
 
 
 def test_reap_scope_stops_what_a_turn_left_running():

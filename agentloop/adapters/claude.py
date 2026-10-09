@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .base import Adapter, ParseState, RunSpec, short, to_tokens, tool_result
+from .base import Adapter, ParseState, RunSpec, billed_tokens, short, to_tokens, tool_result
 
 USER_SETTINGS = Path.home() / ".claude" / "settings.json"
 
@@ -69,6 +69,14 @@ class ClaudeAdapter(Adapter):
             if ev.get("type") == "content_block_delta" and delta.get("type") == "text_delta" \
                     and not o.get("parent_tool_use_id"):
                 out.append({"type": "delta", "text": delta.get("text", "")})
+            # The main agent's tokens call by call, so a turn stopped before `result` still counts what it used:
+            # message_start opens a model call, message_delta carries that call's final usage
+            if not o.get("parent_tool_use_id"):
+                if ev.get("type") == "message_start":
+                    st.call_usage.append((ev.get("message") or {}).get("usage") or {})
+                elif ev.get("type") == "message_delta" and ev.get("usage") and st.call_usage:
+                    st.call_usage[-1] = {**st.call_usage[-1], **ev["usage"]}
+                st.tokens = sum(billed_tokens(u) for u in st.call_usage)
         elif kind == "assistant":
             msg = o.get("message") or {}
             usage = msg.get("usage") or {}
@@ -95,9 +103,8 @@ class ClaudeAdapter(Adapter):
         elif kind == "result":
             st.vendor_id = o.get("session_id") or st.vendor_id
             st.final = o.get("result") if o.get("result") is not None else st.last_text
-            u = o.get("usage") or {}
-            # Like Codex's "tokens used": everything except input served from the prompt cache
-            st.tokens = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "output_tokens"))
+            # The CLI's own total for the turn replaces the per-call count
+            st.tokens = billed_tokens(o.get("usage") or {})
             st.is_error = bool(o.get("is_error")) or o.get("subtype") not in (None, "success")
             if st.is_error:
                 st.error = str(o.get("subtype") or "error")

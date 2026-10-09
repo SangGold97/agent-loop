@@ -38,10 +38,20 @@ class ParseState:
     vendor_id: str | None = None
     last_text: str = ""
     final: str | None = None
-    tokens: int = 0
+    tokens: int = 0                # this turn's tokens, cached input excluded
     context: int = 0
     is_error: bool = False
     error: str = ""
+    started: float = field(default_factory=time.time)        # when the turn started
+    call_usage: list[dict] = field(default_factory=list)     # usage of each model call so far in this turn
+
+
+def billed_tokens(usage: dict) -> int:
+    """Tokens of one usage record except input served from the prompt cache, like the CLIs' 'tokens used'."""
+    if "cached_input_tokens" in usage:  # Codex: input_tokens includes the cached part
+        return (usage.get("input_tokens") or 0) - (usage.get("cached_input_tokens") or 0) \
+            + (usage.get("output_tokens") or 0)
+    return sum(usage.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "output_tokens"))
 
 
 class Adapter:
