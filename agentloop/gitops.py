@@ -39,27 +39,33 @@ def int_branch(gid: str) -> str:
     return f"loop/{gid}/integration"
 
 
+def int_worktree(ws: Path, gid: str) -> Path:
+    return ws / "wt" / f"_int-{gid}"
+
+
 def ensure_integration(ws: Path, gid: str, base: str | None) -> Path:
     """Create branch loop/<gid>/integration (from base) and its worktree wt/_int-<gid>."""
     repo, branch = ws / "repo", int_branch(gid)
-    wt = ws / "wt" / f"_int-{gid}"
+    wt = int_worktree(ws, gid)
     if not branch_exists(repo, branch):
         git(repo, "branch", branch, base or current_branch(repo))
     if not wt.exists():
         git(repo, "worktree", "prune")
         git(repo, "worktree", "add", str(wt), branch)
+    # The meta-work may work here without any worker, so its checkpoints must skip these from the start
+    ensure_excluded(repo, LOCAL_EXCLUDES)
     return wt
 
 
-# Worker-local dirs: a virtualenv, and outputs the platform collects into runs/<sid>/artifacts/
-WORKER_EXCLUDES = (".venv/", ".artifacts/")
+# Checkout-local dirs: a virtualenv, and outputs the platform collects into runs/<sid>/artifacts/
+LOCAL_EXCLUDES = (".venv/", ".artifacts/")
 
 
 def add_worker_worktree(ws: Path, gid: str, sid: str, role: str) -> tuple[Path, str]:
     repo, wt = ws / "repo", ws / "wt" / sid
     branch = f"loop/{gid}/{role}-{sid}"
     git(repo, "worktree", "add", "-b", branch, str(wt), int_branch(gid))
-    ensure_excluded(repo, WORKER_EXCLUDES)
+    ensure_excluded(repo, LOCAL_EXCLUDES)
     return wt, branch
 
 
@@ -89,13 +95,52 @@ def commits_before(path: Path, start: str, end: str, before: float) -> list[str]
     return out
 
 
-def snapshot(path: Path, message: str) -> bool:
-    """Commit any uncommitted work (bypassing project hooks). Returns True if a commit was made."""
+def snapshot(path: Path, message: str, actor: str | None = None) -> bool:
+    """Commit any uncommitted work (bypassing project hooks), as `actor` or the platform bot.
+    Returns True if a commit was made."""
     if not git(path, "status", "--porcelain"):
         return False
+    who = ["-c", f"user.name={actor}", "-c", f"user.email={re.sub(r'[^a-z0-9.-]', '', actor)}@agentloop"] \
+        if actor else BOT
     git(path, "add", "-A")
-    git(path, *BOT, "commit", "--no-verify", "-q", "-m", message)
+    git(path, *who, "commit", "--no-verify", "-q", "-m", message)
     return True
+
+
+def checkpoint(ws: Path, gid: str, actor: str, message: str) -> str:
+    """Commit the meta-work's uncommitted changes in the integration worktree and return its HEAD.
+
+    Raises instead of committing when the worktree is off the integration branch (a checkout or rebase in
+    progress) or holds unresolved conflicts, so no caller goes on as if the work were saved."""
+    wt, branch = int_worktree(ws, gid), int_branch(gid)
+    on = git(wt, "symbolic-ref", "--short", "-q", "HEAD", check=False)
+    if on != branch:
+        raise RuntimeError(f"{wt} is on {on or 'a detached HEAD'}, not {branch}; switch back first")
+    if conflicts := git(wt, "diff", "--name-only", "--diff-filter=U").splitlines():
+        raise RuntimeError(f"unresolved conflicts in {wt}: {', '.join(conflicts)}; resolve or abort first")
+    snapshot(wt, message, actor)
+    return head(wt)
+
+
+def untracked(path: Path) -> set[str]:
+    """Untracked, non-ignored files: what a snapshot would add."""
+    return set(git(path, "ls-files", "--others", "--exclude-standard", "-z").split("\0")) - {""}
+
+
+def restore_after_run(path: Path, before: set[str]) -> tuple[str, list[str]]:
+    """Undo what a command run did to a clean checkout: tracked edits are reset to HEAD and files it created
+    (untracked now, not in `before`) are removed; ignored files stay. Returns the tracked diff and removed files."""
+    changed = git(path, "diff", "HEAD")
+    if changed:
+        git(path, "reset", "--hard", "-q")
+    created = sorted(untracked(path) - before)
+    for rel in created:
+        (path / rel).unlink(missing_ok=True)
+        for parent in (path / rel).parents:  # directories the run created, now empty
+            if parent == path or any(parent.iterdir()):
+                break
+            parent.rmdir()
+    return changed, created
 
 
 def diff(path: Path, start: str, end: str) -> tuple[str, str]:
@@ -105,12 +150,10 @@ def diff(path: Path, start: str, end: str) -> tuple[str, str]:
 
 
 def merge(ws: Path, gid: str, branch: str) -> dict:
-    """Merge a worker branch into the integration branch; abort and report on conflicts."""
-    wt = ws / "wt" / f"_int-{gid}"
-    # Only merges write here; stray files (verify-run output, an interrupted merge) are discarded
-    git(wt, "merge", "--abort", check=False)
-    git(wt, "reset", "--hard", "-q")
-    git(wt, "clean", "-fdq")
+    """Merge a worker branch into the integration branch; abort and report on conflicts.
+
+    The worktree may hold the meta-work's own changes, so the caller checkpoints it first; nothing is discarded."""
+    wt = int_worktree(ws, gid)
     before = head(wt)
     out = subprocess.run(["git", *BOT, "merge", "--no-ff", "--no-edit", branch], cwd=wt,
                          capture_output=True, text=True)
@@ -165,7 +208,7 @@ def cleanup(ws: Path, gid: str, workers: list[dict]) -> list[str]:
             git(repo, "tag", "-f", tag, branch, check=False)
             tagged.append(tag)
         git(repo, "branch", "-D", branch, check=False)
-    remove_worktree(ws, ws / "wt" / f"_int-{gid}")
+    remove_worktree(ws, int_worktree(ws, gid))
     git(repo, "worktree", "prune", check=False)
     return tagged
 
@@ -173,7 +216,7 @@ def cleanup(ws: Path, gid: str, workers: list[dict]) -> list[str]:
 def remove_goal(ws: Path, gid: str, workers: list[dict]) -> None:
     """Delete what a goal left in the project repo: worktrees, loop/<gid>/* branches and exp/<gid>/* tags."""
     repo = ws / "repo"
-    for wt in [Path(w["cwd"]) for w in workers] + [ws / "wt" / f"_int-{gid}"]:
+    for wt in [Path(w["cwd"]) for w in workers] + [int_worktree(ws, gid)]:
         remove_worktree(ws, wt)
         shutil.rmtree(wt, ignore_errors=True)  # a worktree git refused to remove would keep its branch alive
     git(repo, "worktree", "prune", check=False)

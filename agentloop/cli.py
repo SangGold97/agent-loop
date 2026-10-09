@@ -11,6 +11,7 @@ import urllib.request
 HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   spawn   start a new worker session           loop spawn --agent claude --role coder <<'EOF' ... EOF
   send    continue an idle worker              loop send w-1a2b3c <<'EOF' ... EOF
+  advise  request advice; the reply arrives as an event   loop advise <<'EOF' ...question... EOF
   stop    stop a running worker                loop stop w-1a2b3c
   ls      list this goal's workers
   show    worker details / a turn's evidence   loop show w-1a2b3c --turn 2 [--full] [--log]
@@ -64,7 +65,8 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--agent", required=True, help="worker CLI (claude or codex); model and effort are fixed by the human")
     sp.add_argument("--role", required=True, help="what the worker does, e.g. coder, reviewer, research")
     sp.add_argument("--gpu", action="store_true")
-    for name, sparser in (("spawn", sp), ("send", sub.add_parser("send", help="continue an idle worker"))):
+    for name, sparser in (("spawn", sp), ("send", sub.add_parser("send", help="continue an idle worker")),
+                          ("advise", sub.add_parser("advise", help="request advice asynchronously"))):
         if name == "send":
             sparser.add_argument("sid")
         sparser.add_argument("--prompt")
@@ -85,9 +87,12 @@ def main(argv: list[str] | None = None) -> None:
         sub.add_parser(name)
     a = p.parse_args(argv)
 
-    if a.cmd in ("spawn", "send"):
+    if a.cmd in ("spawn", "send", "advise"):
         payload = {"prompt": text_arg(a, "prompt")}
-        payload.update({"agent": a.agent, "role": a.role, "gpu": a.gpu} if a.cmd == "spawn" else {"sid": a.sid})
+        if a.cmd == "spawn":
+            payload.update({"agent": a.agent, "role": a.role, "gpu": a.gpu})
+        elif a.cmd == "send":
+            payload["sid"] = a.sid
     elif a.cmd in ("stop", "merge"):
         payload = {"sid": a.sid}
     elif a.cmd == "show":

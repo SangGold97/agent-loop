@@ -60,7 +60,7 @@ def envelope(items: list[dict], budget: str, infra: str) -> str:
     for it in items:
         p = json.loads(it["payload"])
         kind = it["kind"]
-        if kind in ("kickoff", "handoff", "system", "budget", "worker_done"):
+        if kind in ("kickoff", "handoff", "system", "budget", "worker_done", "advice"):
             parts.append(p["text"])
         elif kind == "note":
             parts.append(f"[Human note #{p['id']}] {p['text']}")

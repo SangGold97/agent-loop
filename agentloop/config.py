@@ -18,6 +18,7 @@ DEFAULTS: dict = {
         # Fixed by the human: every meta-work turn and every worker turn uses these settings
         "meta_work": {"agent": "claude", "model": "opus", "effort": "high",
                       "autocompact": None, "rotate_at_tokens": None},
+        "meta_advisor": {"agent": "claude", "model": "opus", "effort": "high"},
         "workers": {
             "claude": {"enabled": True, "model": "opus", "effort": "high", "autocompact": None},
             "codex": {"enabled": True, "model": "gpt-6-astra", "effort": "high", "autocompact": None},
@@ -34,7 +35,7 @@ DEFAULTS: dict = {
 }
 
 # Goal-level keys that override workspace defaults
-GOAL_KEYS = ("meta_work", "workers", "budget", "language", "base_branch")
+GOAL_KEYS = ("meta_work", "meta_advisor", "workers", "budget", "language", "base_branch")
 
 
 def home() -> Path:

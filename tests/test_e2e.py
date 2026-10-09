@@ -45,6 +45,10 @@ def test_full_goal(server):
     log = engine.turn_log("demo", sid, 1)
     assert "$ Bash python hello.py" in log and "  hello" in log
     assert (ws / "wt" / f"_int-{gid}" / "hello.py").exists()
+    # The meta-work's own uncommitted change survived the merge and was committed under its name
+    int_log = subprocess.run(["git", "log", "--format=%an|%s", "--", "meta_note.txt"], cwd=ws / "wt" / f"_int-{gid}",
+                             capture_output=True, text=True).stdout
+    assert int_log.startswith("meta-work(") and "before merging " + sid in int_log
     authors = subprocess.run(["git", "log", "--format=%an"], cwd=ws, capture_output=True, text=True).stdout
     assert "control-plane" in authors and "meta-work(" in authors
 
@@ -354,3 +358,84 @@ def test_worker_usage_limit_is_reported_and_refunded(server):
     finally:
         client.post(f"/api/goals/wquota/{gid}/stop")
         engine.vendor_limits.clear()  # the fake CLI serves the other tests
+
+
+def int_git(ws: Path, gid: str, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=ws / "wt" / f"_int-{gid}", capture_output=True, text=True).stdout
+
+
+def test_meta_work_does_the_work_itself_over_several_turns(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "direct"})
+    ws = Path(engine.wsp("direct"))
+    gid = client.post("/api/workspaces/direct/goals", json={
+        "title": "Direct", "spec": "Small change DIRECT", "goal": "- steps exist\n- verify: `test -f step3.py`",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/direct/{gid}/start")
+    # Three turns that only change files (no worker, no commit) count as progress, so the goal never pauses
+    wait_for(lambda: client.get(f"/api/goals/direct/{gid}").json()["row"]["status"] == "awaiting_review")
+    view = client.get(f"/api/goals/direct/{gid}").json()
+    assert view["row"]["outcome"] == "success" and view["row"]["worker_turns"] == 0
+    assert not [s for s in view["sessions"] if s["kind"] == "worker"]
+    assert int_git(ws, gid, "status", "--porcelain") == ""
+    authors = int_git(ws, gid, "log", "--format=%an", f"loop/{gid}/integration", "-3").split()
+    assert len(authors) == 3 and all(a.startswith("meta-work(") for a in authors)
+    turns = engine.db.q("SELECT start_commit, end_commit FROM turns WHERE session=? ORDER BY n",
+                        view["row"]["meta_work"])
+    assert turns[0]["start_commit"] != turns[0]["end_commit"]
+
+
+def test_verify_that_edits_tracked_files_is_rejected_and_undone(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "vedit"})
+    ws = Path(engine.wsp("vedit"))
+    gid = client.post("/api/workspaces/vedit/goals", json={
+        "title": "Verify edits", "spec": "Small change DIRECT",
+        "goal": "- steps exist\n- verify: `echo extra >> step1.py && mkdir -p out && touch out/run.log`",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/vedit/{gid}/start")
+    view = wait_for(lambda: (v := client.get(f"/api/goals/vedit/{gid}").json())["row"]["status"]
+                    == "awaiting_review" and v)
+    assert view["row"]["outcome"] == "partial"
+    wt = ws / "wt" / f"_int-{gid}"
+    assert (wt / "step1.py").read_text() == "print(1)\n" and not (wt / "out").exists()
+    # The goal closes inside the turn, so its output is recorded a moment later
+    final = wait_for(lambda: engine.db.one("SELECT final FROM turns WHERE session=? ORDER BY n DESC LIMIT 1",
+                                           view["row"]["meta_work"])["final"])
+    assert "changed tracked files" in final
+
+
+def test_failed_checkpoint_blocks_spawn_and_done(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "offbranch"})
+    ws = Path(engine.wsp("offbranch"))
+    gid = client.post("/api/workspaces/offbranch/goals", json={
+        "title": "Off branch", "spec": "OFFBRANCH", "goal": "- wip", "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/offbranch/{gid}/start")
+    view = wait_for(lambda: (v := client.get(f"/api/goals/offbranch/{gid}").json())["row"]["status"]
+                    == "awaiting_review" and v)
+    final = wait_for(lambda: engine.db.one("SELECT final FROM turns WHERE session=?", view["row"]["meta_work"])["final"])
+    assert final.count("could not commit your changes") == 2 and "Goal closed as partial" in final
+    assert view["row"]["outcome"] == "partial" and not [s for s in view["sessions"] if s["kind"] == "worker"]
+    # Back on the branch, the change was saved by the close; the touched repo/ was reported, not reverted
+    assert "wip.py" in int_git(ws, gid, "show", "--name-only", "--format=", f"loop/{gid}/integration")
+    assert (ws / "repo" / "stray.txt").exists()
+    wait_for(lambda: engine.db.one("SELECT id FROM inbox WHERE ws='offbranch' AND goal=? AND payload LIKE "
+                                   "'%repo/ (branch%'", gid))
+
+
+def test_meta_chat_change_to_project_is_reported(server, monkeypatch):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "chatw"})
+    gid = client.post("/api/workspaces/chatw/goals", json={
+        "title": "Chat write", "spec": "Small change DIRECT", "goal": "- verify: `test -f step3.py`",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/chatw/{gid}/start")
+    wait_for(lambda: client.get(f"/api/goals/chatw/{gid}").json()["row"]["status"] == "awaiting_review")
+    wait_for(lambda: ("chatw", gid) not in engine.meta_active)  # the closing turn has wrapped up
+    alerts, publish = [], engine.publish
+    monkeypatch.setattr(engine, "publish", lambda kind, **d: (alerts.append(d) if kind == "alert" else None,
+                                                               publish(kind, **d)))
+    chat = client.post(f"/api/goals/chatw/{gid}/meta-chats", json={}).json()["id"]
+    client.post(f"/api/meta-chats/{chat}/messages", json={"text": "CHATWRITE please"})
+    wait_for(lambda: any("integration worktree" in a.get("text", "") for a in alerts))

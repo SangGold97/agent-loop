@@ -5,7 +5,7 @@ This workspace is run by agent-loop. The workspace root is `$LOOP_WS`; paths bel
 | Path | Purpose | Written by |
 |---|---|---|
 | `loop.yaml` | Workspace defaults: agents, models, budgets, limits | human |
-| `meta/` | Meta-agent harness: `AGENTS.md`, `skills/`, `memory/`, `docs/` | human; meta may improve memory/docs/skills |
+| `meta/` | Harness for meta-work, meta-chat and advisor: `AGENTS.md`, `skills/`, `memory/`, `docs/` | human; meta-work/meta-chat may improve memory/docs/skills |
 | `worker/` | Worker harness: `AGENTS.md`, `skills/`, `memory/`, `docs/`, `claude-plugin/` | human; meta may improve memory/docs/skills |
 | `*/hooks.json` | Guard hooks (Claude Code and Codex share the format) | human only |
 | `goals/<id>/spec.md`, `goal.md`, `goal.yaml` | Context and requirements, success criteria, goal config | human only |
@@ -14,11 +14,13 @@ This workspace is run by agent-loop. The workspace root is `$LOOP_WS`; paths bel
 | `goals/<id>/notes.md` | Human guidance for the meta-work | platform (from the human) |
 | `goals/<id>/report.md` | Completion report | platform (from `loop done`) |
 | `goals/<id>/runs/<sid>/` | Per-worker evidence: `t<n>.prompt.md`, `t<n>.out.md`, `t<n>.diff`, `artifacts/` (copied from the worker's `.artifacts/`) | platform |
-| `repo/` | The project's git repository | workers (through worktrees), meta-work; only the human merges `main` |
+| `repo/` | The project's git repository | workers and meta-work through worktrees; only the human merges `main` |
 | `wt/<sid>/` | One git worktree per worker, branch `loop/<goal>/<role>-<sid>`; `.venv/` and `.artifacts/` are git-excluded | worker |
-| `wt/_int-<goal>/` | Integration branch `loop/<goal>/integration` | platform (`loop merge`), meta-work |
+| `wt/_int-<goal>/` | Integration branch `loop/<goal>/integration` | meta-work (committed by the platform), platform (`loop merge`) |
 | `data/` | Large shared data (datasets, checkpoints) | human, workers that fetch data |
 | `.loop/` | Runtime logs and state | platform |
 
 Memory: `meta/memory/` holds cross-goal lessons for meta-agents, `worker/memory/` for workers.
 Keep one short file per lesson and list it in that folder's `README.md`.
+
+The advisor reads the workspace and returns advice through the inbox; it does not write project or harness files.

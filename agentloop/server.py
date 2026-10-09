@@ -271,11 +271,15 @@ def create_app(api_url: str) -> FastAPI:
     @app.post("/api/agent/{cmd}")
     async def agent_cmd(cmd: str, req: Request, x_loop_token: str | None = Header(None)):
         caller, b = engine.caller(x_loop_token), await body(req)
-        if cmd in ("spawn", "send", "stop", "merge", "done") and caller["kind"] != "meta-work":
+        if caller["kind"] == "meta-advisor" and cmd not in ("ls", "show", "status", "budget", "infra"):
+            raise AgentError("the advisor has read-only access; return advice to the meta-work in your final reply")
+        if cmd in ("spawn", "send", "stop", "merge", "done", "advise") and caller["kind"] != "meta-work":
             raise AgentError(f"`loop {cmd}` belongs to the meta-work; propose a note with `loop note` instead")
         if cmd == "spawn":
             text = await engine.spawn_worker(caller, b.get("agent", ""), b.get("role", ""), b.get("prompt", ""),
                                              bool(b.get("gpu")))
+        elif cmd == "advise":
+            text = engine.advise(caller, b.get("prompt", ""))
         elif cmd == "send":
             text = await engine.send_worker(caller, b.get("sid", ""), b.get("prompt", ""))
         elif cmd == "stop":

@@ -143,7 +143,7 @@ def test_trim_words_keeps_tail():
 
 
 def guard_env(tmp_path: Path, role: str) -> dict:
-    return {"LOOP_ROLE": role, "LOOP_WS": str(tmp_path), "LOOP_SESSION": "w-1",
+    return {"LOOP_ROLE": role, "LOOP_WS": str(tmp_path), "LOOP_SESSION": "w-1", "LOOP_GOAL": "m1",
             "LOOP_GUARD_PATTERNS": json.dumps(["aws .*prod"])}
 
 
@@ -167,9 +167,10 @@ def test_guard_rules(tmp_path):
     assert reason and "worktree" not in reason and "run dir" not in reason
     assert "journal" not in guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/spec.md")), w)
     assert not guard.check(ev("Bash", command="rm -rf build && pytest -q"), w)
-    # Meta-agents may change code and git state; push and human-owned files stay blocked
-    assert not guard.check(ev("Edit", file_path=str(tmp_path / "repo/app.py")), m)
-    assert not guard.check(ev("Bash", command="git -C ../repo commit -am x"), m)
+    # Meta-work changes code only in its goal's integration worktree; push and human-owned files stay blocked
+    assert not guard.check(ev("Edit", file_path=str(tmp_path / "wt/_int-m1/app.py")), m)
+    assert guard.check(ev("Edit", file_path=str(tmp_path / "repo/app.py")), m)
+    assert guard.check(ev("Bash", command="git -C ../repo commit -am x"), m)
     assert guard.check(ev("Bash", command="git push"), m)
     assert guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/goal.md")), m)
     assert not guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/plan.md")), m)
@@ -206,6 +207,74 @@ def test_guard_blocks_only_writes_to_human_files(tmp_path):
     # The worker's message is an ordinary environment limit, naming no platform
     reason = guard.check(ev("echo x > goals/m1/goal.md"), w)
     assert reason == "goals/m1/goal.md is read-only"
+
+
+def test_guard_meta_scope(tmp_path):
+    for d in ("wt/w-1", "wt/_int-m1", "wt/_int-m2", "repo", "meta"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    m, c = guard_env(tmp_path, "meta-work"), guard_env(tmp_path, "meta-chat")
+    ev = lambda cmd, cwd="meta": {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path / cwd)}
+    # Allowed for the meta-work: its integration worktree, its own files, reads anywhere
+    for cmd in ("cd ../wt/_int-m1 && echo x > a.py && git add -A && git commit -qm x",
+                "git -C ../wt/_int-m1 checkout -- a.py", "sed -i s/a/b/ ../wt/_int-m1/a.py",
+                "echo - x >> ../goals/m1/plan.md",
+                "git -C ../repo log --oneline | head", "cat ../wt/w-1/a.py > /tmp/a.py", "cd ../repo && git status"):
+        assert guard.check(ev(cmd), m) is None, cmd
+    assert guard.check(ev("echo x > a.py", "wt/_int-m1"), m) is None
+    # Blocked: repo/, worker worktrees, other goals' integration, also after a cd or with git -C
+    for cmd in ("echo x > ../repo/a.py", "cd ../repo && git checkout -b x", "git -C ../wt/w-1 commit -am x",
+                "cp /tmp/a.py ../wt/_int-m2/a.py", "cd ../wt/w-1; rm a.py", "mv ../wt/_int-m1/a.py ../repo/"):
+        assert guard.check(ev(cmd), m), cmd
+    assert guard.check(ev("git commit -am x", "repo"), m)
+    assert guard.check({"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / "wt/w-1/a.py")},
+                        "cwd": str(tmp_path)}, m)
+    # A meta-chat reads the project but changes no code, not even in the integration worktree
+    assert guard.check(ev("cat ../wt/_int-m1/a.py && git -C ../wt/_int-m1 log"), c) is None
+    assert "loop note" in guard.check(ev("echo x > ../wt/_int-m1/a.py"), c)
+    assert guard.check({"tool_name": "Edit", "tool_input": {"file_path": str(tmp_path / "wt/_int-m1/a.py")},
+                        "cwd": str(tmp_path)}, c)
+    # Workers keep their old rules: the shell scope check is for meta sessions only
+    assert guard.check(ev("echo x > ../repo/a.py", "wt/w-1"), guard_env(tmp_path, "worker")) is None
+
+
+def test_checkpoint_and_restore_after_run(tmp_path):
+    from agentloop import gitops
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    gitops.git(repo, "init", "-q", "-b", "main")
+    (repo / "a.py").write_text("a\n")
+    gitops.git(repo, "add", "-A")
+    gitops.git(repo, *gitops.BOT, "commit", "-qm", "init")
+    wt = gitops.ensure_integration(tmp_path, "g1", "main")
+    # The meta-work's change is committed under its name; .venv/ stays out from the start
+    (wt / "b.py").write_text("b\n")
+    (wt / ".venv").mkdir()
+    (wt / ".venv" / "x").write_text("")
+    head = gitops.checkpoint(tmp_path, "g1", "meta-work(mw-1)", "meta-work(mw-1): turn 1")
+    assert gitops.git(wt, "log", "-1", "--format=%an|%s") == "meta-work(mw-1)|meta-work(mw-1): turn 1"
+    assert gitops.git(wt, "show", "--name-only", "--format=", head) == "b.py"
+    assert gitops.checkpoint(tmp_path, "g1", "meta-work(mw-1)", "again") == head  # nothing new, no commit
+    # Off the integration branch, nothing is committed and the caller is told
+    gitops.git(wt, "checkout", "-q", "-b", "side")
+    (wt / "c.py").write_text("c\n")
+    try:
+        gitops.checkpoint(tmp_path, "g1", "meta-work(mw-1)", "x")
+        raise AssertionError("checkpoint must refuse a worktree off its branch")
+    except RuntimeError as exc:
+        assert "side" in str(exc)
+    gitops.git(wt, "checkout", "-q", "loop/g1/integration")
+    gitops.checkpoint(tmp_path, "g1", "meta-work(mw-1)", "c")
+    # A run's tracked edits and new files are undone; files that were there before and ignored ones stay
+    (wt / "keep.txt").write_text("mine\n")
+    before = gitops.untracked(wt)
+    (wt / "a.py").write_text("changed\n")
+    (wt / "out" / "deep").mkdir(parents=True)
+    (wt / "out" / "deep" / "log.txt").write_text("")
+    (wt / ".venv" / "y").write_text("")
+    changed, created = gitops.restore_after_run(wt, before)
+    assert "changed" in changed and created == ["out/deep/log.txt"]
+    assert (wt / "a.py").read_text() == "a\n" and not (wt / "out").exists()
+    assert (wt / "keep.txt").exists() and (wt / ".venv" / "y").exists()
 
 
 def test_guard_rm_edge_cases(tmp_path):

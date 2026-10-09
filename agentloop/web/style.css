@@ -83,7 +83,7 @@ h3 { font-size: 13px; }
 .crumbs { color: var(--faint); font-size: 12px; }
 .goal-title { font-size: 14px; font-weight: 600; flex-wrap: nowrap; min-width: 0; }
 .goal-title .gt { overflow-wrap: anywhere; }
-.goal-title .pill, .goal-title .thinking { font-weight: 400; }
+.goal-title .pill { font-weight: 400; }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* boxes: a titled frame like a TUI pane */
@@ -114,6 +114,8 @@ h3 { font-size: 13px; }
 .btn.del { border-color: var(--border); color: var(--faint); }
 .btn.del:hover:not(:disabled) { border-color: var(--bad); background: var(--bad); color: var(--bg); }
 .btn:disabled { opacity: .45; cursor: default; }
+.advisor-status.dormant { opacity: .45; }
+.advisor-status.active { color: var(--run); border-color: var(--run); }
 .icon-btn { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 4px; font-size: 14px; }
 .icon-btn:hover { color: var(--fg); }
 input[type=text], input[type=number], select, textarea {
@@ -138,6 +140,9 @@ label.inline { display: inline-flex; gap: 6px; align-items: center; color: var(-
 .thinking { color: var(--run); font-size: 12px; }
 .thinking::after { content: '▍'; animation: blink 1s steps(1) infinite; margin-left: 2px; }
 @keyframes blink { 50% { opacity: 0; } }
+/* eight 45° steps turn the bar into the terminal spinner | / - \ */
+.spin { display: inline-block; width: 1ch; text-align: center; animation: spin .8s steps(8) infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .meter { height: 4px; background: var(--border); margin: 4px 0; }
 .meter i { display: block; height: 100%; background: var(--accent); }
 .meter.warn i { background: var(--warn); } .meter.bad i { background: var(--bad); }
@@ -174,12 +179,13 @@ table.t { width: 100%; border-collapse: collapse; }
 /* status line: plan │ workers │ turns │ time │ infra */
 .strip { display: flex; flex-wrap: wrap; border: 1px solid var(--border); margin-top: 8px; }
 /* segments share the width and wrap to a second line rather than cut text */
-.seg { display: flex; flex: 1 0 auto; align-items: center; gap: 7px; padding: 6px 12px; border-right: 1px solid var(--border); white-space: nowrap; }
+.seg { display: flex; flex: 1 0 auto; align-items: baseline; gap: 7px; padding: 6px 12px; border-right: 1px solid var(--border); white-space: nowrap; }
 .seg:last-child { border-right: 0; }
 .seg .k { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .seg .v { font-weight: 600; }
 .seg .s { color: var(--muted); font-size: 11px; }
-.seg .meter { width: 60px; margin: 0; }
+.planbar { display: flex; gap: 2px; height: 6px; align-self: center; }
+.planbar i { flex: 1; background: var(--muted); } .planbar i.done { background: var(--accent); }
 .c-cpu { color: var(--accent); } .c-ram { color: var(--reply); } .c-gpu { color: var(--warn); }
 .ov-main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 18px; }
 .layer.col { margin-top: 0; padding: 18px 10px 10px; display: flex; flex-direction: column; gap: 18px; min-height: 0; }

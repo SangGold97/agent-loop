@@ -19,12 +19,16 @@ sessions, merges their work and closes the goal; the human steers from the web U
 - **Control plane**: `server.py` (FastAPI) serves the UI and `/api/agent/<cmd>`, which the `loop` CLI (`cli.py`)
   calls from meta sessions using the `LOOP_API` / `LOOP_TOKEN` env vars. `engine.py` holds the logic; state is SQLite
   (`db.py`, under `state/`).
-- **Event loop per goal**: everything for the meta-work (kickoff, worker digests, notes, budget, system messages)
+- **Event loop per goal**: everything for the meta-work (kickoff, worker digests, advice, notes, budget, system messages)
   goes into the goal's `inbox` table. `Engine.meta_loop` drains it into one meta-work turn; items stay in flight
   (`consumed=2`) until the turn ends and go back to the queue on crash or restart.
+- **Advisor**: `loop advise` queues a question in the same inbox; the engine dispatches a new `meta-advisor`
+  session for one turn and returns its final text as `[Advice]`. Consultations share `max_meta_turns` and are
+  read-only like a meta-chat (guard, `loop` API, change report after the turn).
 - **Worker turn**: runs in its own worktree on `loop/<goal>/<role>-<sid>`, is snapshot-committed, and its final
   report + diff become a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
-  `loop/<goal>/integration`, checked out at `wt/_int-<goal>` (`gitops.py`).
+  `loop/<goal>/integration`, checked out at `wt/_int-<goal>` (`gitops.py`). The meta-work may also change code
+  there; `Engine.checkpoint` commits those changes before a spawn, merge or `loop done` and after each turn.
 - **Running a CLI**: `runner.py` starts each turn in `systemd-run --user --scope` (anything left in the scope when
   the CLI exits is killed and reported as `TurnResult.leftover`) and streams JSON lines through an
   adapter (`adapters/claude.py`, `adapters/codex.py`) that maps vendor events to the normalized events listed in

@@ -108,7 +108,7 @@ class Runner:
         adapter = ADAPTERS[spec.agent]
         argv, unit = adapter.argv(spec), None
         # Every session gets a named scope so an unclean restart can find and stop orphans;
-        # workers additionally get a hard memory cap
+        # sessions that run project jobs additionally get a hard memory cap
         if systemd_available():
             unit = f"{unit_prefix()}-{key}-{int(time.time() * 1000)}"
             caps = ["-p", f"MemoryMax={memory_max_gb}G", "-p", "MemorySwapMax=0"] if memory_max_gb else []

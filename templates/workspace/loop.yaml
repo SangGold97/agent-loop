@@ -10,14 +10,18 @@ defaults:
     effort: high
     autocompact: null         # tokens before auto-compaction (null = CLI default)
     rotate_at_tokens: null    # start a fresh meta-work session when context exceeds this
+  meta_advisor:               # consulted by the meta-work through loop advise
+    agent: claude
+    model: opus
+    effort: high
   workers:                    # the meta-work picks the CLI per worker; model/effort are fixed here
     claude: {enabled: true, model: opus, effort: high, autocompact: null}
     codex:  {enabled: true, model: gpt-6-astra, effort: high, autocompact: null}
   budget:                     # tokens and time are tracked, not limited
     max_concurrent_workers: 3
     max_worker_turns: 40      # spawn + send, over the whole goal
-    max_meta_turns: 80
-  language: English           # language for the human (plan, journal, report, chat); agents talk to each other in English
+    max_meta_turns: 80        # meta-work + advisor turns
+  language: English           # human-facing text: plan, journal, report, chat and advice; worker prompts use English
   base_branch: null           # null = the branch repo/ has checked out when the goal starts; its PR targets it
 
 digest:                       # what a finished worker turn sends back to the meta-work

@@ -135,10 +135,15 @@ def check_agent_conf(agent: str, conf: dict, catalog: dict) -> str | None:
 def config_errors(doc: dict) -> list[str]:
     """Agent choices in a goal config (or loop.yaml `defaults`) that the installed CLIs reject."""
     catalog, errors = load_models(), []
-    mw = doc.get("meta_work") or {}
-    if mw:
+    for kind in ("meta_work", "meta_advisor"):
+        mw = doc.get(kind) or {}
+        if not isinstance(mw, dict):
+            errors.append(f"{kind} must be a mapping of agent, model and effort")
+            continue
+        if not mw:
+            continue
         if mw.get("agent") not in ADAPTERS:
-            errors.append(f"meta_work.agent must be claude or codex, not {mw.get('agent')!r}")
+            errors.append(f"{kind}.agent must be claude or codex, not {mw.get('agent')!r}")
         else:
             errors.append(check_agent_conf(mw["agent"], mw, catalog))
     for agent, conf in (doc.get("workers") or {}).items():

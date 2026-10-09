@@ -61,11 +61,15 @@ function closeModal() {
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 function pill(status, text) { return `<span class="pill ${esc(status)}">${esc(label(text || status))}</span>`; }
-function meter(used, max, progress = false) {
+// A goal's or agent's status; running gets a spinner instead of a separate "thinking" line.
+// The delay ties the spinner's phase to the clock so repainting the header does not restart it.
+const agentPill = st => st === 'running'
+  ? `<span class="pill running"><span class="spin" style="animation-delay:-${Date.now() % 800}ms">|</span> running</span>` : pill(st);
+function meter(used, max) {
   if (!max) return '<div class="meter"><i style="width:0"></i></div>';
   const pct = Math.min(100, (used / max) * 100);
-  // A limit turns amber/red as it fills; progress (e.g. the plan checklist) stays green
-  const cls = progress ? '' : pct >= 100 ? 'bad' : pct >= 80 ? 'warn' : '';
+  // A limit turns amber/red as it fills
+  const cls = pct >= 100 ? 'bad' : pct >= 80 ? 'warn' : '';
   return `<div class="meter ${cls}"><i style="width:${pct}%"></i></div>`;
 }
 const box = (title, body, attrs = '') => `<div class="box" ${attrs}><div class="lt">${title}</div>${body}</div>`;
@@ -152,17 +156,18 @@ function configForm(conf) {
   return `<div class="cfg">
     <div class="k">agents</div><div>${agentHeader()}
       ${agentRow('meta_work', mw, { title: 'meta-work' })}
+      ${agentRow('meta_advisor', conf.meta_advisor || {}, { title: 'meta-advisor', noAutocompact: true })}
       ${AGENTS.map(a => agentRow(`worker:${a}`, { agent: a, ...(wk[a] || {}) }, { title: 'worker', toggle: true, fixedAgent: true })).join('')}
       <div class="hint">The meta-work picks <code>--agent claude|codex</code> per worker; model and effort are always taken from here.</div></div>
     <div class="k">rotate</div><div class="row"><span class="muted small">start a fresh meta-work session when its context exceeds</span>
       <input type="text" data-rotate value="${esc(mw.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)" style="width:160px"></div>
     <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'concurrent workers')}
-      ${num('max_worker_turns', b.max_worker_turns, 'worker turns')}${num('max_meta_turns', b.max_meta_turns, 'meta-work turns')}</div>
+      ${num('max_worker_turns', b.max_worker_turns, 'worker turns')}${num('max_meta_turns', b.max_meta_turns, 'meta-work + advisor turns')}</div>
     <div class="k">language</div><div class="row"><select data-lang style="width:160px">${['English', 'Vietnamese'].concat(
         ['English', 'Vietnamese'].includes(conf.language || 'English') ? [] : [conf.language]).map(l => `<option ${l === (conf.language || 'English') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
       <span class="hint">for plan, journal, report and chat replies to you; meta-work and workers talk to each other in English</span></div>
     <div class="k">git</div><div class="row"><input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo/'s current branch" style="width:160px">
-      <span class="hint">base branch: the integration branch starts from it and the PR opened by push targets it; empty = the branch repo/ has checked out when the goal starts</span></div>
+      <span class="hint">base branch: the integration branch starts from it and the PR opened by push &amp; create PR targets it; empty = the branch repo/ has checked out when the goal starts</span></div>
   </div>`;
 }
 function readConfigForm(root) {
@@ -177,7 +182,8 @@ function readConfigForm(root) {
   if (!Object.values(workers).some(w => w.enabled)) throw new Error('enable at least one worker agent');
   const budget = {};
   $$('[data-b]', root).forEach(i => { budget[i.dataset.b] = i.value.trim() === '' ? null : Number(i.value); });
-  return { meta_work: metaWork, workers, budget, language: $('[data-lang]', root).value,
+  return { meta_work: metaWork, meta_advisor: readAgentRow(rows.find(r => r.dataset.key === 'meta_advisor')),
+    workers, budget, language: $('[data-lang]', root).value,
     base_branch: $('[data-base]', root).value.trim() || null };
 }
 
@@ -401,8 +407,7 @@ function renderGoalHead() {
   buttons.push('<button class="btn small del" data-act="delete" title="Delete this goal with its sessions">delete</button>');
   $('#m-head').innerHTML = `<div class="page-head"><div class="row goal-title" title="${esc(gid)}">
       <a href="#/ws/${ws}">${esc(ws)}</a><span class="faint">/</span><span class="gt">${esc(M.config.title)}</span>
-      ${pill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''}
-      ${M.meta_active ? '<span class="thinking">meta-work is thinking</span>' : ''}</div>
+      ${agentPill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''}</div>
     <div class="actions">${buttons.join('')}</div></div>`;
   $$('[data-act]', $('#m-head')).forEach(b => b.onclick = () => goalAction(b.dataset.act));
 }
@@ -413,7 +418,7 @@ function reviewButtons() {
     : `push loop/${S.route.gid}/integration to origin and open a PR into ${M.base}` + (M.row.pushed ? ` (last pushed ${fmtTime(M.row.pushed)})` : '');
   return (st === 'awaiting_review' ? '<button class="btn small" data-act="reopen">reopen with note</button><button class="btn small primary" data-act="accept">accept</button>' : '')
     + (M.row.pr ? `<a class="btn small" href="${esc(M.row.pr)}" target="_blank" rel="noopener">PR ↗</a>` : '')
-    + `<button class="btn small ${canPush && !M.row.pushed ? 'primary' : ''}" data-act="push" ${canPush ? '' : 'disabled'} title="${esc(why)}">push</button>`;
+    + `<button class="btn small ${canPush && !M.row.pushed ? 'primary' : ''}" data-act="push" ${canPush ? '' : 'disabled'} title="${esc(why)}">push &amp; create PR</button>`;
 }
 async function goalAction(action) {
   const { ws, gid } = S.route;
@@ -525,12 +530,17 @@ function renderStats() {
   const workers = M.sessions.filter(s => s.kind === 'worker');
   const running = workers.filter(s => simpleStatus(s) === 'running').length;
   const lim = v => v || '∞';
-  const seg = (k, v, sub = '', title = '') => `<div class="seg" title="${esc(title)}"><span class="k">${k}</span><span class="v">${v}</span>${sub ? `<span class="s">${sub}</span>` : ''}</div>`;
+  const seg = (k, v, extra = '', title = '') => `<div class="seg" title="${esc(title)}"><span class="k">${k}</span><span class="v">${v}</span>${extra}</div>`;
   $('#ov-stats').innerHTML =
-    seg('plan', `${c.done}/${c.total}`, c.total ? meter(c.done, c.total, true) : 'no checklist', 'checklist items in plan.md checked by the meta-work')
-    + seg('workers', `${running} running`, `${workers.length} total`, `at most ${lim(b.max_concurrent_workers)} at once`)
-    + seg('turns', `worker ${b.worker_turns}/${lim(b.max_worker_turns)}`, `meta ${b.meta_turns}/${lim(b.max_meta_turns)}`)
-    + seg('time', fmtDur(b.hours), b.from ? `${fmtTime(b.from)} → ${b.to ? fmtTime(b.to) : 'now'}` : '', 'active time of the goal');
+    seg('plan', `${c.done}/${c.total}`, c.total ? planBar(c) : '<span class="s">no checklist</span>', 'checklist items in plan.md checked by the meta-work')
+    + seg('workers', `${running} running`, '', `${workers.length} total, at most ${lim(b.max_concurrent_workers)} at once`)
+    + seg('turns', `worker ${b.worker_turns}/${lim(b.max_worker_turns)} · meta ${b.meta_turns}/${lim(b.max_meta_turns)}`)
+    + seg('time', fmtDur(b.hours) + (b.from ? ` · ${fmtTime(b.from)} → ${b.to ? fmtTime(b.to) : 'now'}` : ''), '', 'active time of the goal');
+}
+// One segment per checklist item: done items green, open ones grey
+function planBar(c) {
+  const cells = [...Array(c.total)].map((_, i) => `<i class="${i < c.done ? 'done' : ''}"></i>`).join('');
+  return `<span class="planbar" style="width:${Math.min(c.total * 12, 160)}px">${cells}</span>`;
 }
 // Sidebar INFRA: the host's last two minutes, redrawn with every 1 s sample; click for the infra page
 function renderSideInfra() {
@@ -573,10 +583,8 @@ function renderConfigTab(force) {
           <button class="btn small" data-cancel="${name}">cancel</button><button class="btn small primary" data-save-doc="${name}">save</button></div>`
       : `<div class="md">${md(M.files[name + '.md'])}</div>`);
   };
-  const verify = M.verify.length ? `${M.verify.length} verify command${M.verify.length > 1 ? 's' : ''} run on the integration branch before a success close`
-    : 'no verify: commands; the meta-work judges completion';
   el.innerHTML = `<div class="grid cols-2">${doc('spec', 'spec', 'read-only for agents; a running meta-work is notified with the diff')}
-      ${doc('goal', `goal <span class="x">${esc(verify)}</span>`, 'lines like - verify: `pytest -q` are executed by the platform')}</div>
+      ${doc('goal', 'goal','lines like - verify: `pytest -q` are executed by the platform')}</div>
     <div style="margin-top:18px">${box('agents · budget · git <span class="dirty" id="cfg-dirty"></span>', `<div id="ov-cfg">${configForm(M.config)}</div>
       <div class="row" style="margin-top:8px"><span class="hint">Applies from the next turn. Changing the meta-work agent starts a fresh meta-work session (plan and journal carry over).</span>
         <span class="spacer"></span><button class="btn small primary" id="cfg-save">save config</button></div>`)}</div>`;
@@ -671,9 +679,7 @@ function renderLive(key) {
   if (!el || (key === 'modal' && !S.modal)) return;
   const { sids, who } = feedSource(key);
   const text = sids.map(id => S.partial[id]).find(Boolean);
-  const running = sids.some(id => { const s = S.goal?.sessions.find(x => x.id === id); return s && simpleStatus(s) === 'running'; });
-  const html = text ? `<div class="fr reply live"><div class="fl">◀ ${esc(who.reply)}</div><pre class="stream">${esc(text)}<span class="cursor"></span></pre></div>`
-    : running ? '<div class="fe"><span class="thinking">working</span></div>' : '';
+  const html = text ? `<div class="fr reply live"><div class="fl">◀ ${esc(who.reply)}</div><pre class="stream">${esc(text)}<span class="cursor"></span></pre></div>` : '';
   const fp = $('.fp', el);
   if (fp.innerHTML !== html) fp.innerHTML = html;
   stick(el);
@@ -700,7 +706,8 @@ function agentLine(s, tokens) {
 
 // META-WORK: every meta-work session of the goal, oldest first, as one continuous feed
 function renderMetaWork() {
-  $('#ov-mw').innerHTML = `<div class="lt">meta-work</div><div id="mw-head" class="row small pane-head"></div>${feedShell('meta-work')}`;
+  $('#ov-mw').innerHTML = `<div class="lt row">meta-work <span class="spacer"></span><button id="mw-advisor" class="btn small advisor-status"></button></div>
+    <div id="mw-head" class="row small pane-head"></div>${feedShell('meta-work')}`;
   renderMetaWorkHead();
   const sessions = S.goal.sessions.filter(s => s.kind === 'meta-work');
   Promise.all(sessions.map(s => loadFeed(s.id))).then(() => paintFeed('meta-work'));
@@ -708,12 +715,30 @@ function renderMetaWork() {
 function renderMetaWorkHead() {
   const el = $('#mw-head');
   if (!el) return;
+  renderAdvisorStatus();
   const sessions = S.goal.sessions.filter(s => s.kind === 'meta-work');
   const cur = sessions.find(s => s.id === S.goal.row.meta_work) || sessions[sessions.length - 1];
   if (!cur) { el.innerHTML = `<span class="muted">${agentLine({ agent: S.goal.config.meta_work.agent, ...S.goal.config.meta_work })}</span>`; return; }
   el.innerHTML = `<span class="muted">${agentLine(cur, cur.context)}</span>
-    <span class="spacer"></span>${pill(simpleStatus(cur))}<button class="btn small" data-log="${cur.id}">expand</button>`;
+    <span class="spacer"></span>${agentPill(simpleStatus(cur))}<button class="btn small" data-log="${cur.id}">expand</button>`;
   $('[data-log]', el).onclick = () => sessionModal(cur.id);
+}
+
+// Advice uses the existing session log window; the overview only adds one status button.
+function renderAdvisorStatus() {
+  const btn = $('#mw-advisor');
+  if (!btn) return;
+  const sessions = S.goal.sessions.filter(s => s.kind === 'meta-advisor');
+  const running = sessions.some(s => simpleStatus(s) === 'running');
+  const queued = sessions.some(s => s.status === 'queued');
+  btn.className = `btn small advisor-status ${running ? 'active' : 'dormant'}`;
+  btn.disabled = !sessions.length;
+  btn.innerHTML = `ADVISOR ${running ? agentPill('running') : queued ? pill('pending', 'queued') : ''}`;
+  btn.title = sessions.length ? `${sessions.length} consultation(s) · open advice` : 'No consultations yet';
+  btn.onclick = () => {
+    const current = sessions.find(s => simpleStatus(s) === 'running') || sessions[sessions.length - 1];
+    if (current) sessionModal(current.id);
+  };
 }
 
 // META-CHAT: chats bound to this goal; agent/model/effort chosen per chat
@@ -740,7 +765,7 @@ function renderChatBar() {
   const cur = chats.find(c => c.id === S.chat.sid);
   bar.innerHTML = `<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
       chat ${i + 1} · ${agentLine(c, c.context)}</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
-    ${cur ? pill(simpleStatus(cur)) : ''}<button class="btn small" id="chat-new-btn">+ new chat</button>
+    ${cur ? agentPill(simpleStatus(cur)) : ''}<button class="btn small" id="chat-new-btn">+ new chat</button>
     <button class="btn small" id="chat-expand">${S.chatOut ? 'collapse' : 'expand'}</button>`;
   $('#chat-expand').onclick = () => S.chatOut ? closeModal() : expandChat();
   $('#chat-sel').onchange = e => { S.chat.sid = e.target.value; S.chat.liveEvs = []; loadChatMessages(); };
@@ -795,8 +820,8 @@ function paintChatLive() {
   if (!el) return;
   const text = S.partial[S.chat.sid];
   el.innerHTML = S.chat.busy ? S.chat.liveEvs.filter(e => e.type !== 'text').map(e => tuiEvent(e, { prompt: '', reply: 'meta-chat' })).join('')
-    + (text ? `<div class="fr reply live"><div class="fl">◀ meta-chat</div><pre class="stream">${esc(text)}<span class="cursor"></span></pre></div>`
-      : '<div class="fe"><span class="thinking">thinking</span></div>') : '';
+    + (text ? `<div class="fr reply live"><div class="fl">◀ meta-chat</div><pre class="stream">${esc(text)}<span class="cursor"></span></pre></div>` : '')
+    : '';
   stick($('#chat-feed'));
 }
 function setComposer(enabled) {
@@ -830,7 +855,7 @@ function saveNoteModal(text) {
 const workerOpen = w => simpleStatus(w) === 'running' || !!S.open[w.id];
 function workerHead(w) {
   const st = simpleStatus(w);
-  return `<span class="fold">${workerOpen(w) ? '▾' : '▸'}</span><span class="role">${esc(w.role)}</span>${pill(st)}
+  return `<span class="fold">${workerOpen(w) ? '▾' : '▸'}</span><span class="role">${esc(w.role)}</span>${agentPill(st)}
     <span class="spacer"></span><span class="faint wmeta">${agentLine(w, w.context)}</span>
     <button class="btn small" data-log="${w.id}">expand</button>${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}`;
 }
@@ -880,11 +905,15 @@ async function sessionModal(sid) {
   const s = S.goal.sessions.find(x => x.id === sid) || { id: sid };
   const evs = await api(`/api/sessions/${sid}/events?limit=3000`);
   const title = s.kind === 'worker' ? s.role : s.kind;
+  const advisors = S.goal.sessions.filter(x => x.kind === 'meta-advisor');
+  const picker = s.kind === 'meta-advisor' ? `<label class="row small">Consultation <select id="advice-session">${advisors.map((x, i) =>
+    `<option value="${esc(x.id)}" ${x.id === sid ? 'selected' : ''}>${i + 1} · ${esc(x.id)} · ${esc(x.status)} · ${fmtTime(x.created)}</option>`).join('')}</select></label>` : '';
   modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s, s.context)}</div><h2>${esc(title)}</h2></div>
       <button class="icon-btn" data-close>×</button></div>
-    ${s.cwd ? `<div class="faint small">${esc(s.cwd)}${s.branch ? ' · ' + esc(s.branch) : ''}</div>` : ''}
+    ${picker}${s.cwd ? `<div class="faint small">${esc(s.cwd)}${s.branch ? ' · ' + esc(s.branch) : ''}</div>` : ''}
     <div class="modal-feed">${feedShell('modal')}</div>`, true);
   S.modal = { sid, evs: evs.events };
+  if ($('#advice-session')) $('#advice-session').onchange = e => sessionModal(e.target.value);
   renderFeed('modal');
 }
 
@@ -945,7 +974,7 @@ async function renderGit() {
     ${box('branches', `${g.branches.length ? `<table class="t"><tr><th>branch</th><th>ahead</th><th>state</th><th>last commit</th></tr>
       ${g.branches.map(b => `<tr><td class="small">${esc(b.branch)}</td><td>${b.ahead}</td><td>${b.branch.endsWith('/integration') ? pill('running', 'integration') : b.merged ? pill('ok', 'merged') : pill('pending', 'not merged')}</td>
       <td class="small">${esc(b.subject)}<div class="faint">${esc(b.when)}</div></td></tr>`).join('')}</table>` : '<div class="empty">No branches yet (created when the goal starts).</div>'}
-      <p class="hint">After accept, push sends the integration branch to origin and opens a PR into ${esc(g.base)}; merging the PR is yours.</p>`)}
+      <p class="hint">After accept, push &amp; create PR sends the integration branch to origin and opens a PR into ${esc(g.base)}; merging the PR is yours.</p>`)}
     ${box(`integration branch <span class="x">commits not in ${esc(g.base)}</span>`, g.integration_log.length ? `<table class="t">${g.integration_log.map(c => `<tr><td class="small">${esc(c.hash)}</td><td class="small">${esc(c.subject)}</td><td class="faint small">${esc(c.when)}</td></tr>`).join('')}</table>` : '<div class="empty">Empty.</div>')}</div>
     <div style="margin-top:22px">${box('workspace audit log (this goal)', auditTable(g.workspace_log))}</div>`;
 }

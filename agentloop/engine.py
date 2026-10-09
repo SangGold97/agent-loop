@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ from .runner import Runner, child_env, unit_prefix
 
 log = logging.getLogger("agentloop")
 VERIFY_TIMEOUT_S = 900
-PREFIX = {"meta-work": "mw", "worker": "w", "meta-chat": "mc"}
+PREFIX = {"meta-work": "mw", "worker": "w", "meta-chat": "mc", "meta-advisor": "ma"}
 LIMIT_SLACK_S = 60  # retry this long after a vendor's announced usage-limit reset
 
 
@@ -80,7 +81,7 @@ class Engine:
         self.meta_active: set[tuple[str, str]] = set()
         self.vendor_limits: dict[str, float] = {}  # agent CLI -> when its usage limit resets
         self.waking: set[tuple[str, str]] = set()  # goals whose meta-work waits for a usage-limit reset
-        self.merge_locks: dict[tuple[str, str], threading.Lock] = {}
+        self.int_locks: dict[tuple[str, str], threading.Lock] = {}  # one per goal's integration worktree
         self.tasks: set[asyncio.Task] = set()
         self.task_goal: dict[asyncio.Task, tuple[str, str]] = {}  # tasks working on a goal, awaited by deletes
         self.agent_ops: dict[str, dict] = {}
@@ -159,10 +160,40 @@ class Engine:
         if "status" in fields:
             self.publish("goal_status", ws=ws, goal=gid, status=fields["status"])
 
+    @contextlib.asynccontextmanager
+    async def int_lock(self, ws: str, gid: str):
+        """Serialize git work in a goal's single integration worktree (checkpoints, merges, verify runs). The
+        lock is taken in a thread so a waiting caller never stalls the event loop."""
+        lock = self.int_locks.setdefault((ws, gid), threading.Lock())
+        await asyncio.to_thread(lock.acquire)
+        try:
+            yield
+        finally:
+            lock.release()
+
+    def checkpoint(self, ws: str, gid: str, sid: str, why: str) -> str:
+        """Commit the meta-work's own changes in the integration worktree; the caller holds the integration lock."""
+        try:
+            return gitops.checkpoint(self.wsp(ws), gid, f"meta-work({sid})", f"meta-work({sid}): {why}")
+        except RuntimeError as exc:
+            raise AgentError(f"could not commit your changes in the integration worktree: {exc}") from None
+
+    @staticmethod
+    def checkout_state(path: Path) -> str:
+        """Branch, HEAD and uncommitted files of a checkout, to notice a turn that changed one it must not touch."""
+        if not path.exists():
+            return ""
+        return "\n".join(gitops.git(path, *args, check=False)
+                         for args in (("symbolic-ref", "-q", "HEAD"), ("rev-parse", "HEAD"), ("status", "--porcelain")))
+
     def workers(self, ws: str, gid: str, running_only: bool = False) -> list[dict]:
         rows = self.db.q("SELECT * FROM sessions WHERE ws=? AND goal=? AND kind='worker' ORDER BY created",
                          ws, gid)
         return [r for r in rows if r["status"] == "running"] if running_only else rows
+
+    def advisors(self, ws: str, gid: str) -> list[dict]:
+        return self.db.q("SELECT * FROM sessions WHERE ws=? AND goal=? AND kind='meta-advisor' "
+                         "AND status IN ('queued', 'running') ORDER BY created", ws, gid)
 
     def new_session(self, ws: str, gid: str, kind: str, role: str, conf: dict, cwd: Path,
                     parent: str | None = None, branch: str | None = None, gpu: bool = False,
@@ -190,6 +221,7 @@ class Engine:
             for t in cut:
                 self.db.update("turns", {"id": t["id"]}, status="interrupted", ended=time.time())
             self.db.update("sessions", {"id": s["id"]}, status="interrupted", turns=s["turns"] + len(cut))
+        self.recover_advice()
         for m in self.db.q("SELECT * FROM goals WHERE status='running'"):
             names = [s["id"] for s in self.db.q("SELECT id FROM sessions WHERE ws=? AND goal=? AND "
                                                 "status='interrupted' AND kind='worker'", m["ws"], m["id"])]
@@ -239,6 +271,7 @@ class Engine:
         running = m["status"] == "running" and m["started"]
         active = (m["active_s"] or 0) + (time.time() - m["started"] if running else 0)
         return {**cfg, "running_workers": len(self.workers(ws, gid, running_only=True)),
+                "running_advisors": len(self.advisors(ws, gid)),
                 "worker_turns": m["worker_turns"], "meta_turns": m["meta_turns"], "hours": active / 3600,
                 "from": m["first_started"], "to": None if running else m["ended"]}
 
@@ -265,9 +298,11 @@ class Engine:
                 self.spawn(self.runner.kill(w["id"], stopped=True))
         elif b["running_workers"]:
             return  # soft limit: let running workers report first
+        if b["running_advisors"]:
+            return  # reserved advisor turns finish before the meta-work's final budget turn
         self.set_goal(ws, gid, final_turn=1)
         self.db.push_inbox(ws, gid, "budget", {"text": (
-            f"[Budget exhausted: {reason}] No more workers can be started. This is your final turn: "
+            f"[Budget exhausted: {reason}] No more workers or advisors can be started. This is your final turn: "
             "call `loop done --status partial` (or `success` if the goal is met) with a report.")})
         self.kick(ws, gid)
 
@@ -311,6 +346,11 @@ class Engine:
         if sess["kind"] == "meta-work":
             return (f"MODE: META-WORK for goal {gid} in workspace {ws}. Goal dir: {gdir}. "
                     f"Workspace root: {p}. Follow the META-WORK section of your AGENTS.md.{lang}")
+        if sess["kind"] == "meta-advisor":
+            return (f"MODE: META-ADVISOR for goal {gid} in workspace {ws}. Goal directory: {gdir}. "
+                    "Follow the META-ADVISOR section of your AGENTS.md. Read spec.md, goal.md, plan.md and "
+                    "journal.md to understand the objective and current progress. "
+                    f"Write your advice in {goal_config(p, gid)['goal'].get('language') or 'English'}.")
         orch = self.goal_row(ws, gid)["meta_work"] or "not started"
         return (f"MODE: META-CHAT for goal {gid} in workspace {ws}. Goal dir: {gdir}. Workspace root: {p}. "
                 f"Meta-work session: {orch}. Follow the META-CHAT section of your AGENTS.md; "
@@ -320,7 +360,7 @@ class Engine:
         """Agent settings for the next turn: fixed by the human config for meta-work and workers,
         chosen at creation for a meta-chat."""
         keys = ("model", "effort", "autocompact")
-        if sess["kind"] == "meta-chat":
+        if sess["kind"] in ("meta-chat", "meta-advisor"):
             return {k: sess[k] for k in keys}
         mc = goal_config(self.wsp(sess["ws"]), sess["goal"])["goal"]
         conf = mc["meta_work"] if sess["kind"] == "meta-work" else mc["workers"].get(sess["agent"], {})
@@ -350,6 +390,8 @@ class Engine:
                 spec.settings_file, spec.add_dirs = workspace.claude_settings(p, "worker"), [gdir, p / "data"]
         else:
             env.update({"LOOP_API": self.api_url, "LOOP_TOKEN": sess["token"], "PATH_PREPEND": self.bin_dir})
+            if sess["kind"] in ("meta-work", "meta-advisor"):  # GPUs are handed out only through `loop spawn --gpu`
+                env["CUDA_VISIBLE_DEVICES"] = ""
             spec.system_text = self.mode_text(sess)
             if sess["agent"] == "codex":
                 spec.codex_home = workspace.codex_home(p, "meta")
@@ -357,6 +399,8 @@ class Engine:
                 spec.settings_file, spec.add_dirs = workspace.claude_settings(p, "meta"), [p]
         if sess["agent"] == "codex":
             spec.last_message_file = self.logs(ws, sid)[0].with_name(f"{sid}.t{n}.last.txt")
+        if sess["kind"] == "meta-advisor":
+            spec.resume_id = None  # every consultation starts with a fresh context
         return spec
 
     async def run_turn(self, sess: dict, prompt: str, start_commit: str | None = None):
@@ -377,7 +421,8 @@ class Engine:
             self.bus.publish({"type": "session_event", "ws": ws, "goal": gid, "session": sid, "turn": n,
                               "event": evt})
 
-        mem = cfg["infra"]["worker_memory_max_gb"] if sess["kind"] == "worker" else None
+        # Workers and the meta-work run project jobs, so both get the memory cap; a meta-chat only reads the project
+        mem = cfg["infra"]["worker_memory_max_gb"] if sess["kind"] in ("worker", "meta-work", "meta-advisor") else None
         res = await self.runner.run(sid, spec, raw_log=raw, event_log=events, on_event=on_event,
                                     timeout_s=cfg["turn_timeout_min"] * 60, memory_max_gb=mem)
         status = "stopped" if res.stopped else ("failed" if res.error else "idle")
@@ -386,7 +431,8 @@ class Engine:
                        tokens=cur["tokens"] + res.tokens,
                        context=res.context or cur["context"], status=status, updated=time.time())
         self.db.update("turns", {"id": turn_id}, ended=time.time(), status=status, exit_code=res.exit_code,
-                       tokens=res.tokens, final=(res.final or res.error)[:20000])
+                       tokens=res.tokens, final=(res.final or res.error) if sess["kind"] == "meta-advisor"
+                       else (res.final or res.error)[:20000])
         self._log_event(ws, gid, sid, n, events, {"type": "turn_end", "n": n, "status": status, "error": res.error,
                                                    "tokens": res.tokens})
         self.publish("session_status", ws=ws, goal=gid, session=sid, status=status, turn=n)
@@ -408,13 +454,12 @@ class Engine:
         return (f"[Kickoff] Goal \"{mc['title']}\" ({gid}) in workspace {ws}.\n"
                 f"- Goal dir: {gdir}. Read spec.md and goal.md first (human-owned, do not edit). "
                 "You own plan.md and journal.md there.\n"
-                f"- Project repo: {p / 'repo'} (its base branch is protected; work lands via the integration branch). Integration branch {gitops.int_branch(gid)} is checked out "
-                f"at {p / 'wt' / ('_int-' + gid)}.\n"
+                f"- Project repo: {p / 'repo'} (the human's checkout: read it, do not change it). Integration branch "
+                f"{gitops.int_branch(gid)} is checked out at {gitops.int_worktree(p, gid)}.\n"
                 f"- Worker agents (the human fixed model and effort; you pick the CLI and name the role):\n{agents}\n"
-                f"- Each worker is capped at {cfg['infra']['worker_memory_max_gb']} GB RAM and sees no GPU unless "
-                "spawned with --gpu.\n"
-                f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.\n"
-                "Write plan.md, add a journal entry, dispatch workers with `loop spawn`, then end your turn.")
+                f"- Your turns and each worker are capped at {cfg['infra']['worker_memory_max_gb']} GB RAM; only "
+                "workers spawned with --gpu see a GPU.\n"
+                f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.")
 
     async def start_goal(self, ws: str, gid: str) -> None:
         p, m = self.wsp(ws), self.goal_row(ws, gid)
@@ -452,7 +497,12 @@ class Engine:
                              started=None)
         elif m["status"] != status:
             self.set_goal(ws, gid, status=status)
-        kinds = ("worker", "meta-work") if meta_work else ("worker",)
+        # A queued consultation has no process yet; cancel its inbox request as well as live advisors.
+        for s in self.advisors(ws, gid):
+            if s["status"] == "queued":
+                self.db.update("sessions", {"id": s["id"]}, status="stopped", updated=time.time())
+                self.advice_result(s, "stopped", "The goal stopped before the consultation started.")
+        kinds = ("worker", "meta-work", "meta-advisor") if meta_work else ("worker", "meta-advisor")
         for s in self.db.q("SELECT id, kind FROM sessions WHERE ws=? AND goal=?", ws, gid):
             if s["kind"] in kinds:
                 await self.runner.kill(s["id"], stopped=True)
@@ -471,6 +521,8 @@ class Engine:
                 m = self.goal_row(ws, gid)
                 if m["status"] != "running":
                     return
+                # Advice requests use the same durable inbox, but are delivered to the advisor, not meta-work.
+                self.dispatch_advice(ws, gid)
                 if not self.db.one("SELECT id FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0",
                                    ws, gid):
                     return
@@ -485,7 +537,7 @@ class Engine:
                 ids = ",".join(str(i["id"]) for i in items)
                 self.db.x(f"UPDATE inbox SET consumed=2 WHERE id IN ({ids})")
                 try:
-                    await self.meta_turn(ws, gid, items)
+                    progressed = await self.meta_turn(ws, gid, items)
                 except Exception as exc:
                     self.db.x(f"UPDATE inbox SET consumed=0 WHERE id IN ({ids}) AND consumed=2")
                     log.exception("meta turn failed for %s/%s", ws, gid)
@@ -493,11 +545,13 @@ class Engine:
                     self.publish("alert", ws=ws, goal=gid, text=f"Meta-work turn crashed, goal paused: {exc!r}")
                     return
                 self.db.x(f"UPDATE inbox SET consumed=1 WHERE id IN ({ids}) AND consumed=2")
-                await self.after_meta_turn(ws, gid, items)
+                await self.after_meta_turn(ws, gid, items, progressed)
         finally:
             self.meta_active.discard(key)
 
-    async def meta_turn(self, ws: str, gid: str, items: list[dict]) -> None:
+    async def meta_turn(self, ws: str, gid: str, items: list[dict]) -> bool:
+        """Run one meta-work turn on the given events. Returns True when the integration branch moved (the
+        meta-work's own commits or merges), which counts as progress even with no worker running."""
         p, m = self.wsp(ws), self.goal_row(ws, gid)
         mc = goal_config(p, gid)["goal"]
         orch = self.db.session(m["meta_work"])
@@ -516,11 +570,32 @@ class Engine:
         busy = self.db.one("SELECT 1 FROM sessions WHERE ws=? AND status='running'", ws)
         workspace.commit_external(p, protected=not busy)
         text = digest.envelope(items, digest.budget_line(self.budget(ws, gid)), self.infra.summary())
-        res, n = await self.run_turn(orch, text)
+        wt = gitops.int_worktree(p, gid)
+        start = gitops.head(wt) if wt.exists() else None
+        repo_before = self.checkout_state(p / "repo")
+        res, n = await self.run_turn(orch, text, start_commit=start)
         reverted = workspace.enforce_protected(p)
         if res.leftover:
             self.db.push_inbox(ws, gid, "system", {"text": leftover_note(res.leftover, "your last turn")},
                                deferred=True)
+        # The meta-work's project changes are saved after every turn, so none depends on it committing them
+        end = start
+        if wt.exists():
+            try:
+                async with self.int_lock(ws, gid):
+                    end = self.checkpoint(ws, gid, orch["id"], f"{gid} turn {n}")
+            except AgentError as exc:
+                end = gitops.head(wt)
+                self.db.push_inbox(ws, gid, "system", {"text": f"[System] At the end of your turn the platform {exc}"},
+                                   deferred=True)
+                self.publish("alert", ws=ws, goal=gid, text=f"Meta-work changes left uncommitted: {exc}")
+            self.db.x("UPDATE turns SET end_commit=? WHERE session=? AND n=?", end, orch["id"], n)
+        # The guard misses some shell writes; a changed repo/ is reported, not reverted (it may be the human's work)
+        if self.checkout_state(p / "repo") != repo_before:
+            self.db.push_inbox(ws, gid, "system", {"text": (
+                "[System] repo/ (branch, HEAD or files) changed during your turn. It is the human's checkout: make "
+                "project changes in the integration worktree only.")}, deferred=True)
+            self.publish("alert", ws=ws, goal=gid, text=f"repo/ changed during meta-work turn {n}; please check it.")
         workspace.commit(p, f"meta-work({orch['id']})", f"meta-work({orch['id']}): {gid} turn {n}", protected=False)
         ids = ",".join(str(i["id"]) for i in items if "id" in i)
         if res.limited_until:
@@ -533,7 +608,7 @@ class Engine:
                     self.db.push_inbox(ws, gid, i["kind"], json.loads(i["payload"]))
             self.publish("alert", ws=ws, goal=gid, text=f"Meta-work CLI {orch['agent']} hit its usage limit; the goal "
                                                         f"resumes after {clock(res.limited_until)}.")
-            return
+            return end != start
         m = self.goal_row(ws, gid)
         fields = {"meta_turns": m["meta_turns"] + 1, "tokens": m["tokens"] + res.tokens}
         if reverted:
@@ -551,13 +626,14 @@ class Engine:
                 self.db.update("goals", {"ws": ws, "id": gid}, **fields)
                 await self.stop_goal(ws, gid, status="paused")
                 self.publish("alert", ws=ws, goal=gid, text=f"Meta-work failed 3 times: {res.error}")
-                return
+                return end != start
             await asyncio.sleep(min(60, 10 * fields["fail_streak"]))
         else:
             fields["fail_streak"] = 0
         self.db.update("goals", {"ws": ws, "id": gid}, **fields)
+        return end != start
 
-    async def after_meta_turn(self, ws: str, gid: str, items: list[dict]) -> None:
+    async def after_meta_turn(self, ws: str, gid: str, items: list[dict], progressed: bool = False) -> None:
         m = self.goal_row(ws, gid)
         if m["status"] != "running":
             return
@@ -568,13 +644,18 @@ class Engine:
             return
         self.check_budget(ws, gid)
         pending = self.db.one("SELECT id FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0", ws, gid)
-        if self.workers(ws, gid, running_only=True) or pending or self.goal_row(ws, gid)["final_turn"]:
+        if self.workers(ws, gid, running_only=True) or self.advisors(ws, gid) or pending \
+                or self.goal_row(ws, gid)["final_turn"]:
+            if progressed:  # work the meta-work did itself next to running workers counts too
+                self.set_goal(ws, gid, idle_streak=0)
             return
-        streak = m["idle_streak"] + 1
+        # Nothing else will trigger a turn: this message continues the goal. A turn that moved the integration
+        # branch did work itself and resets the count; otherwise the goal pauses after repeated idle turns
+        streak = 0 if progressed else m["idle_streak"] + 1
         self.set_goal(ws, gid, idle_streak=streak)
         if streak <= 2:
             self.db.push_inbox(ws, gid, "system", {"text": (
-                "[System] No workers are running and the goal is still open. Dispatch work, or call "
+                "[System] No workers are running and the goal is still open. Continue the work, or call "
                 "`loop done` if the goal is met, progress has stalled, or you need the human.")})
         else:
             await self.stop_goal(ws, gid, status="paused")
@@ -732,6 +813,123 @@ class Engine:
                 self.kick(ws, gid)
         self.publish("file_changed", ws=ws, path=rel)
 
+    def watch_project(self, ws: str, gid: str):
+        """For a session that only reads the project (meta-chat, advisor): returns a function naming what the
+        session changed anyway. The guard cannot see every shell write, so changes are reported, not reverted.
+        In the integration worktree only uncommitted files count, and only while no meta-work turn (which
+        changes and commits them) runs."""
+        p, key = self.wsp(ws), (ws, gid)
+        int_wt = gitops.int_worktree(p, gid)
+        dirty = lambda: gitops.git(int_wt, "status", "--porcelain", check=False) if int_wt.exists() else ""
+        repo_before, int_before = self.checkout_state(p / "repo"), None if key in self.meta_active else dirty()
+
+        def changed() -> list[str]:
+            hit = ["repo/"] if self.checkout_state(p / "repo") != repo_before else []
+            if int_before is not None and key not in self.meta_active and dirty() != int_before:
+                hit.append("the integration worktree")
+            return hit
+        return changed
+
+    # ---------- advisor consultations ----------
+    def advise(self, caller: dict, prompt: str) -> str:
+        m = self.require_meta_work(caller)
+        ws, gid = caller["ws"], caller["goal"]
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise AgentError("empty consultation")
+        if caller["id"] != m["meta_work"]:
+            raise AgentError("only the current meta-work can request advice")
+        b = self.budget(ws, gid)
+        # Reserve the advisor turn now, including the caller's unfinished turn in the admission check.
+        active = self.db.one("SELECT COUNT(*) c FROM turns t JOIN sessions s ON s.id=t.session "
+                             "WHERE s.ws=? AND s.goal=? AND s.kind='meta-work' AND t.status='running'", ws, gid)["c"]
+        if m["final_turn"] or self.exhausted(b) or (b.get("max_meta_turns") and
+                                                   b["meta_turns"] + active >= b["max_meta_turns"]):
+            raise AgentError("meta turn budget exhausted; finalize with `loop done`")
+        cfg = goal_config(self.wsp(ws), gid)
+        conf = cfg["goal"]["meta_advisor"]
+        errors = agents.config_errors({"meta_advisor": conf})
+        if errors:
+            raise AgentError("; ".join(errors))
+        self.check_limit(conf["agent"])
+        if self.infra.latest()["ram_free_gb"] < cfg["infra"]["min_free_ram_gb"]:
+            raise AgentError("not enough free RAM to consult the advisor; wait for running sessions")
+        sess = self.new_session(ws, gid, "meta-advisor", "meta-advisor", conf,
+                                self.wsp(ws) / "meta", parent=caller["id"])
+        self.db.update("sessions", {"id": sess["id"]}, status="queued")
+        self.db.push_inbox(ws, gid, "advice_request", {"sid": sess["id"], "question": prompt.strip()})
+        self.db.x("UPDATE goals SET meta_turns=meta_turns+1, idle_streak=0 WHERE ws=? AND id=?", ws, gid)
+        self.publish("session_status", ws=ws, goal=gid, session=sess["id"], status="queued")
+        self.kick(ws, gid)
+        return f"Consultation {sess['id']} queued. End your turn; the advice will arrive as an [Advice] event."
+
+    def dispatch_advice(self, ws: str, gid: str) -> None:
+        for item in self.db.q("SELECT * FROM inbox WHERE ws=? AND goal=? AND kind='advice_request' AND consumed=0 "
+                              "ORDER BY id", ws, gid):
+            payload = json.loads(item["payload"])
+            sess = self.db.session(payload["sid"])
+            self.db.update("inbox", {"id": item["id"]}, consumed=1)
+            if not sess or sess["status"] != "queued":
+                continue
+            self.db.update("sessions", {"id": sess["id"]}, status="running", updated=time.time())
+            self.spawn(self.advisor_turn(sess["id"], payload["question"]), goal=(ws, gid))
+
+    def advice_result(self, sess: dict, status: str, text: str) -> None:
+        """Persist one answer per consultation, including failures and interrupted turns."""
+        ws, gid, sid = sess["ws"], sess["goal"], sess["id"]
+        self.db.x("UPDATE inbox SET consumed=1 WHERE ws=? AND goal=? AND kind='advice_request' "
+                  "AND json_extract(payload, '$.sid')=?", ws, gid, sid)
+        payload = json.dumps({"sid": sid, "text": f"[Advice] {sid} · {status}\n{text}"})
+        self.db.x("INSERT INTO inbox(ws, goal, ts, kind, payload) SELECT ?, ?, ?, 'advice', ? "
+                  "WHERE NOT EXISTS (SELECT 1 FROM inbox WHERE ws=? AND goal=? AND kind='advice' "
+                  "AND json_extract(payload, '$.sid')=?)", ws, gid, time.time(), payload, ws, gid, sid)
+
+    def recover_advice(self) -> None:
+        # A crash can land between saving the final text and delivering it. Reuse that text, never rerun the
+        # consultation; an unfinished turn becomes an interruption notice. Queued requests still dispatch normally.
+        rows = self.db.q("SELECT * FROM sessions s WHERE kind='meta-advisor' AND status!='queued' AND NOT EXISTS "
+                         "(SELECT 1 FROM inbox i WHERE i.kind='advice' AND json_extract(i.payload, '$.sid')=s.id)")
+        for s in rows:
+            turn = self.db.one("SELECT * FROM turns WHERE session=? ORDER BY n DESC LIMIT 1", s["id"])
+            complete = s["status"] == "idle" and turn and turn["ended"]
+            self.advice_result(s, "completed" if complete else s["status"],
+                               turn["final"] if complete else "The consultation was interrupted before advice was delivered.")
+
+    async def advisor_turn(self, sid: str, question: str) -> None:
+        sess = self.db.session(sid)
+        ws, gid = sess["ws"], sess["goal"]
+        try:
+            if self.goal_row(ws, gid)["status"] != "running":
+                self.db.update("sessions", {"id": sid}, status="stopped", updated=time.time())
+                self.advice_result(sess, "stopped", "The goal stopped before the consultation started.")
+                return
+            prompt = f"{self.mode_text(sess)}\n\n[Consultation]\n{question}"
+            changed = self.watch_project(ws, gid)
+            res, _ = await self.run_turn(sess, prompt)
+            if hit := changed():
+                self.publish("alert", ws=ws, goal=gid, text=f"Advisor {sid} changed {', '.join(hit)}; please check it.")
+            workspace.enforce_protected(self.wsp(ws))
+            self.db.x("UPDATE goals SET tokens=tokens+? WHERE ws=? AND id=?", res.tokens, ws, gid)
+            text = res.final or res.error or "The advisor returned no advice."
+            if res.error and res.final:
+                text = f"{res.error}\n\n{text}"
+            if res.limited_until:
+                self.vendor_limits[sess["agent"]] = res.limited_until
+                self.db.x("UPDATE goals SET meta_turns=MAX(0, meta_turns-1) WHERE ws=? AND id=?", ws, gid)
+                text += f"\nThe CLI is at its usage limit until {clock(res.limited_until)}; this turn was not counted."
+            if res.leftover:
+                text += "\n" + leftover_note(res.leftover, "the advisor turn")
+            self.advice_result(sess, "stopped" if res.stopped else "failed" if res.error else "completed", text)
+        except Exception as exc:
+            log.exception("advisor turn failed for %s", sid)
+            self.db.update("sessions", {"id": sid}, status="failed", updated=time.time())
+            self.db.x("UPDATE turns SET status='failed', ended=?, final=? WHERE session=? AND status='running'",
+                      time.time(), str(exc), sid)
+            self.advice_result(sess, "failed", f"Consultation failed inside the platform: {exc}")
+        finally:
+            self.publish("session_status", ws=ws, goal=gid, session=sid, status=self.db.session(sid)["status"])
+        self.check_budget(ws, gid)
+        self.kick(ws, gid)
+
     # ---------- workers ----------
     def caller(self, token: str | None) -> dict:
         sess = self.db.one("SELECT * FROM sessions WHERE token=?", token) if token else None
@@ -769,7 +967,10 @@ class Engine:
             raise AgentError("empty prompt")
         self.check_dispatch(ws, gid, gpu)
         sid = f"w-{secrets.token_hex(3)}"
-        wt, branch = gitops.add_worker_worktree(p, gid, sid, role)
+        # The worker branches from the integration branch, so it must start from the meta-work's own changes too
+        async with self.int_lock(ws, gid):
+            self.checkpoint(ws, gid, caller["id"], f"changes before spawning {sid}")
+            wt, branch = gitops.add_worker_worktree(p, gid, sid, role)
         sess = self.new_session(ws, gid, "worker", role, {"agent": agent, **workers[agent]}, wt, parent=caller["id"],
                                 branch=branch, gpu=gpu, sid=sid)
         self.db.update("sessions", {"id": sid}, status="running")
@@ -876,8 +1077,9 @@ class Engine:
         w = self.own_worker(caller, sid)
         if w["status"] == "running":
             raise AgentError(f"{sid} is still running")
-        # Parallel `loop merge` calls would interleave in the single integration worktree
-        with self.merge_locks.setdefault((w["ws"], w["goal"]), threading.Lock()):
+        # Merges, checkpoints and verify runs would interleave in the single integration worktree
+        with self.int_locks.setdefault((w["ws"], w["goal"]), threading.Lock()):
+            self.checkpoint(w["ws"], w["goal"], caller["id"], f"changes before merging {sid}")
             res = gitops.merge(self.wsp(w["ws"]), w["goal"], w["branch"])
         if not res["ok"]:
             return (f"Merge of {w['branch']} FAILED with conflicts in: {', '.join(res['conflicts']) or '?'}. "
@@ -895,24 +1097,35 @@ class Engine:
             raise AgentError("a report is required (map each goal criterion to evidence and a verdict)")
         ws, gid = caller["ws"], caller["goal"]
         p, results = self.wsp(ws), []
-        if status == "success":
-            wt = p / "wt" / f"_int-{gid}"
-            for cmd in digest.verify_commands((self.gdir(ws, gid) / "goal.md").read_text()):
-                proc = await asyncio.create_subprocess_shell(
-                    cmd, cwd=wt, env=child_env({}), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                    start_new_session=True)
-                try:
-                    out, _ = await asyncio.wait_for(proc.communicate(), VERIFY_TIMEOUT_S)
-                except asyncio.TimeoutError:
-                    os.killpg(proc.pid, signal.SIGKILL)  # the whole tree, not just /bin/sh
-                    await proc.wait()
-                    out = f"timeout after {VERIFY_TIMEOUT_S // 60} min".encode()
-                results.append({"cmd": cmd, "code": proc.returncode, "out": out.decode(errors="replace")[-1500:]})
-            failed = [r for r in results if r["code"] != 0]
-            if failed:
-                return "REJECTED: verify commands failed on the integration branch:\n" + "\n".join(
-                    f"$ {r['cmd']} (exit {r['code']})\n{r['out']}" for r in failed) + \
-                    "\nFix (merge the right work, or delegate fixes), or close with --status partial."
+        wt = gitops.int_worktree(p, gid)
+        async with self.int_lock(ws, gid):
+            # The report and the PR cover committed work, so that is what verify must judge
+            self.checkpoint(ws, gid, caller["id"], "changes before loop done")
+            if status == "success":
+                before = gitops.untracked(wt)
+                for cmd in digest.verify_commands((self.gdir(ws, gid) / "goal.md").read_text()):
+                    proc = await asyncio.create_subprocess_shell(
+                        cmd, cwd=wt, env=child_env({}), stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+                    try:
+                        out, _ = await asyncio.wait_for(proc.communicate(), VERIFY_TIMEOUT_S)
+                    except asyncio.TimeoutError:
+                        os.killpg(proc.pid, signal.SIGKILL)  # the whole tree, not just /bin/sh
+                        await proc.wait()
+                        out = f"timeout after {VERIFY_TIMEOUT_S // 60} min".encode()
+                    results.append({"cmd": cmd, "code": proc.returncode, "out": out.decode(errors="replace")[-1500:]})
+                # Verify output must not reach a later checkpoint, and edits to tracked files would mean the
+                # accepted state differs from the committed one: both are undone, and the edits reject the close
+                changed, _ = gitops.restore_after_run(wt, before)
+                failed = [r for r in results if r["code"] != 0]
+                if failed or changed:
+                    lines = [f"$ {r['cmd']} (exit {r['code']})\n{r['out']}" for r in failed]
+                    if changed:
+                        lines.append("The verify commands changed tracked files, which were reset to the committed "
+                                     "state:\n" + changed[:3000])
+                    return ("REJECTED on the integration branch:\n" + "\n".join(lines) +
+                            "\nFix it (yourself, by merging the right work, or through a worker), or close with "
+                            "--status partial.")
         await self.finish(ws, gid, status, report, results, by=f"meta-work {caller['id']}")
         return f"Goal closed as {status}; the human will review report.md. End your turn now."
 
@@ -1049,8 +1262,12 @@ class Engine:
         s = self.db.session(sid)
         p = self.wsp(s["ws"])
         prompt = text if s["turns"] else f"{self.mode_text(s)}\n\nHuman: {text}"
+        changed = self.watch_project(s["ws"], s["goal"])
         try:
             res, n = await self.run_turn(s, prompt)
+            if hit := changed():
+                self.publish("alert", ws=s["ws"], goal=s["goal"],
+                             text=f"Meta-chat {sid} turn {n} changed {', '.join(hit)}; please check it.")
             workspace.enforce_protected(p)
             workspace.commit(p, f"meta-chat({sid})", f"meta-chat({sid}): turn {n}", protected=False)
             answer = res.final or f"(error: {res.error})"
