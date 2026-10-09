@@ -14,6 +14,7 @@ defaults:
     agent: claude
     model: opus
     effort: high
+    autocompact: null
   workers:                    # the meta-work picks the CLI per worker; model/effort are fixed here
     claude: {enabled: true, model: opus, effort: high, autocompact: null}
     codex:  {enabled: true, model: gpt-6-astra, effort: high, autocompact: null}

@@ -156,7 +156,7 @@ function configForm(conf) {
   return `<div class="cfg">
     <div class="k">agents</div><div>${agentHeader()}
       ${agentRow('meta_work', mw, { title: 'meta-work' })}
-      ${agentRow('meta_advisor', conf.meta_advisor || {}, { title: 'meta-advisor', noAutocompact: true })}
+      ${agentRow('meta_advisor', conf.meta_advisor || {}, { title: 'meta-advisor' })}
       ${AGENTS.map(a => agentRow(`worker:${a}`, { agent: a, ...(wk[a] || {}) }, { title: 'worker', toggle: true, fixedAgent: true })).join('')}
       <div class="hint">The meta-work picks <code>--agent claude|codex</code> per worker; model and effort are always taken from here.</div></div>
     <div class="k">rotate</div><div class="row"><span class="muted small">start a fresh meta-work session when its context exceeds</span>

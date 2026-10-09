@@ -4,11 +4,11 @@ from agentloop import agents, guard
 from conftest import wait_for
 
 
-def advice_goal(server, name, spec="ADVICE", max_meta=10, advisor="fake"):
+def advice_goal(server, name, spec="ADVICE", max_meta=10, advisor="fake", autocompact=None):
     client, engine = server
     assert client.post("/api/workspaces", json={"name": name}).status_code == 200
     role = {"agent": "fake", "model": None, "effort": None}
-    cfg = {"meta_work": role, "meta_advisor": {**role, "agent": advisor},
+    cfg = {"meta_work": role, "meta_advisor": {**role, "agent": advisor, "autocompact": autocompact},
            "workers": {"fake": {"enabled": True}}, "language": "Vietnamese",
            "budget": {"max_meta_turns": max_meta, "max_worker_turns": 10}}
     response = client.post(f"/api/workspaces/{name}/goals", json={
@@ -24,7 +24,7 @@ def finished(client, ws, gid):
 
 def test_advice_round_trip_is_fresh_readonly_and_accounted(server):
     client, engine = server
-    gid = advice_goal(server, "advice-full")
+    gid = advice_goal(server, "advice-full", autocompact="300k")
     assert client.post(f"/api/goals/advice-full/{gid}/start").status_code == 200
     view = finished(client, "advice-full", gid)
     # The final meta-work turn may still be committing its journal after closing the goal.
@@ -32,6 +32,7 @@ def test_advice_round_trip_is_fresh_readonly_and_accounted(server):
     sessions = engine.db.q("SELECT * FROM sessions WHERE ws='advice-full' AND kind='meta-advisor'")
     assert len(sessions) == 2 and len({s["vendor_id"] for s in sessions}) == 2
     assert all(s["turns"] == 1 and s["status"] == "idle" for s in sessions)
+    assert all(engine.build_spec(s, "q", 1).autocompact == "300k" for s in sessions)  # from goal.yaml
     assert view["row"]["outcome"] == "success" and view["budget"]["worker_turns"] == 0
     assert view["config"]["meta_advisor"]["agent"] == "fake"
     for s in sessions:

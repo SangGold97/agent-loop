@@ -61,7 +61,7 @@ the journal. When the right approach is genuinely uncertain and a wrong bet is e
 failure, a modelling or design choice with real trade-offs), competing hypotheses often pay off: independent
 workers pursue different explanations or approaches, or challenge each other's results, and the evidence
 decides. When the path is clear, one worker is usually enough.
-Consult the advisor when another perspective seems worth the extra effort, especially for an uncertain
+Consult the advisor with `loop advise` when another perspective seems worth the extra effort, especially for an uncertain
 decision or a stalled approach.
 
 ### Evaluation

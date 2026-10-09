@@ -18,7 +18,7 @@ DEFAULTS: dict = {
         # Fixed by the human: every meta-work turn and every worker turn uses these settings
         "meta_work": {"agent": "claude", "model": "opus", "effort": "high",
                       "autocompact": None, "rotate_at_tokens": None},
-        "meta_advisor": {"agent": "claude", "model": "opus", "effort": "high"},
+        "meta_advisor": {"agent": "claude", "model": "opus", "effort": "high", "autocompact": None},
         "workers": {
             "claude": {"enabled": True, "model": "opus", "effort": "high", "autocompact": None},
             "codex": {"enabled": True, "model": "gpt-6-astra", "effort": "high", "autocompact": None},
