@@ -877,18 +877,12 @@ function toggleWorker(sid) {
 
 // log window: one session, every event, streaming live while it runs
 async function sessionModal(sid) {
-  const { ws, gid } = S.route;
   const s = S.goal.sessions.find(x => x.id === sid) || { id: sid };
-  const [turns, evs] = await Promise.all([api(`/api/sessions/${sid}/turns`), api(`/api/sessions/${sid}/events?limit=3000`)]);
-  const file = (n, ext) => `<a href="/api/runs/${ws}/${gid}/${sid}/t${n}.${ext}" target="_blank">${ext}</a>`;
+  const evs = await api(`/api/sessions/${sid}/events?limit=3000`);
   const title = s.kind === 'worker' ? `${s.role} · ${s.label}` : s.kind;
   modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s, s.context)}</div><h2>${esc(title)}</h2></div>
       <button class="icon-btn" data-close>×</button></div>
     ${s.cwd ? `<div class="faint small">${esc(s.cwd)}${s.branch ? ' · ' + esc(s.branch) : ''}</div>` : ''}
-    <details class="turns"><summary class="small">${turns.turns.length} turns</summary>
-    <table class="t" style="margin-top:6px"><tr><th>#</th><th>status</th><th>started</th><th>tokens</th><th>final message</th>${s.kind === 'worker' ? '<th>evidence</th>' : ''}</tr>
-      ${turns.turns.map(t => `<tr><td>${t.n}</td><td>${pill(t.status)}</td><td class="small">${fmtTime(t.started)}</td><td class="small">${fmtTok(t.tokens)}</td>
-        <td class="small">${esc(firstLine(t.final))}</td>${s.kind === 'worker' ? `<td class="small">${file(t.n, 'prompt.md')} ${file(t.n, 'out.md')} ${file(t.n, 'diff')}</td>` : ''}</tr>`).join('')}</table></details>
     <div class="modal-feed">${feedShell('modal')}</div>`, true);
   S.modal = { sid, evs: evs.events };
   renderFeed('modal');
