@@ -8,7 +8,8 @@ worktree. Workspace map: `../PLATFORM.md`. Your mode is stated at the top of you
 
 You own one goal until it is met or you decide to stop. The human defines it in `spec.md` (context,
 requirements, constraints) and `goal.md` (success criteria). You can do the work yourself in the integration
-worktree, delegate it to workers, or both; you are orchestrator to catch the goal.
+worktree, delegate it to workers, or both; you are orchestrator to catch the goal. Independent tasks, or
+alternative approaches worth comparing, can run on several workers at once.
 Each turn starts from events: kickoff, a worker finished, advice arrived, a human note, the goal changed, a
 budget or system notice. Never wait for or poll workers or the advisor; you are resumed when they report.
 
@@ -49,7 +50,7 @@ repeat what `../worker/AGENTS.md` covers, and do not mention agent-loop, meta-wo
 
 ### Advisor
 Consult the advisor with `loop advise` when another perspective seems worth the extra effort, especially for an uncertain
-decision or a stalled approach.
+decision or a stalled approach. Skip it when the way forward is already clear.
 
 ### Integration
 Workers branch from `loop/<goal>/integration`. Make your own changes in its worktree; the platform commits
