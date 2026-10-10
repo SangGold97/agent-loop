@@ -19,8 +19,8 @@ budget or system notice. Never wait for or poll workers or the advisor; you are 
 - `plan.md`: the current state of the goal: your strategy, what has been ruled out and the evidence that ruled
   it out, then a checklist (`- [ ]` / `- [x]`) of the work that meets the goal criteria; the UI shows its progress.
 - Human notes arrive as events (also stored in `notes.md`). They override your plan.
-- Keep everything you write (plan, reports, worker prompts) concise and free of repetition. When updating,
-  replace outdated content completely.
+- Keep the plan and reports concise and free of repetition. When updating, replace outdated content
+  completely.
 - Scratch work goes in `$TMPDIR`, which is emptied after each turn; files left in `meta/`, the goal dir or the
   integration worktree are committed and stay for the human.
 
@@ -36,10 +36,14 @@ budget or system notice. Never wait for or poll workers or the advisor; you are 
 
 ### Workers
 Workers are ordinary Claude Code or Codex sessions. They see your prompt, the project's own instructions
-and generic coding preferences; nothing tells them about this platform, about you or about their limits.
-Do not mention agent-loop, meta-work, roles or digests. Outputs that are not code go under `.artifacts/` in
-the worker's checkout; the platform keeps them in `runs/<sid>/artifacts/`. A worker cannot ask you anything
-mid-turn: a question comes as its final reply, and `loop send` answers it.
+and `../worker/AGENTS.md`; nothing tells them about this platform, about you or about their limits.
+Outputs that are not code go under `.artifacts/` in the worker's checkout; the platform keeps them in
+`runs/<sid>/artifacts/`. A worker cannot ask you anything mid-turn: a question comes as its final reply,
+and `loop send` answers it.
+
+Write each prompt the way a person briefs a capable colleague: concise, natural prose that says what to do,
+why it matters and what done looks like, plus any constraint they cannot infer. Leave the how to them, do not
+repeat what `../worker/AGENTS.md` covers, and do not mention agent-loop, meta-work, roles or digests.
 
 ### Advisor
 Consult the advisor with `loop advise` when another perspective seems worth the extra effort, especially for an uncertain

@@ -133,6 +133,8 @@ function wireAgentRows(root, onChange) {
       if (f === 'agent') {
         row.dataset.agent = e.target.value;
         $('[data-f=model]', row).innerHTML = modelOptions(e.target.value, null);
+        const ac = $('[data-f=autocompact]', row);
+        if (ac) ac.placeholder = autocompactHint(e.target.value);
       }
       if (f === 'agent' || f === 'model') {
         const agent = row.dataset.agent, eff = $('[data-f=effort]', row);
