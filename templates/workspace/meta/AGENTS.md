@@ -9,16 +9,15 @@ worktree. Workspace map: `../PLATFORM.md`. Your mode is stated at the top of you
 You own one goal until it is met or you decide to stop. The human defines it in `spec.md` (context,
 requirements, constraints) and `goal.md` (success criteria). You can do the work yourself in the integration
 worktree, delegate it to workers, or both; you are orchestrator to catch the goal. Independent tasks, or
-alternative approaches worth comparing, can run on several workers at once.
-Each turn starts from events: kickoff, a worker finished, advice arrived, a human note, the goal changed, a
-budget or system notice. Never wait for or poll workers or the advisor; you are resumed when they report.
+alternative approaches worth comparing, you can delegate several workers at once, especially for complex tasks. Verify what changed base on evidence yourself instead of re-run what a worker already proved.
+Never wait for or poll workers or the advisor; you are resumed when they report.
 
 ### Files (in the goal dir)
 - `spec.md`, `goal.md`: human-owned, do not edit. If you think they are wrong, say so in `plan.md` and in your report.
   Without a new spec from the human, `spec.md` is reused from an earlier goal (its first line says so)
   or asks you to explore the repo.
 - `plan.md`: the current state of the goal: your strategy, what has been ruled out and the evidence that ruled
-  it out, then a checklist (`- [ ]` / `- [x]`) of the work that meets the goal criteria; the UI shows its progress.
+  it out, then a checklist (`- [ ]` / `- [x]`) of the work that meets the goal criteria; the UI shows its progress. Adjust the plan, strategy, checklist as necessary based on the actual situation after each turn.
 - Human notes arrive as events (also stored in `notes.md`). They override your plan.
 - Keep the plan and reports concise and free of repetition. When updating, replace outdated content
   completely.
@@ -37,15 +36,14 @@ budget or system notice. Never wait for or poll workers or the advisor; you are 
 - `loop done --status success|partial|blocked <<'EOF' ...report... EOF`
 - Always quote the heredoc delimiter (`<<'EOF'`): with a bare `<<EOF` the shell runs backticks and `$(...)` in your text.
 
-### Workers
+### Workers and Prompting
 Workers are ordinary Claude Code or Codex sessions. They see your prompt, the project's own instructions
 and `../worker/AGENTS.md`; nothing tells them about this platform, about you or about their limits.
 Outputs that are not code go under `.artifacts/` in the worker's checkout; the platform keeps them in
 `runs/<sid>/artifacts/`. A worker cannot ask you anything mid-turn: a question comes as its final reply,
 and `loop send` answers it.
 
-Write each prompt the way a person briefs a capable colleague: concise, natural prose that says what to do,
-why it matters and what done looks like, plus any constraint they cannot infer. Leave the how to them, do not
+**IMPORTANT**: Write each prompt the way a person briefs a capable colleague: concise, natural prose like human that says what to do and what done looks like. Avoid over-detailing, over-engineering and redundant work. Leave the how to them, do not
 repeat what `../worker/AGENTS.md` covers, and do not mention agent-loop, meta-work, roles or digests.
 
 ### Advisor
