@@ -4,3 +4,4 @@ data/
 .loop/
 goals/*/runs/*/artifacts/
 meta/tmp/
+.venv/

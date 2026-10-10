@@ -14,8 +14,9 @@ This workspace is run by agent-loop. The workspace root is `$LOOP_WS`; paths bel
 | `goals/<id>/report.md` | Completion report | platform (from `loop done`) |
 | `goals/<id>/runs/<sid>/` | Per-worker evidence: `t<n>.prompt.md`, `t<n>.out.md`, `artifacts/` (copied from the worker's `.artifacts/`) | platform |
 | `repo/` | The project's git repository | workers and meta-work through worktrees; only the human merges `main` |
-| `wt/<sid>/` | One git worktree per worker, branch `loop/<goal>/<role>-<sid>`; `.venv/` and `.artifacts/` are git-excluded | worker |
+| `wt/<sid>/` | One git worktree per worker, branch `loop/<goal>/<role>-<sid>`; `.artifacts/` is git-excluded | worker |
 | `wt/<goal>/` | Integration branch `loop/<goal>/integration` | meta-work (committed by the platform), platform (`loop merge`) |
+| `.venv/` | Python virtualenv shared by every session of the workspace | all sessions (packages only) |
 | `data/` | Large shared data (datasets, checkpoints) | human, workers that fetch data |
 | `.loop/` | Runtime logs and state | platform |
 

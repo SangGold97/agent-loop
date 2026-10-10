@@ -29,7 +29,7 @@ The platform uses your existing CLI logins; it never asks for keys.
 
 | | |
 |---|---|
-| **Workspace** (`workspaces/<name>/`, own git) | One project: `repo/` (the project, cloned or empty), `meta/` + `worker/` harnesses, `goals/`, `data/`, `wt/` worktrees. Every change is committed with its actor (`human`, `meta-work(<sid>)`, `control-plane`, `meta-chat(<sid>)`). |
+| **Workspace** (`workspaces/<name>/`, own git) | One project: `repo/` (the project, cloned or empty), `meta/` + `worker/` harnesses, `goals/`, `data/`, `wt/` worktrees, and `.venv/`, the Python virtualenv every session of the workspace runs in. Every change is committed with its actor (`human`, `meta-work(<sid>)`, `control-plane`, `meta-chat(<sid>)`). |
 | **Goal** (`goals/<slug>/`) | `spec.md`, `goal.md`, `goal.yaml` (human-owned), `plan.md` (meta-work: the current state, including what was ruled out), `notes.md`, `report.md`, `runs/<worker>/` evidence. The slug of the title is the goal id, also used in its branches `loop/<slug>/*` and its integration worktree `wt/<slug>/`, so a title whose slug is already taken in the workspace is refused. |
 | **Meta-work** | One meta session per goal, driven by events (kickoff, worker finished, note, goal changed, budget). It does simple work itself in the integration worktree, where the platform commits its changes as `meta-work(<sid>)` (before a spawn, merge or `loop done` and after each turn), and delegates the rest to workers. |
 | **Meta-chat** | Prompt-by-prompt chat bound to a goal (agent/model/effort chosen per chat); runs commands and tools freely but does not change project code, and steers the goal only through notes you approve. |

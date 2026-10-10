@@ -30,10 +30,11 @@ sessions, merges their work and closes the goal; the human steers from the web U
   `loop/<goal>/integration`, checked out at `wt/<goal>` (`gitops.py`). The meta-work may also change code
   there; `Engine.checkpoint` commits those changes before a spawn, merge or `loop done` and after each turn.
 - **Running a CLI**: `runner.py` starts each turn in `systemd-run --user --scope` (anything left in the scope when
-  the CLI exits is killed and reported as `TurnResult.leftover`), with its own `TMPDIR` under
-  `runner.scratch_root()` that `Engine.run_turn` removes when the turn ends, and streams JSON lines through an
-  adapter (`adapters/claude.py`, `adapters/codex.py`) that maps vendor events to the normalized events listed in
-  `adapters/base.py`. A new CLI means a new `Adapter` registered in `ADAPTERS`.
+  the CLI exits is killed and reported as `TurnResult.leftover`), inside the workspace's shared `.venv`
+  (`workspace.ensure_venv`) and with its own `TMPDIR` under `runner.scratch_root()` that `Engine.run_turn` removes
+  when the turn ends. It streams JSON lines through an adapter (`adapters/claude.py`, `adapters/codex.py`) that maps
+  vendor events to the normalized events listed in `adapters/base.py`. A new CLI means a new `Adapter` registered
+  in `ADAPTERS`.
 - **Guardrails**: `guard.py` is the PreToolUse hook for both CLIs, wired through `templates/workspace/*/hooks.json`
   (`{{PY}}` is replaced by the venv Python). Claude gets it through `workspace.claude_settings`, which rebuilds
   `.loop/claude/<layer>-settings.json` each turn from `hooks.json` plus `claudeMdExcludes`, so agents never read

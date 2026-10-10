@@ -4,7 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import os
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -123,6 +126,23 @@ def install_git_hooks(repo: Path, protected: list[str]) -> None:
         hook.chmod(0o755)
 
 
+def ensure_venv(ws: Path, with_pip: bool = True) -> Path:
+    """The workspace's shared virtualenv, which every session of the workspace runs in; created once.
+
+    It is built from the python3 the agents would otherwise find, never from the platform's own venv."""
+    venv = ws / ".venv"
+    if not (venv / "bin" / "python").exists():
+        own = str(Path(PYTHON).parent)
+        path = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep) if d != own)
+        base = shutil.which("python3", path=path) or sys._base_executable
+        subprocess.run([base, "-m", "venv", *([] if with_pip else ["--without-pip"]), str(venv)],
+                       check=True, capture_output=True)
+    ignore = ws / ".gitignore"
+    if ignore.exists() and ".venv/" not in ignore.read_text().split():
+        ignore.write_text(ignore.read_text().rstrip("\n") + "\n.venv/\n")
+    return venv
+
+
 def create_workspace(name: str, repo: str | None = None, base_branch: str | None = None) -> Path:
     """Copy the template, set up the project repo (clone or empty) and init the workspace git."""
     ws = ws_path(name)
@@ -148,6 +168,7 @@ def create_workspace(name: str, repo: str | None = None, base_branch: str | None
         base = gitops.current_branch(ws / "repo")
         install_git_hooks(ws / "repo", sorted({"main", "master", base}))
         sync_harness(ws)
+        ensure_venv(ws)
         gitops.git(ws, "init", "-q", "-b", "main")
         commit(ws, "control-plane", f"control-plane: create workspace {name}")
     except Exception:

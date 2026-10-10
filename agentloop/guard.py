@@ -180,8 +180,7 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
             (reason := scope_write(code, env, cwd)):
         return reason
     if GLOBAL_INSTALL.search(bare):
-        return ("do not install into the user or system Python; create a virtualenv in the project directory "
-                "(python -m venv .venv) and install there")
+        return "do not install into the user or system Python; install into the active virtualenv ($VIRTUAL_ENV)"
     cmd = code
     for match in re.finditer(r"\brm\s+((?:-\S+\s+)*)(.+?)(?:$|[;&|])", cmd, re.M):
         if "r" not in match.group(1) and "f" not in match.group(1):

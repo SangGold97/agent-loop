@@ -35,6 +35,7 @@ def server():
     import httpx
     import uvicorn
 
+    from agentloop import workspace
     from agentloop.adapters import ADAPTERS
     from agentloop.adapters.claude import ClaudeAdapter
     from agentloop.server import create_app
@@ -46,6 +47,9 @@ def server():
             return [sys.executable, str(FAKE)] + (["--resume", s.resume_id] if s.resume_id else [])
 
     ADAPTERS["fake"] = FakeAdapter()
+    # The shared venv without pip: same layout and activation, without seconds of ensurepip per workspace
+    ensure_venv = workspace.ensure_venv
+    workspace.ensure_venv = lambda ws, with_pip=False: ensure_venv(ws, with_pip)
     port = free_port()
     app = create_app(f"http://127.0.0.1:{port}")
     srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))

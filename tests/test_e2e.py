@@ -42,14 +42,17 @@ def test_full_goal(server):
     sid = workers[0]["id"]
     run = ws / "goals" / gid / "runs" / sid
     assert (run / "t1.prompt.md").exists() and (run / "t1.out.md").exists() and not list(run.glob("*.diff"))
-    # The worker got the meta-work's prompt as is; its outputs are kept, its .venv/ and .artifacts/ never committed
+    # The worker got the meta-work's prompt as is; its outputs are kept, its .artifacts/ never committed
     assert (run / "artifacts" / "prompt.txt").read_text() == "Create hello.py"
     # The turn's own scratch dir (its TMPDIR) is gone once the turn ended
     scratch = Path((run / "artifacts" / "tmpdir.txt").read_text())
     assert scratch.parent == scratch_root() and scratch.name == f"{sid}-t1" and not scratch.exists()
     committed = subprocess.run(["git", "ls-tree", "-r", "--name-only", workers[0]["branch"]], cwd=ws / "repo",
                                capture_output=True, text=True).stdout
-    assert "hello.py" in committed and ".venv" not in committed and ".artifacts" not in committed
+    assert "hello.py" in committed and ".artifacts" not in committed
+    # The shared venv the sessions ran in exists and stays out of the workspace's git
+    assert (ws / ".venv" / "bin" / "python").exists()
+    assert subprocess.run(["git", "check-ignore", "-q", ".venv"], cwd=ws).returncode == 0
     log = engine.turn_log("demo", sid, 1)
     assert "$ Bash python hello.py" in log and "  hello" in log
     assert (ws / "wt" / gid / "hello.py").exists()
@@ -276,7 +279,7 @@ def test_delete_goal_and_workspace(server):
 def test_push_opens_pr_and_never_touches_base(server, monkeypatch, tmp_path):
     client, engine = server
     from agentloop import gitops
-    monkeypatch.setattr(gitops.shutil, "which", lambda name: None)  # no gh: push only, the PR is skipped
+    monkeypatch.setattr(gitops.shutil, "which", lambda name, **kw: None)  # no gh: push only, the PR is skipped
     client.post("/api/workspaces", json={"name": "pushing"})
     repo = Path(engine.wsp("pushing")) / "repo"
     git = lambda *a, cwd=repo: subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True).stdout.strip()

@@ -23,6 +23,8 @@ budget or system notice. Never wait for or poll workers or the advisor; you are 
   completely.
 - Scratch work goes in `$TMPDIR`, which is emptied after each turn; files left in `meta/`, the goal dir or the
   integration worktree are committed and stay for the human.
+- Every session here, yours and the workers', shares the active virtualenv (`$VIRTUAL_ENV`): install missing
+  packages there, not the project itself; test packaging in a throwaway venv in `$TMPDIR`.
 
 ### Commands
 - `loop spawn --agent claude|codex --role R [--gpu] <<'EOF' ...prompt... EOF` starts a new worker

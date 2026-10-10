@@ -243,9 +243,14 @@ class Engine:
                 "[System] The platform restarted. " + (f"Interrupted workers: {', '.join(names)} "
                 "(continue them with `loop send`)." if names else "No workers were interrupted."))})
             self.kick(m["ws"], m["id"])
-        # Harness prompts follow the platform templates unless the human customised them
+        # Harness prompts follow the platform templates unless the human customised them; every workspace has
+        # the shared venv its sessions run in
         for name in workspace.list_workspaces():
             p = self.wsp(name)
+            try:
+                workspace.ensure_venv(p)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                log.error("%s: cannot create the shared venv: %s", name, exc)
             res = workspace.sync_harness(p)
             if res["updated"]:
                 workspace.commit(p, "control-plane", "control-plane: sync harness " + ", ".join(res["updated"]))
@@ -383,7 +388,9 @@ class Engine:
         conf = self.session_conf(sess)
         if any(conf[k] != sess[k] for k in conf):  # the human changed the config since the last turn
             self.db.update("sessions", {"id": sid}, **conf)
+        venv = p / ".venv"
         env = {"LOOP_ROLE": sess["kind"], "TMPDIR": scratch_root() / f"{sid}-t{n}",
+               "VIRTUAL_ENV": venv, "PATH_PREPEND": venv / "bin",
                "LOOP_WS": p, "LOOP_GOAL": gid, "LOOP_GOAL_DIR": gdir, "LOOP_SESSION": sid,
                "LOOP_GUARD_PATTERNS": json.dumps(cfg["guard"]["deny_patterns"] or [])}
         spec = RunSpec(agent=sess["agent"], kind="worker" if worker else "meta", cwd=Path(sess["cwd"]),
@@ -398,7 +405,8 @@ class Engine:
                 spec.plugin_dir, spec.append_file = p / "worker" / "claude-plugin", p / "worker" / "AGENTS.md"
                 spec.settings_file, spec.add_dirs = workspace.claude_settings(p, "worker"), [gdir, p / "data"]
         else:
-            env.update({"LOOP_API": self.api_url, "LOOP_TOKEN": sess["token"], "PATH_PREPEND": self.bin_dir})
+            env.update({"LOOP_API": self.api_url, "LOOP_TOKEN": sess["token"],
+                        "PATH_PREPEND": f"{self.bin_dir}{os.pathsep}{venv / 'bin'}"})
             if sess["kind"] in ("meta-work", "meta-advisor"):  # GPUs are handed out only through `loop spawn --gpu`
                 env["CUDA_VISIBLE_DEVICES"] = ""
             spec.system_text = self.mode_text(sess)

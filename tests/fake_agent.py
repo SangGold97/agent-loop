@@ -29,6 +29,9 @@ def main():
     role, gdir = os.environ.get("LOOP_ROLE"), Path(os.environ.get("LOOP_GOAL_DIR", "."))
     wt = Path(os.environ.get("LOOP_WS", ".")) / "wt" / os.environ.get("LOOP_GOAL", "")  # integration worktree
     emit({"type": "system", "subtype": "init", "session_id": sid})
+    # Every session runs in the workspace's shared venv
+    venv = Path(os.environ["LOOP_WS"]) / ".venv"
+    assert os.environ["VIRTUAL_ENV"] == str(venv) and str(venv / "bin") in os.environ["PATH"].split(os.pathsep)
     if role == "meta-advisor":
         assert resume is None
         assert all((gdir / name).read_text() is not None for name in ("spec.md", "goal.md", "plan.md"))
@@ -70,11 +73,9 @@ def main():
             text = "**Result:** failed on purpose\n**Issues:** simulated failure"
         else:
             Path("hello.py").write_text('print("hello")\n')
-            # Kept outputs and a virtualenv: collected and git-excluded by the platform, never committed
+            # Kept outputs: collected and git-excluded by the platform, never committed
             Path(".artifacts").mkdir(exist_ok=True)
             Path(".artifacts/prompt.txt").write_text(prompt)
-            Path(".venv").mkdir(exist_ok=True)
-            Path(".venv/pyvenv.cfg").write_text("home = /usr\n")
             (Path(os.environ["TMPDIR"]) / "scratch.txt").write_text("temporary\n")
             Path(".artifacts/tmpdir.txt").write_text(os.environ["TMPDIR"])
             if "TAMPER" in prompt:  # a write the guard does not see; the platform must revert it
