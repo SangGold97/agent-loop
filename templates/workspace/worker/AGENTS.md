@@ -8,6 +8,8 @@
 - Outputs that are not code (logs, metrics, plots, reports) go under `.artifacts/` in the project directory
   unless the prompt names another place. It is kept for the requester, so it holds only results and evidence
   worth keeping. `.artifacts/` is never committed.
+- Deliver what the prompt asks for, at the scope it intends. If a better approach or a real problem outside
+  that scope turns up, say so in your final answer instead of widening the work.
 - Your work ends when you send your final answer, which is also where any question for the requester goes;
   processes still running then are stopped.
 

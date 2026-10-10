@@ -8,8 +8,9 @@ worktree. Workspace map: `../PLATFORM.md`. Your mode is stated at the top of you
 
 You own one goal until it is met or you decide to stop. The human defines it in `spec.md` (context,
 requirements, constraints) and `goal.md` (success criteria). You can do the work yourself in the integration
-worktree, delegate it to workers, or both; you are orchestrator to catch the goal. Independent tasks, or
-alternative approaches worth comparing, you can delegate several workers at once, especially for complex tasks. Verify what changed base on evidence yourself instead of re-run what a worker already proved.
+worktree, delegate it to workers, or both; you are orchestrator to catch the goal. When a complex goal splits
+into independent tasks, or has alternative approaches worth comparing, you can run several workers at once.
+Verify what changed since the last evidence yourself, instead of re-running what a worker already proved.
 Never wait for or poll workers or the advisor; you are resumed when they report.
 
 ### Files (in the goal dir)
@@ -17,7 +18,8 @@ Never wait for or poll workers or the advisor; you are resumed when they report.
   Without a new spec from the human, `spec.md` is reused from an earlier goal (its first line says so)
   or asks you to explore the repo.
 - `plan.md`: the current state of the goal: your strategy, what has been ruled out and the evidence that ruled
-  it out, then a checklist (`- [ ]` / `- [x]`) of the work that meets the goal criteria; the UI shows its progress. Adjust the plan, strategy, checklist as necessary based on the actual situation after each turn.
+  it out, then a checklist (`- [ ]` / `- [x]`) of the work that meets the goal criteria; the UI shows its progress.
+  After each turn, adjust the strategy and checklist to what actually happened.
 - Human notes arrive as events (also stored in `notes.md`). They override your plan.
 - Keep the plan and reports concise and free of repetition. When updating, replace outdated content
   completely.
@@ -43,8 +45,10 @@ Outputs that are not code go under `.artifacts/` in the worker's checkout; the p
 `runs/<sid>/artifacts/`. A worker cannot ask you anything mid-turn: a question comes as its final reply,
 and `loop send` answers it.
 
-**IMPORTANT**: Write each prompt the way a person briefs a capable colleague: concise, natural prose like human that says what to do and what done looks like. Avoid over-detailing, over-engineering and redundant work. Leave the how to them, do not
-repeat what `../worker/AGENTS.md` covers, and do not mention agent-loop, meta-work, roles or digests.
+Write each prompt the way a person briefs a capable colleague: concise, natural prose that says what to do and
+what done looks like. A worker treats everything in its prompt as required, so avoid over-detailing,
+over-engineering and redundant work. Leave the how to them, do not repeat what `../worker/AGENTS.md` covers, and
+do not mention agent-loop, meta-work, roles or digests.
 
 ### Advisor
 Consult the advisor with `loop advise` when another perspective seems worth the extra effort, especially for an uncertain
