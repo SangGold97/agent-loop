@@ -41,9 +41,10 @@ function toast(msg, kind = 'info', ms = 4500) {
 async function act(fn, okMsg) {
   try { const r = await fn(); if (okMsg) toast(okMsg, 'ok'); return r; } catch (e) { toast(e.message, 'error', 8000); }
 }
-function modal(html, wide = false) {
+// size: false (form), true / 'wide' (wide form), 'full' (a session or chat window, nearly the whole screen)
+function modal(html, size = false) {
   const root = $('#modal-root');
-  root.innerHTML = `<div class="modal-back"><div class="modal ${wide ? 'wide' : ''}">${html}</div></div>`;
+  root.innerHTML = `<div class="modal-back"><div class="modal ${size === true ? 'wide' : size || ''}">${html}</div></div>`;
   const back = $('.modal-back', root);
   back.addEventListener('mousedown', e => { if (e.target === back) closeModal(); });
   $$('[data-close]', root).forEach(b => b.onclick = closeModal);
@@ -792,7 +793,7 @@ function renderNewChat() {
 function expandChat() {
   const box = $('#ov-chat');
   if (!box || S.chatOut) return;
-  const m = modal('<div class="modal-head"><h2>meta-chat</h2><button class="icon-btn" data-close>×</button></div><div class="chat-pop" id="chat-pop"></div>', true);
+  const m = modal('<div class="modal-head"><h2>meta-chat</h2><button class="icon-btn" data-close>×</button></div><div class="chat-pop" id="chat-pop"></div>', 'full');
   [...box.children].filter(c => !c.classList.contains('lt')).forEach(c => $('#chat-pop', m).appendChild(c));
   S.chatOut = true;
   renderChatBar(); stick($('#chat-feed')); $('#chat-input')?.focus();
@@ -911,7 +912,7 @@ async function sessionModal(sid) {
   modal(`<div class="modal-head"><div><div class="crumbs">${esc(s.kind)} · ${agentLine(s, s.context)}</div><h2>${esc(title)}</h2></div>
       <button class="icon-btn" data-close>×</button></div>
     ${picker}${s.cwd ? `<div class="faint small">${esc(s.cwd)}${s.branch ? ' · ' + esc(s.branch) : ''}</div>` : ''}
-    <div class="modal-feed">${feedShell('modal')}</div>`, true);
+    <div class="modal-feed">${feedShell('modal')}</div>`, 'full');
   S.modal = { sid, evs: evs.events };
   if ($('#advice-session')) $('#advice-session').onchange = e => sessionModal(e.target.value);
   renderFeed('modal');
