@@ -27,11 +27,11 @@ def main():
     sid = resume or str(uuid.uuid4())
     prompt = sys.stdin.read()
     role, gdir = os.environ.get("LOOP_ROLE"), Path(os.environ.get("LOOP_GOAL_DIR", "."))
-    wt = Path(os.environ.get("LOOP_WS", ".")) / "wt" / f"_int-{os.environ.get('LOOP_GOAL')}"  # integration worktree
+    wt = Path(os.environ.get("LOOP_WS", ".")) / "wt" / os.environ.get("LOOP_GOAL", "")  # integration worktree
     emit({"type": "system", "subtype": "init", "session_id": sid})
     if role == "meta-advisor":
         assert resume is None
-        assert all((gdir / name).read_text() is not None for name in ("spec.md", "goal.md", "plan.md", "journal.md"))
+        assert all((gdir / name).read_text() is not None for name in ("spec.md", "goal.md", "plan.md"))
         if "ADVICE_LIMIT" in _spec(gdir):
             text = f"Claude AI usage limit reached|{int(time.time()) + 600}"
             emit({"type": "result", "subtype": "success", "is_error": True, "result": text, "session_id": sid})
@@ -75,6 +75,8 @@ def main():
             Path(".artifacts/prompt.txt").write_text(prompt)
             Path(".venv").mkdir(exist_ok=True)
             Path(".venv/pyvenv.cfg").write_text("home = /usr\n")
+            (Path(os.environ["TMPDIR"]) / "scratch.txt").write_text("temporary\n")
+            Path(".artifacts/tmpdir.txt").write_text(os.environ["TMPDIR"])
             if "TAMPER" in prompt:  # a write the guard does not see; the platform must revert it
                 (gdir / "goal.md").write_text("- nothing to do\n")
             emit({"type": "assistant", "message": {"content": [
@@ -124,8 +126,6 @@ def main():
             (wt / "meta_note.txt").write_text("written by the meta-work\n")  # uncommitted: the merge must keep it
             merged = loop("merge", m.group(1))
             (gdir / "plan.md").write_text("# Plan\n\n- [x] create hello.py\n")
-            with (gdir / "journal.md").open("a") as fh:
-                fh.write(f"- merged {m.group(1)}\n")
             text = merged + "\n" + loop("done", "--status", "success", stdin="- hello.py exists: verified")
         elif "Human note" in prompt:
             text = "ack note"

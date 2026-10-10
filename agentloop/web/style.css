@@ -100,6 +100,9 @@ h3 { font-size: 13px; }
 .layer.human > .lt { color: var(--human); }
 .box > .lt { color: var(--muted); }
 .box > .lt .x { color: var(--faint); font-weight: 400; text-transform: none; letter-spacing: 0; }
+.advice-item { padding: 10px 0; border-top: 1px solid var(--border); }
+.lt + .advice-item { border-top: 0; padding-top: 4px; }
+.advice-item > .row { gap: 8px; margin-bottom: 4px; }
 .stat .label { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .stat .value { font-size: 14px; font-weight: 600; margin-top: 2px; }
 .stat .sub { color: var(--muted); font-size: 12px; white-space: pre-line; }

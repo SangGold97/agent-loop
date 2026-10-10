@@ -166,7 +166,7 @@ function configForm(conf) {
       ${num('max_worker_turns', b.max_worker_turns, 'worker turns')}${num('max_meta_turns', b.max_meta_turns, 'meta-work + advisor turns')}</div>
     <div class="k">language</div><div class="row"><select data-lang style="width:160px">${['English', 'Vietnamese'].concat(
         ['English', 'Vietnamese'].includes(conf.language || 'English') ? [] : [conf.language]).map(l => `<option ${l === (conf.language || 'English') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
-      <span class="hint">for plan, journal, report and chat replies to you; meta-work and workers talk to each other in English</span></div>
+      <span class="hint">for plan, report, advice and chat replies to you; meta-work and workers talk to each other in English</span></div>
     <div class="k">git</div><div class="row"><input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo/'s current branch" style="width:160px">
       <span class="hint">base branch: the integration branch starts from it and the PR opened by push &amp; create PR targets it; empty = the branch repo/ has checked out when the goal starts</span></div>
   </div>`;
@@ -227,7 +227,7 @@ function setSidebar(off, save = true) {
 $('#side-toggle').onclick = () => setSidebar(!$('.app').classList.contains('side-off'));
 setSidebar((() => { try { return localStorage.getItem('agentloop.sideOff') === '1'; } catch { return false; } })(), false);
 
-const TABS = [['overview', 'OVERVIEW'], ['config', 'CONFIG'], ['plan', 'PLAN & JOURNAL'], ['notes', 'HUMAN REPORT & NOTES'], ['git', 'GIT']];
+const TABS = [['overview', 'OVERVIEW'], ['config', 'CONFIG'], ['plan', 'PLAN & ADVICE'], ['notes', 'HUMAN REPORT & NOTES'], ['git', 'GIT']];
 function parseHash() {
   const p = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   if (p[0] === 'ws' && p[2] === 'g') {
@@ -480,7 +480,10 @@ async function renderTab() {
   const t = S.route.tab;
   if (t === 'overview') renderOverview();
   else if (t === 'config') { $('#m-tab').innerHTML = '<div id="cfg-tab" style="margin-top:18px"></div>'; renderConfigTab(true); }
-  else if (t === 'plan') $('#m-tab').innerHTML = planHtml();
+  else if (t === 'plan') {
+    $('#m-tab').innerHTML = planHtml();
+    $$('#m-tab [data-log]').forEach(b => b.onclick = () => sessionModal(b.dataset.log));
+  }
   else if (t === 'notes') renderNotes();
   else if (t === 'git') await renderGit();
 }
@@ -587,7 +590,7 @@ function renderConfigTab(force) {
   el.innerHTML = `<div class="grid cols-2">${doc('spec', 'spec', 'read-only for agents; a running meta-work is notified with the diff')}
       ${doc('goal', 'goal','lines like - verify: `pytest -q` are executed by the platform')}</div>
     <div style="margin-top:18px">${box('agents · budget · git <span class="dirty" id="cfg-dirty"></span>', `<div id="ov-cfg">${configForm(M.config)}</div>
-      <div class="row" style="margin-top:8px"><span class="hint">Applies from the next turn. Changing the meta-work agent starts a fresh meta-work session (plan and journal carry over).</span>
+      <div class="row" style="margin-top:8px"><span class="hint">Applies from the next turn. Changing the meta-work agent starts a fresh meta-work session (the plan carries over).</span>
         <span class="spacer"></span><button class="btn small primary" id="cfg-save">save config</button></div>`)}</div>`;
   S.cfgDirty = false;
   wireAgentRows($('#ov-cfg'), () => { S.cfgDirty = true; $('#cfg-dirty').textContent = 'unsaved'; });
@@ -919,10 +922,18 @@ async function sessionModal(sid) {
 }
 
 // ---------- plan, human report & notes, git ----------
+// Plan on top; below it, the final reply of each advisor consultation as the meta-work received it
 function planHtml() {
-  const f = S.goal.files;
-  return `<div class="grid cols-2" style="margin-top:18px">${box('plan.md <span class="x">owned by the meta-work</span>', `<div class="md">${md(f['plan.md'])}</div>`)}
-    ${box('journal.md <span class="x">decision log, written by the meta-work</span>', `<div class="md">${md(f['journal.md'])}</div>`)}</div>`;
+  const f = S.goal.files, advisors = S.goal.sessions.filter(s => s.kind === 'meta-advisor');
+  const items = advisors.map((s, i) => {
+    const a = S.goal.advice[s.id];
+    return `<div class="advice-item"><div class="row small"><b>consultation ${i + 1}</b>${pill(a ? a.status : s.status)}
+        <span class="spacer"></span><span class="faint">${fmtTime(s.created)}</span><button class="btn small" data-log="${s.id}">expand</button></div>
+      ${a ? `<div class="md">${md(a.text)}</div>` : '<div class="faint small">no advice yet</div>'}</div>`;
+  }).reverse().join('');
+  return `<div style="margin-top:18px">${box('plan.md <span class="x">current state, owned by the meta-work</span>', `<div class="md">${md(f['plan.md'])}</div>`)}</div>
+    <div style="margin-top:18px">${box('advice <span class="x">final replies of the meta-advisor to the meta-work, newest first</span>',
+      items || '<div class="empty">No consultations yet.</div>')}</div>`;
 }
 function renderNotes(update = false) {
   const el = $('#m-tab'), notes = S.goal.notes, review = S.goal.row.status === 'awaiting_review';

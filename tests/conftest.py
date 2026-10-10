@@ -1,4 +1,6 @@
+import atexit
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -11,6 +13,14 @@ import pytest
 HOME = tempfile.mkdtemp(prefix="agentloop-test-")
 os.environ["AGENTLOOP_HOME"] = HOME
 FAKE = Path(__file__).parent / "fake_agent.py"
+
+
+@atexit.register
+def _cleanup():
+    """The test home and its scratch root go once the run (and its server thread) has ended."""
+    from agentloop.runner import scratch_root
+    for path in (scratch_root(), HOME):
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def free_port() -> int:

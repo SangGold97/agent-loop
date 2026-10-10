@@ -28,7 +28,6 @@ DEFAULTS: dict = {
         "language": "English",
         "base_branch": None,
     },
-    "digest": {"max_output_words": 500, "max_diff_lines": 80},
     "infra": {"min_free_ram_gb": 2, "worker_memory_max_gb": 8, "gpu_slots": 1},
     "turn_timeout_min": 180,
     "guard": {"deny_patterns": []},

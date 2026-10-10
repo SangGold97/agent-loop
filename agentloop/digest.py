@@ -1,4 +1,4 @@
-"""Compact messages for the meta-work: inline what is small, point to files for what is large."""
+"""Text the platform hands the meta-work: worker digests, the turn envelope, the budget line, plan checklists."""
 from __future__ import annotations
 
 import json
@@ -24,27 +24,10 @@ def fmt_tokens(n: int | None) -> str:
     return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k"
 
 
-def worker_digest(sess: dict, n: int, res, stat: str, patch: str, paths: dict, cfg: dict,
-                  earlier: list[str] | None = None) -> str:
-    """`earlier`: commits in the diff that existed before the turn (fast-forwarded or merged in)."""
+def worker_digest(sess: dict, n: int, res) -> str:
+    """A finished worker turn as the meta-work receives it: which worker and turn, then the reply as is."""
     status = "stopped" if res.stopped else ("failed: " + res.error if res.error else "ok")
-    head = f"[Worker {sess['id']} · role {sess['role']} · turn {n}] {status}"
-    out, cut = trim_words(res.final or "(no final message)", cfg["max_output_words"])
-    parts = [head, f"[Final output]{' (trimmed; full: ' + paths['out'] + ')' if cut else ''}\n{out}"]
-    if stat:
-        lines = patch.splitlines()
-        shown = "\n".join(lines[:cfg["max_diff_lines"]])
-        more = f" (showing {cfg['max_diff_lines']}/{len(lines)} lines; full: {paths['diff']})" \
-            if len(lines) > cfg["max_diff_lines"] else ""
-        parts.append(f"[Diff] {stat.splitlines()[-1].strip()}{more}")
-        if earlier:
-            listed = "; ".join(earlier[:5]) + (f"; … {len(earlier) - 5} more" if len(earlier) > 5 else "")
-            parts.append(f"[Note] This diff includes {len(earlier)} commit(s) made before this turn and brought in "
-                         f"by a fast-forward or merge, not written in it: {listed}")
-        parts.append(f"{stat}\n```diff\n{shown}\n```")
-    else:
-        parts.append("[Diff] no code changes")
-    return "\n".join(parts)
+    return f"[Worker {sess['id']} · role {sess['role']} · turn {n}] {status}\n{res.final or '(no final message)'}"
 
 
 def budget_line(b: dict) -> str:
@@ -66,7 +49,7 @@ def envelope(items: list[dict], budget: str, infra: str) -> str:
             parts.append(f"[Human note #{p['id']}] {p['text']}")
         elif kind == "file_changed":
             parts.append(f"[{p['name']} changed by the human]\n```diff\n{p['diff'][-4000:]}\n```")
-    parts += [budget, f"[Infra] {infra}", "(Act, update plan.md/journal.md, then end your turn.)"]
+    parts += [budget, f"[Infra] {infra}"]
     return "\n\n".join(parts)
 
 

@@ -59,13 +59,13 @@ def check_path(path: Path, env: dict) -> str | None:
     worker = role == "worker"
     if PROTECTED_RE.match(rel.as_posix()):
         return (f"{path} is read-only" if worker
-                else f"{rel} is human-owned; propose changes in your journal/report instead")
+                else f"{rel} is human-owned; propose changes in your plan or report instead")
     if worker:
         data = ws / "data"
         if not any(path.is_relative_to(o) for o in (ws / "wt" / env.get("LOOP_SESSION", "?"), data)):
             return f"writes are limited to the current checkout, {data} and /tmp (not {path})"
     elif rel.parts and rel.parts[0] in ("repo", "wt"):
-        own = Path("wt") / f"_int-{env.get('LOOP_GOAL', '?')}"
+        own = Path("wt") / env.get("LOOP_GOAL", "?")
         if role == "meta-chat":
             return "a meta-chat does not change project code; propose the change to the meta-work with `loop note`"
         if not rel.is_relative_to(own):
@@ -175,7 +175,7 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
         return "pushing is disabled here; commit locally and leave remotes to the repository owner"
     if target := protected_write(code):
         return (f"{target} is read-only" if env.get("LOOP_ROLE") == "worker"
-                else f"{target} is human-owned; propose changes in your journal/report instead")
+                else f"{target} is human-owned; propose changes in your plan or report instead")
     if env.get("LOOP_ROLE") in ("meta-work", "meta-chat", "meta-advisor") and \
             (reason := scope_write(code, env, cwd)):
         return reason

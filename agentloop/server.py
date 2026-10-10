@@ -131,9 +131,15 @@ def create_app(api_url: str) -> FastAPI:
             s.pop("token", None)
             s["live"] = engine.runner.running(s["id"])
         done, total = digest.checklist(files["plan.md"])
+        # What each consultation sent back to the meta-work: the [Advice] text without its header line
+        advice = {}
+        for item in engine.db.q("SELECT payload FROM inbox WHERE ws=? AND goal=? AND kind='advice'", ws, gid):
+            payload = json.loads(item["payload"])
+            head, _, text = payload["text"].partition("\n")
+            advice[payload["sid"]] = {"status": head.rpartition(" · ")[2], "text": text}
         return {"ws": ws, "id": gid, "row": row, "files": files, "config": goal_config(p, gid)["goal"],
                 "budget": engine.budget(ws, gid), "checklist": {"done": done, "total": total},
-                "sessions": sessions,
+                "sessions": sessions, "advice": advice,
                 "notes": engine.db.q("SELECT * FROM notes WHERE ws=? AND goal=? ORDER BY id DESC", ws, gid),
                 "verify": digest.verify_commands(files["goal.md"]), "meta_active": (ws, gid) in engine.meta_active,
                 "base": engine.goal_base(ws, gid),

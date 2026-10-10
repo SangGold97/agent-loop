@@ -9,14 +9,13 @@ This workspace is run by agent-loop. The workspace root is `$LOOP_WS`; paths bel
 | `worker/` | Worker harness: `AGENTS.md`, `skills/`, `memory/`, `docs/`, `claude-plugin/` | human; meta may improve memory/docs/skills |
 | `*/hooks.json` | Guard hooks (Claude Code and Codex share the format) | human only |
 | `goals/<id>/spec.md`, `goal.md`, `goal.yaml` | Context and requirements, success criteria, goal config | human only |
-| `goals/<id>/plan.md` | Current strategy and checklist | meta-work |
-| `goals/<id>/journal.md` | Append-only decision log | meta-work |
+| `goals/<id>/plan.md` | Current state: strategy, what was ruled out and why, checklist | meta-work |
 | `goals/<id>/notes.md` | Human guidance for the meta-work | platform (from the human) |
 | `goals/<id>/report.md` | Completion report | platform (from `loop done`) |
-| `goals/<id>/runs/<sid>/` | Per-worker evidence: `t<n>.prompt.md`, `t<n>.out.md`, `t<n>.diff`, `artifacts/` (copied from the worker's `.artifacts/`) | platform |
+| `goals/<id>/runs/<sid>/` | Per-worker evidence: `t<n>.prompt.md`, `t<n>.out.md`, `artifacts/` (copied from the worker's `.artifacts/`) | platform |
 | `repo/` | The project's git repository | workers and meta-work through worktrees; only the human merges `main` |
 | `wt/<sid>/` | One git worktree per worker, branch `loop/<goal>/<role>-<sid>`; `.venv/` and `.artifacts/` are git-excluded | worker |
-| `wt/_int-<goal>/` | Integration branch `loop/<goal>/integration` | meta-work (committed by the platform), platform (`loop merge`) |
+| `wt/<goal>/` | Integration branch `loop/<goal>/integration` | meta-work (committed by the platform), platform (`loop merge`) |
 | `data/` | Large shared data (datasets, checkpoints) | human, workers that fetch data |
 | `.loop/` | Runtime logs and state | platform |
 

@@ -22,12 +22,8 @@ defaults:
     max_concurrent_workers: 3
     max_worker_turns: 40      # spawn + send, over the whole goal
     max_meta_turns: 80        # meta-work + advisor turns
-  language: English           # human-facing text: plan, journal, report, chat and advice; worker prompts use English
+  language: English           # human-facing text: plan, report, chat and advice; worker prompts use English
   base_branch: null           # null = the branch repo/ has checked out when the goal starts; its PR targets it
-
-digest:                       # what a finished worker turn sends back to the meta-work
-  max_output_words: 500
-  max_diff_lines: 80
 
 infra:
   min_free_ram_gb: 2          # refuse to start workers below this

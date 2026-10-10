@@ -30,12 +30,12 @@ The platform uses your existing CLI logins; it never asks for keys.
 | | |
 |---|---|
 | **Workspace** (`workspaces/<name>/`, own git) | One project: `repo/` (the project, cloned or empty), `meta/` + `worker/` harnesses, `goals/`, `data/`, `wt/` worktrees. Every change is committed with its actor (`human`, `meta-work(<sid>)`, `control-plane`, `meta-chat(<sid>)`). |
-| **Goal** (`goals/<date>-<slug>/`) | `spec.md`, `goal.md`, `goal.yaml` (human-owned), `plan.md` + `journal.md` (meta-work), `notes.md`, `report.md`, `runs/<worker>/` evidence. |
+| **Goal** (`goals/<slug>/`) | `spec.md`, `goal.md`, `goal.yaml` (human-owned), `plan.md` (meta-work: the current state, including what was ruled out), `notes.md`, `report.md`, `runs/<worker>/` evidence. The slug of the title is the goal id, also used in its branches `loop/<slug>/*` and its integration worktree `wt/<slug>/`, so a title whose slug is already taken in the workspace is refused. |
 | **Meta-work** | One meta session per goal, driven by events (kickoff, worker finished, note, goal changed, budget). It does simple work itself in the integration worktree, where the platform commits its changes as `meta-work(<sid>)` (before a spawn, merge or `loop done` and after each turn), and delegates the rest to workers. |
 | **Meta-chat** | Prompt-by-prompt chat bound to a goal (agent/model/effort chosen per chat); runs commands and tools freely but does not change project code, and steers the goal only through notes you approve. |
 | **Meta-advisor** | Consulted through `loop advise`, with agent/model/effort from `goal.yaml → meta_advisor`. Each question starts a new read-only session for one turn. Its final text returns to the meta-work inbox as `[Advice]`; the Advisor button beside META-WORK opens its session log, without a chat composer. |
 | **Worker** | A Claude Code or Codex session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<role>-<sid>`; accepted work is merged into `loop/<goal>/integration`. It receives the meta-work's prompt as is and a generic `worker/AGENTS.md`, nothing about the platform; `.venv/` and `.artifacts/` stay out of git, and `.artifacts/` is kept in `runs/<sid>/artifacts/`. |
-| **Digest** | What a finished worker turn sends to the meta-work: which worker and turn, its final reply + diff (noting commits a fast-forward or merge brought in), trimmed per `loop.yaml → digest`, full versions in `runs/`. The commands a worker ran are pulled on demand with `loop show W --log`. |
+| **Digest** | What a finished worker turn sends to the meta-work: a line naming the worker, role and turn, then its final reply as is (kept in `runs/<sid>/t<n>.out.md`). Its changes and the commands it ran are pulled on demand, with git and `loop show W --log`. |
 | **goal.md** | Success criteria, free text. Lines `- verify: \`cmd\`` are run on the committed integration branch before a `success` close (a run that edits tracked files is rejected and its edits and new files are undone); everything else is judged by the meta-work. |
 
 ## Guardrails (mistakes, not adversaries)
@@ -64,7 +64,8 @@ The platform uses your existing CLI logins; it never asks for keys.
 - A CLI's usage limit is not a failure: the meta-work waits for the announced reset while workers on the other
   CLI keep running, a refused worker turn is not counted, and spawns on that CLI are refused until the reset.
 - Every turn runs in its own `systemd-run --user --scope`. Processes still running when the CLI exits (a job the
-  agent backgrounded) are stopped and named in the digest; orphans are stopped on restart. Workers, meta-work
+  agent backgrounded) are stopped and named in the digest; orphans are stopped on restart. Each turn also gets its
+  own `TMPDIR`, removed when the turn ends, so scratch files never pile up in `/tmp`. Workers, meta-work
   and advisors also get `MemoryMax`. Spawns are refused under `min_free_ram_gb`; GPUs are hidden unless a worker
   is spawned with `--gpu` (slots in `loop.yaml → infra`).
 - Events handed to a meta-work turn stay "in flight" until it completes; a crash, restart or stop puts them back.

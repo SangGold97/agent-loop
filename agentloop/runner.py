@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,11 @@ log = logging.getLogger("agentloop.runner")
 def unit_prefix() -> str:
     """Scope-name prefix unique to this platform home, so two installs never touch each other's workers."""
     return "agentloop-" + hashlib.sha1(str(home().resolve()).encode()).hexdigest()[:8]
+
+
+def scratch_root() -> Path:
+    """Where this platform home's per-turn scratch dirs (each turn's TMPDIR) live, outside every workspace."""
+    return Path(tempfile.gettempdir()) / unit_prefix()
 
 
 @dataclass

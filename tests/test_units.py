@@ -87,33 +87,13 @@ def test_verify_and_checklist():
     assert digest.checklist("- [x] a\n- [ ] b\n* [X] c") == (2, 3)
 
 
-def test_worker_digest_names_the_worker_and_earlier_commits():
+def test_worker_digest_is_the_reply_as_is():
     from types import SimpleNamespace
     sess = {"id": "w-1", "role": "reviewer"}
-    res = SimpleNamespace(stopped=False, error="", final="**Result:** approved", tokens=88_000, context=23_000)
-    cfg = {"max_output_words": 500, "max_diff_lines": 80}
-    stat = " a.py | 1 +\n 1 file changed, 1 insertion(+)"
-    text = digest.worker_digest(sess, 1, res, stat, "+x", {"out": "o", "diff": "d"}, cfg, ["b63d497 add a"])
-    # Identity and outcome only: no duration, tokens or cost
-    assert text.splitlines()[0] == "[Worker w-1 · role reviewer · turn 1] ok"
-    assert "tokens" not in text and "min" not in text and "$" not in text
-    assert "[Note] This diff includes 1 commit(s) made before this turn" in text and "b63d497 add a" in text
-    assert "[Note]" not in digest.worker_digest(sess, 1, res, stat, "+x", {"out": "o", "diff": "d"}, cfg)
-
-
-def test_commits_before_separates_brought_in_work(tmp_path):
-    import time
-    from agentloop import gitops
-    gitops.git(tmp_path, "init", "-q")
-    commit = lambda msg, when: gitops.git(tmp_path, *gitops.BOT, "commit", "-q", "--allow-empty", "-m", msg,
-                                          env={"GIT_COMMITTER_DATE": f"@{when} +0000"})
-    now = int(time.time())
-    commit("base", now - 300)
-    start = gitops.head(tmp_path)
-    commit("by another worker", now - 100)
-    commit("by this worker", now + 5)
-    assert [c.split(" ", 1)[1] for c in gitops.commits_before(tmp_path, start, gitops.head(tmp_path), now)] \
-        == ["by another worker"]
+    reply = "**Result:** approved\n" + "word " * 2000
+    res = SimpleNamespace(stopped=False, error="", final=reply, tokens=88_000, context=23_000)
+    # One line naming the worker and outcome, then the whole reply: no diff, trimming, tokens or cost
+    assert digest.worker_digest(sess, 1, res) == "[Worker w-1 · role reviewer · turn 1] ok\n" + reply
 
 
 def test_db_drops_cost_columns(tmp_path):
@@ -168,7 +148,7 @@ def test_guard_rules(tmp_path):
     assert "journal" not in guard.check(ev("Write", file_path=str(tmp_path / "goals/m1/spec.md")), w)
     assert not guard.check(ev("Bash", command="rm -rf build && pytest -q"), w)
     # Meta-work changes code only in its goal's integration worktree; push and human-owned files stay blocked
-    assert not guard.check(ev("Edit", file_path=str(tmp_path / "wt/_int-m1/app.py")), m)
+    assert not guard.check(ev("Edit", file_path=str(tmp_path / "wt/m1/app.py")), m)
     assert guard.check(ev("Edit", file_path=str(tmp_path / "repo/app.py")), m)
     assert guard.check(ev("Bash", command="git -C ../repo commit -am x"), m)
     assert guard.check(ev("Bash", command="git push"), m)
@@ -210,31 +190,48 @@ def test_guard_blocks_only_writes_to_human_files(tmp_path):
 
 
 def test_guard_meta_scope(tmp_path):
-    for d in ("wt/w-1", "wt/_int-m1", "wt/_int-m2", "repo", "meta"):
+    for d in ("wt/w-1", "wt/m1", "wt/m2", "repo", "meta"):
         (tmp_path / d).mkdir(parents=True, exist_ok=True)
     m, c = guard_env(tmp_path, "meta-work"), guard_env(tmp_path, "meta-chat")
     ev = lambda cmd, cwd="meta": {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path / cwd)}
     # Allowed for the meta-work: its integration worktree, its own files, reads anywhere
-    for cmd in ("cd ../wt/_int-m1 && echo x > a.py && git add -A && git commit -qm x",
-                "git -C ../wt/_int-m1 checkout -- a.py", "sed -i s/a/b/ ../wt/_int-m1/a.py",
+    for cmd in ("cd ../wt/m1 && echo x > a.py && git add -A && git commit -qm x",
+                "git -C ../wt/m1 checkout -- a.py", "sed -i s/a/b/ ../wt/m1/a.py",
                 "echo - x >> ../goals/m1/plan.md",
                 "git -C ../repo log --oneline | head", "cat ../wt/w-1/a.py > /tmp/a.py", "cd ../repo && git status"):
         assert guard.check(ev(cmd), m) is None, cmd
-    assert guard.check(ev("echo x > a.py", "wt/_int-m1"), m) is None
+    assert guard.check(ev("echo x > a.py", "wt/m1"), m) is None
     # Blocked: repo/, worker worktrees, other goals' integration, also after a cd or with git -C
     for cmd in ("echo x > ../repo/a.py", "cd ../repo && git checkout -b x", "git -C ../wt/w-1 commit -am x",
-                "cp /tmp/a.py ../wt/_int-m2/a.py", "cd ../wt/w-1; rm a.py", "mv ../wt/_int-m1/a.py ../repo/"):
+                "cp /tmp/a.py ../wt/m2/a.py", "cd ../wt/w-1; rm a.py", "mv ../wt/m1/a.py ../repo/"):
         assert guard.check(ev(cmd), m), cmd
     assert guard.check(ev("git commit -am x", "repo"), m)
     assert guard.check({"tool_name": "Write", "tool_input": {"file_path": str(tmp_path / "wt/w-1/a.py")},
                         "cwd": str(tmp_path)}, m)
     # A meta-chat reads the project but changes no code, not even in the integration worktree
-    assert guard.check(ev("cat ../wt/_int-m1/a.py && git -C ../wt/_int-m1 log"), c) is None
-    assert "loop note" in guard.check(ev("echo x > ../wt/_int-m1/a.py"), c)
-    assert guard.check({"tool_name": "Edit", "tool_input": {"file_path": str(tmp_path / "wt/_int-m1/a.py")},
+    assert guard.check(ev("cat ../wt/m1/a.py && git -C ../wt/m1 log"), c) is None
+    assert "loop note" in guard.check(ev("echo x > ../wt/m1/a.py"), c)
+    assert guard.check({"tool_name": "Edit", "tool_input": {"file_path": str(tmp_path / "wt/m1/a.py")},
                         "cwd": str(tmp_path)}, c)
     # Workers keep their old rules: the shell scope check is for meta sessions only
     assert guard.check(ev("echo x > ../repo/a.py", "wt/w-1"), guard_env(tmp_path, "worker")) is None
+
+
+def test_legacy_integration_worktree_moves(tmp_path):
+    from agentloop import gitops
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    gitops.git(repo, "init", "-q", "-b", "main")
+    gitops.git(repo, *gitops.BOT, "commit", "-q", "--allow-empty", "-m", "init")
+    gitops.git(repo, "branch", "loop/g1/integration")
+    gitops.git(repo, "worktree", "add", "-q", str(tmp_path / "wt" / "_int-g1"), "loop/g1/integration")
+    (tmp_path / "wt" / "_int-g1" / "wip.txt").write_text("uncommitted\n")
+    assert gitops.goal_refs(tmp_path, "g1") == ["loop/g1/integration"] and not gitops.goal_refs(tmp_path, "g")
+    assert gitops.move_legacy_worktree(tmp_path, "g1")
+    wt = gitops.int_worktree(tmp_path, "g1")
+    assert (wt / "wip.txt").exists() and not (tmp_path / "wt" / "_int-g1").exists()
+    assert gitops.current_branch(wt) == "loop/g1/integration"
+    assert not gitops.move_legacy_worktree(tmp_path, "g1")  # once only
 
 
 def test_checkpoint_and_restore_after_run(tmp_path):

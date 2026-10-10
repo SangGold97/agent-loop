@@ -40,11 +40,29 @@ def int_branch(gid: str) -> str:
 
 
 def int_worktree(ws: Path, gid: str) -> Path:
-    return ws / "wt" / f"_int-{gid}"
+    return ws / "wt" / gid
+
+
+def goal_refs(ws: Path, gid: str) -> list[str]:
+    """Branches loop/<gid>/* and tags exp/<gid>/* in the project repo, also those an accepted goal left behind."""
+    repo = ws / "repo"
+    if not repo.exists():
+        return []
+    return git(repo, "for-each-ref", "--format=%(refname:short)", f"refs/heads/loop/{gid}", f"refs/tags/exp/{gid}",
+               check=False).splitlines()
+
+
+def move_legacy_worktree(ws: Path, gid: str) -> bool:
+    """Move a goal's integration worktree from its old place, wt/_int-<gid>, to wt/<gid>. Returns True if moved."""
+    old, new = ws / "wt" / f"_int-{gid}", int_worktree(ws, gid)
+    if not old.exists() or new.exists():
+        return False
+    git(ws / "repo", "worktree", "move", str(old), str(new))
+    return True
 
 
 def ensure_integration(ws: Path, gid: str, base: str | None) -> Path:
-    """Create branch loop/<gid>/integration (from base) and its worktree wt/_int-<gid>."""
+    """Create branch loop/<gid>/integration (from base) and its worktree wt/<gid>."""
     repo, branch = ws / "repo", int_branch(gid)
     wt = int_worktree(ws, gid)
     if not branch_exists(repo, branch):
@@ -83,16 +101,6 @@ def ensure_excluded(repo: Path, patterns: tuple[str, ...]) -> None:
 
 def head(path: Path) -> str:
     return git(path, "rev-parse", "HEAD")
-
-
-def commits_before(path: Path, start: str, end: str, before: float) -> list[str]:
-    """Commits in start..end committed before `before`: work a turn brought in rather than wrote."""
-    out = []
-    for line in git(path, "log", "--format=%ct %h %s", f"{start}..{end}").splitlines():
-        ts, rest = line.split(" ", 1)
-        if int(ts) < int(before):
-            out.append(rest)
-    return out
 
 
 def snapshot(path: Path, message: str, actor: str | None = None) -> bool:
@@ -141,12 +149,6 @@ def restore_after_run(path: Path, before: set[str]) -> tuple[str, list[str]]:
                 break
             parent.rmdir()
     return changed, created
-
-
-def diff(path: Path, start: str, end: str) -> tuple[str, str]:
-    if start == end:
-        return "", ""
-    return git(path, "diff", "--stat", start, end), git(path, "diff", start, end)
 
 
 def merge(ws: Path, gid: str, branch: str) -> dict:

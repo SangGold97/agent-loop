@@ -26,11 +26,12 @@ sessions, merges their work and closes the goal; the human steers from the web U
   session for one turn and returns its final text as `[Advice]`. Consultations share `max_meta_turns` and are
   read-only like a meta-chat (guard, `loop` API, change report after the turn).
 - **Worker turn**: runs in its own worktree on `loop/<goal>/<role>-<sid>`, is snapshot-committed, and its final
-  report + diff become a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
-  `loop/<goal>/integration`, checked out at `wt/_int-<goal>` (`gitops.py`). The meta-work may also change code
+  reply becomes a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
+  `loop/<goal>/integration`, checked out at `wt/<goal>` (`gitops.py`). The meta-work may also change code
   there; `Engine.checkpoint` commits those changes before a spawn, merge or `loop done` and after each turn.
 - **Running a CLI**: `runner.py` starts each turn in `systemd-run --user --scope` (anything left in the scope when
-  the CLI exits is killed and reported as `TurnResult.leftover`) and streams JSON lines through an
+  the CLI exits is killed and reported as `TurnResult.leftover`), with its own `TMPDIR` under
+  `runner.scratch_root()` that `Engine.run_turn` removes when the turn ends, and streams JSON lines through an
   adapter (`adapters/claude.py`, `adapters/codex.py`) that maps vendor events to the normalized events listed in
   `adapters/base.py`. A new CLI means a new `Adapter` registered in `ADAPTERS`.
 - **Guardrails**: `guard.py` is the PreToolUse hook for both CLIs, wired through `templates/workspace/*/hooks.json`

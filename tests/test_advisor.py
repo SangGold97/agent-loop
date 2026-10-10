@@ -27,7 +27,7 @@ def test_advice_round_trip_is_fresh_readonly_and_accounted(server):
     gid = advice_goal(server, "advice-full", autocompact="300k")
     assert client.post(f"/api/goals/advice-full/{gid}/start").status_code == 200
     view = finished(client, "advice-full", gid)
-    # The final meta-work turn may still be committing its journal after closing the goal.
+    # The final meta-work turn may still be committing its files after closing the goal.
     wait_for(lambda: engine.db.goal("advice-full", gid)["meta_turns"] == 5)
     sessions = engine.db.q("SELECT * FROM sessions WHERE ws='advice-full' AND kind='meta-advisor'")
     assert len(sessions) == 2 and len({s["vendor_id"] for s in sessions}) == 2
@@ -45,6 +45,9 @@ def test_advice_round_trip_is_fresh_readonly_and_accounted(server):
     inbox = engine.db.q("SELECT * FROM inbox WHERE ws='advice-full' AND kind IN ('advice', 'advice_request')")
     assert len(inbox) == 4 and all(i["consumed"] == 1 for i in inbox)
     assert all("[Advice]" in json.loads(i["payload"])["text"] for i in inbox if i["kind"] == "advice")
+    advice = client.get(f"/api/goals/advice-full/{gid}").json()["advice"]  # the PLAN & ADVICE tab
+    text = "Consider a different validation split."
+    assert advice == {s["id"]: {"status": "completed", "text": text} for s in sessions}
     assert engine.db.goal("advice-full", gid)["tokens"] == 75
     assert not (engine.wsp("advice-full") / "repo/advisor.txt").exists()
 
@@ -114,14 +117,14 @@ def test_advisor_change_to_project_is_reported(server, monkeypatch):
     client.post(f"/api/goals/advice-write/{gid}/start")
     finished(client, "advice-write", gid)
     assert [a for a in alerts if a.get("text", "").startswith("Advisor ") and "integration worktree" in a["text"]]
-    assert (engine.wsp("advice-write") / "wt" / f"_int-{gid}" / "advisor.txt").exists()
+    assert (engine.wsp("advice-write") / "wt" / gid / "advisor.txt").exists()
 
 
 def test_advisor_guard_and_configuration(tmp_path, monkeypatch):
     env = {"LOOP_WS": str(tmp_path), "LOOP_ROLE": "meta-advisor"}
     assert guard.check({"tool_name": "Edit", "tool_input": {"file_path": "/tmp/anything"}}, env)
     assert guard.check({"tool_name": "apply_patch", "tool_input": {}}, env)
-    for cmd in ("echo bad > plan.md", "git commit -am bad", "cp plan.md journal.md"):
+    for cmd in ("echo bad > plan.md", "git commit -am bad", "cp spec.md plan.md"):
         assert guard.check({"tool_name": "Bash", "cwd": str(tmp_path), "tool_input": {"command": cmd}}, env)
     assert not guard.check({"tool_name": "Bash", "tool_input": {"command": "cat spec.md; git diff"}}, env)
     monkeypatch.setattr(agents, "load_models", lambda: {"claude": {"version": "test", "models": [

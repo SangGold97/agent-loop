@@ -1,11 +1,14 @@
 """End-to-end with the scripted fake agent: workspace -> goal -> meta-work -> worker -> merge -> done."""
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 import yaml
 
+from agentloop import workspace
 from agentloop.engine import AgentError
+from agentloop.runner import scratch_root
 
 from conftest import wait_for
 
@@ -38,15 +41,20 @@ def test_full_goal(server):
     assert len(workers) == 1 and workers[0]["merged"] == 1
     sid = workers[0]["id"]
     run = ws / "goals" / gid / "runs" / sid
-    assert (run / "t1.prompt.md").exists() and "hello.py" in (run / "t1.diff").read_text()
+    assert (run / "t1.prompt.md").exists() and (run / "t1.out.md").exists() and not list(run.glob("*.diff"))
     # The worker got the meta-work's prompt as is; its outputs are kept, its .venv/ and .artifacts/ never committed
     assert (run / "artifacts" / "prompt.txt").read_text() == "Create hello.py"
-    assert ".venv" not in (run / "t1.diff").read_text() and ".artifacts" not in (run / "t1.diff").read_text()
+    # The turn's own scratch dir (its TMPDIR) is gone once the turn ended
+    scratch = Path((run / "artifacts" / "tmpdir.txt").read_text())
+    assert scratch.parent == scratch_root() and scratch.name == f"{sid}-t1" and not scratch.exists()
+    committed = subprocess.run(["git", "ls-tree", "-r", "--name-only", workers[0]["branch"]], cwd=ws / "repo",
+                               capture_output=True, text=True).stdout
+    assert "hello.py" in committed and ".venv" not in committed and ".artifacts" not in committed
     log = engine.turn_log("demo", sid, 1)
     assert "$ Bash python hello.py" in log and "  hello" in log
-    assert (ws / "wt" / f"_int-{gid}" / "hello.py").exists()
+    assert (ws / "wt" / gid / "hello.py").exists()
     # The meta-work's own uncommitted change survived the merge and was committed under its name
-    int_log = subprocess.run(["git", "log", "--format=%an|%s", "--", "meta_note.txt"], cwd=ws / "wt" / f"_int-{gid}",
+    int_log = subprocess.run(["git", "log", "--format=%an|%s", "--", "meta_note.txt"], cwd=ws / "wt" / gid,
                              capture_output=True, text=True).stdout
     assert int_log.startswith("meta-work(") and "before merging " + sid in int_log
     authors = subprocess.run(["git", "log", "--format=%an"], cwd=ws, capture_output=True, text=True).stdout
@@ -136,10 +144,10 @@ def test_worker_platform_failure_reaches_meta_work(server, monkeypatch):
     client, engine = server
     client.post("/api/workspaces", json={"name": "broken"})
 
-    def broken_diff(*_a):
+    def broken_digest(*_a):
         raise RuntimeError("index.lock exists")
 
-    monkeypatch.setattr("agentloop.engine.gitops.diff", broken_diff)
+    monkeypatch.setattr("agentloop.engine.digest.worker_digest", broken_digest)
     gid = client.post("/api/workspaces/broken/goals", json={
         "title": "Broken git", "spec": "x", "goal": "- x", "config": goal_config()}).json()["id"]
     client.post(f"/api/goals/broken/{gid}/start")
@@ -361,7 +369,7 @@ def test_worker_usage_limit_is_reported_and_refunded(server):
 
 
 def int_git(ws: Path, gid: str, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=ws / "wt" / f"_int-{gid}", capture_output=True, text=True).stdout
+    return subprocess.run(["git", *args], cwd=ws / "wt" / gid, capture_output=True, text=True).stdout
 
 
 def test_meta_work_does_the_work_itself_over_several_turns(server):
@@ -397,7 +405,7 @@ def test_verify_that_edits_tracked_files_is_rejected_and_undone(server):
     view = wait_for(lambda: (v := client.get(f"/api/goals/vedit/{gid}").json())["row"]["status"]
                     == "awaiting_review" and v)
     assert view["row"]["outcome"] == "partial"
-    wt = ws / "wt" / f"_int-{gid}"
+    wt = ws / "wt" / gid
     assert (wt / "step1.py").read_text() == "print(1)\n" and not (wt / "out").exists()
     # The goal closes inside the turn, so its output is recorded a moment later
     final = wait_for(lambda: engine.db.one("SELECT final FROM turns WHERE session=? ORDER BY n DESC LIMIT 1",
@@ -439,3 +447,24 @@ def test_meta_chat_change_to_project_is_reported(server, monkeypatch):
     chat = client.post(f"/api/goals/chatw/{gid}/meta-chats", json={}).json()["id"]
     client.post(f"/api/meta-chats/{chat}/messages", json={"text": "CHATWRITE please"})
     wait_for(lambda: any("integration worktree" in a.get("text", "") for a in alerts))
+
+
+def test_goal_id_is_the_title_slug_and_must_be_new(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "ids"})
+    ws = Path(engine.wsp("ids"))
+    new = lambda title: client.post("/api/workspaces/ids/goals", json={
+        "title": title, "spec": "Small change DIRECT", "goal": "- x", "config": goal_config()})
+    first = new("Lọc từ theo tần suất")
+    assert first.status_code == 200 and first.json()["id"] == "loc-tu-theo-tan-suat"
+    # Same slug, other spelling: refused, nothing created
+    dup = new("lọc TỪ theo tần-suất!")
+    assert dup.status_code == 400 and "already exists" in dup.json()["error"]
+    assert new("w-1a2b3c").status_code == 400  # would share wt/ with a worker
+    # A branch left by a deleted goal's id still blocks it
+    subprocess.run(["git", "branch", "loop/old-goal/integration"], cwd=ws / "repo", check=True)
+    assert "already exists" in new("Old goal").json()["error"]
+    # Newest first by creation time, not by id
+    time.sleep(1.1)
+    assert new("Another goal").json()["id"] == "another-goal"
+    assert workspace.list_goals(ws) == ["another-goal", "loc-tu-theo-tan-suat"]

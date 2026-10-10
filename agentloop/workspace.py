@@ -8,7 +8,6 @@ import shutil
 import threading
 import time
 from collections import defaultdict
-from datetime import date
 from pathlib import Path
 
 import yaml
@@ -19,7 +18,7 @@ from .guard import PROTECTED_RE
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 HUMAN_FILES = {"spec.md", "goal.md", "goal.yaml"}
-GOAL_FILES = ("spec.md", "goal.md", "plan.md", "journal.md", "notes.md", "report.md", "goal.yaml")
+GOAL_FILES = ("spec.md", "goal.md", "plan.md", "notes.md", "report.md", "goal.yaml")
 _locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 PRE_COMMIT = """#!/bin/sh
@@ -57,9 +56,11 @@ def goal_dir(ws: Path, gid: str) -> Path:
 
 
 def list_goals(ws: Path) -> list[str]:
+    """Goal ids, newest first by goal.yaml `created` (ids carry no date)."""
     root = ws / "goals"
-    return sorted((p.name for p in root.iterdir() if (p / "goal.yaml").exists()), reverse=True) \
-        if root.exists() else []
+    dirs = [p for p in root.iterdir() if (p / "goal.yaml").exists()] if root.exists() else []
+    created = {p.name: str((yaml.safe_load((p / "goal.yaml").read_text()) or {}).get("created", "")) for p in dirs}
+    return sorted(created, key=lambda g: (created[g], g), reverse=True)
 
 
 def commit(ws: Path, actor: str, message: str, protected: bool = True) -> bool:
@@ -159,10 +160,14 @@ def create_goal(ws: Path, title: str, spec: str, goal_text: str, config: dict | 
     title = (title or "").strip()
     if not title:
         raise ValueError("goal title is required")
-    base_id = f"{date.today().isoformat()}-{gitops.slug(title, 40)}"
-    gid, i = base_id, 2
-    while (ws / "goals" / gid).exists():
-        gid, i = f"{base_id}-{i}", i + 1
+    # The id names the goal's dir, its branches loop/<gid>/*, tags exp/<gid>/* and its integration worktree
+    # wt/<gid>/, so it must be new to all of them; wt/w-<hex> is a worker's worktree
+    gid = gitops.slug(title, 40)
+    if re.fullmatch(r"w-[0-9a-f]{6}", gid):
+        raise ValueError(f"the title gives the goal id '{gid}', which is reserved for workers; choose another title")
+    if (ws / "goals" / gid).exists() or gitops.goal_refs(ws, gid):
+        raise ValueError(f"a goal '{gid}' already exists in this workspace (its folder, branches or tags); "
+                         "choose another title")
     gdir = ws / "goals" / gid
     shutil.copytree(TEMPLATES / "goal", gdir)
     (gdir / "runs").mkdir()
