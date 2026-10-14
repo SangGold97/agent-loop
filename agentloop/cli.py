@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import shlex
+import signal
+import subprocess
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   spawn   start a new worker session           loop spawn --agent claude --role coder <<'EOF' ... EOF
@@ -20,18 +25,20 @@ HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   status  goal overview (meta-chat)
   note    propose a note to the human (meta-chat)  loop note "try X instead of Y"
   budget  budget usage
-  infra   host resources"""
+  infra   host resources and the RAM pool (workers too)
+  run     run a RAM-heavy job with a RAM grant (workers too)   loop run --ram 10 -- python train.py"""
 
 
-def call(cmd: str, payload: dict) -> str:
+def call(cmd: str, payload: dict, full: bool = False):
     api, token = os.environ.get("LOOP_API"), os.environ.get("LOOP_TOKEN")
     if not api or not token:
-        sys.exit("loop: only meta-agent sessions started by agent-loop can use this command")
+        sys.exit("loop: only sessions started by agent-loop can use this command")
     req = urllib.request.Request(f"{api}/api/agent/{cmd}", data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json", "X-Loop-Token": token})
     try:
         with urllib.request.urlopen(req, timeout=1900) as resp:
-            return json.loads(resp.read())["text"]
+            data = json.loads(resp.read())
+            return data if full else data["text"]
     except urllib.error.HTTPError as exc:
         try:
             msg = json.loads(exc.read()).get("error") or exc.reason
@@ -56,6 +63,41 @@ def text_arg(args, name: str) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.read()
     sys.exit(f"loop: provide the {name} via --{name}, --{name}-file or stdin")
+
+
+def run_job(gb: float, wait_min: float, cmd: list[str]) -> int:
+    """`loop run`: hold a RAM grant from the shared pool while `cmd` runs.
+
+    The job runs in a scope of its own capped at its grant, so a job that outgrows its grant is killed by the
+    kernel inside that scope and costs no other process. This helper and the job keep the default OOM score while
+    the session's other processes go first, so a job that keeps to its grant is not killed for another's
+    overuse. The grant ends with the job; if this helper dies, the platform stops the job and frees the grant."""
+    if not cmd:
+        sys.exit("loop run: give the command after --, e.g. loop run --ram 10 -- python train.py")
+    grant = call("ram", {"gb": gb, "wait": wait_min * 60, "pid": os.getpid(), "cmd": shlex.join(cmd)}, full=True)
+    print(f"loop run: {grant['text']}", file=sys.stderr, flush=True)
+    with contextlib.suppress(OSError):
+        Path("/proc/self/oom_score_adj").write_text("0")
+    # A SIGTERM (e.g. the shell running this being stopped) must still end the job and release the grant
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    rc, child = 127, None
+    try:
+        child = subprocess.Popen([*grant["argv"], *cmd])
+        rc = child.wait()
+    except OSError as exc:
+        print(f"loop run: cannot start {cmd[0]}: {exc}", file=sys.stderr)
+    finally:
+        if child and child.poll() is None:
+            child.kill()
+        # The platform stops whatever is left in the job's scope when the grant is released
+        with contextlib.suppress(SystemExit):
+            call("ram-release", {"grant": grant["grant"], "killed": rc == -signal.SIGKILL})
+    if rc == -signal.SIGKILL:
+        print(f"loop run: the job was killed (SIGKILL), most likely for outgrowing its {gb} GB grant; run it "
+              "with a larger --ram or make it use less memory", file=sys.stderr)
+        return 137
+    print(f"loop run: done (exit {rc})", file=sys.stderr)
+    return rc
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -85,8 +127,14 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("note").add_argument("text")
     for name in ("ls", "status", "budget", "infra"):
         sub.add_parser(name)
+    run = sub.add_parser("run", help="run a RAM-heavy job with a RAM grant")
+    run.add_argument("--ram", type=float, required=True, help="GB the job needs at its peak")
+    run.add_argument("--wait", type=float, default=30, help="minutes to wait for the RAM (max 30)")
+    run.add_argument("command", nargs=argparse.REMAINDER, help="-- command and its arguments")
     a = p.parse_args(argv)
 
+    if a.cmd == "run":
+        sys.exit(run_job(a.ram, a.wait, a.command[1:] if a.command[:1] == ["--"] else a.command))
     if a.cmd in ("spawn", "send", "advise"):
         payload = {"prompt": text_arg(a, "prompt")}
         if a.cmd == "spawn":

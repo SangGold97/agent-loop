@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import time
 from collections import deque
+from pathlib import Path
 
 import psutil
 
@@ -28,6 +29,52 @@ def tree_rss(pid: int) -> int:
         return sum(p.memory_info().rss for p in [proc, *proc.children(recursive=True)])
     except psutil.Error:
         return 0
+
+
+def cgroup_dir(pid: int) -> Path | None:
+    """The cgroup v2 directory a process runs in (its turn's scope), if the memory files are readable there."""
+    try:
+        rel = Path(f"/proc/{pid}/cgroup").read_text().strip().split("::", 1)[1]
+    except (OSError, IndexError):
+        return None
+    path = Path("/sys/fs/cgroup" + rel)
+    return path if (path / "memory.stat").exists() else None
+
+
+def mark_oom_first(path: Path, keep: set[int]) -> None:
+    """Put every process of a turn's scope but `keep` (the CLI and its `loop run` helpers) first in line for the
+    OOM killer.
+
+    The CLI, the helpers and their jobs (which run in scopes of their own) keep the default score, so when the
+    pool runs out the kernel kills a tool process that holds no RAM grant, not an agent or a job that keeps to its
+    grant."""
+    try:
+        pids = (path / "cgroup.procs").read_text().split()
+    except OSError:
+        return
+    for pid in pids:
+        if int(pid) in keep:
+            continue
+        adj = Path(f"/proc/{pid}/oom_score_adj")
+        try:
+            if adj.read_text().strip() != "1000":
+                adj.write_text("1000")
+        except OSError:  # the process has exited
+            pass
+
+
+def scope_memory(path: Path) -> tuple[int, int] | None:
+    """Anonymous memory and OOM kills of one turn's scope.
+
+    Anonymous memory is what the processes really hold (page cache is reclaimable and not counted), and it
+    includes jobs the agent detached from the CLI's process tree."""
+    try:
+        anon = next(int(line.split()[1]) for line in (path / "memory.stat").read_text().splitlines()
+                    if line.startswith("anon "))
+        events = dict(line.split() for line in (path / "memory.events").read_text().splitlines())
+        return anon, int(events.get("oom_kill", 0))
+    except (OSError, StopIteration, ValueError):
+        return None
 
 
 class Infra:

@@ -1,4 +1,4 @@
-"""Run one headless CLI turn: spawn (optionally in a memory-capped systemd scope), stream, parse."""
+"""Run one headless CLI turn: spawn (in a systemd scope inside the shared RAM pool), stream, parse."""
 from __future__ import annotations
 
 import asyncio
@@ -32,6 +32,11 @@ def unit_prefix() -> str:
     return "agentloop-" + hashlib.sha1(str(home().resolve()).encode()).hexdigest()[:8]
 
 
+def pool_slice() -> str:
+    """The systemd slice every session's scope runs in; its MemoryMax is the RAM pool they share."""
+    return unit_prefix() + ".slice"
+
+
 def scratch_root() -> Path:
     """Where this platform home's per-turn scratch dirs (each turn's TMPDIR) live, outside every workspace."""
     return Path(tempfile.gettempdir()) / unit_prefix()
@@ -48,6 +53,7 @@ class TurnResult:
     stopped: bool = False
     leftover: tuple[str, ...] = ()  # commands still running in the scope when the CLI exited (now stopped)
     limited_until: float | None = None  # the vendor refused the turn for a usage limit that resets then
+    memory: str = ""  # the engine's note on the turn's memory peak and kills; empty when unremarkable
 
 
 def systemd_available() -> bool:
@@ -87,9 +93,21 @@ def reap_scope(unit: str | None, pgid: int) -> tuple[str, ...]:
             os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-    if alive:  # SIGKILL is immediate; `systemctl stop` could block the event loop for the unit's stop timeout
-        subprocess.run(["systemctl", "--user", "kill", "-s", "SIGKILL", f"{unit}.scope"], capture_output=True)
+    if alive and unit:
+        kill_unit(unit)
     return tuple(cmds)
+
+
+def job_scope_argv(unit: str, gb: float) -> list[str]:
+    """Prefix that runs a `loop run` job in its own scope in the pool, capped at its grant: the kernel stops a
+    job that outgrows its grant inside that scope, so its overuse never costs another process."""
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", f"--slice={pool_slice()}",
+            "-p", f"MemoryMax={gb}G", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=continue", "--"]
+
+
+def kill_unit(unit: str) -> None:
+    # SIGKILL is immediate; `systemctl stop` could block the event loop for the unit's stop timeout
+    subprocess.run(["systemctl", "--user", "kill", "-s", "SIGKILL", f"{unit}.scope"], capture_output=True)
 
 
 def child_env(extra: dict) -> dict:
@@ -107,18 +125,36 @@ class Runner:
     def __init__(self):
         self.procs: dict[str, tuple[asyncio.subprocess.Process, str | None]] = {}
         self.stopping: set[str] = set()
+        self.pool_gb: float | None = None
+
+    def set_pool(self, gb: float) -> None:
+        """Cap the slice all sessions share, so an out-of-memory kill stays among agent processes."""
+        if gb != self.pool_gb and systemd_available():
+            subprocess.run(["systemctl", "--user", "set-property", "--runtime", pool_slice(), f"MemoryMax={gb}G",
+                            "MemorySwapMax=0"], capture_output=True)
+            self.pool_gb = gb
+
+    def clear_pool(self) -> None:
+        """Drop the slice and its runtime cap on shutdown (its sessions are stopped by then), so a platform home
+        that never runs again leaves nothing behind in systemd."""
+        if self.pool_gb is not None:
+            for verb in ("stop", "revert"):
+                subprocess.run(["systemctl", "--user", verb, pool_slice()], capture_output=True)
+            self.pool_gb = None
 
     async def run(self, key: str, spec: RunSpec, *, raw_log: Path, event_log: Path,
                   on_event: Callable[[dict], Awaitable[None]], timeout_s: float,
                   memory_max_gb: float | None = None) -> TurnResult:
         adapter = ADAPTERS[spec.agent]
         argv, unit = adapter.argv(spec), None
-        # Every session gets a named scope so an unclean restart can find and stop orphans;
-        # sessions that run project jobs additionally get a hard memory cap
+        # Every session gets a named scope in the shared pool slice so an unclean restart can find and stop
+        # orphans; an optional per-session cap comes on top of the pool. OOMPolicy=continue keeps systemd from
+        # stopping the whole turn (CLI and granted jobs too) when the kernel kills one process in it
         if systemd_available():
             unit = f"{unit_prefix()}-{key}-{int(time.time() * 1000)}"
             caps = ["-p", f"MemoryMax={memory_max_gb}G", "-p", "MemorySwapMax=0"] if memory_max_gb else []
-            argv = ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", *caps, "--", *argv]
+            argv = ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
+                    f"--slice={pool_slice()}", "-p", "OOMPolicy=continue", *caps, "--", *argv]
         env = child_env({**spec.env, **adapter.env(spec)})
         st = ParseState()
         raw_log.parent.mkdir(parents=True, exist_ok=True)

@@ -8,6 +8,8 @@ import time
 import uuid
 from pathlib import Path
 
+import psutil
+
 
 def emit(obj):
     print(json.dumps(obj), flush=True)
@@ -80,6 +82,32 @@ def main():
             Path(".artifacts/tmpdir.txt").write_text(os.environ["TMPDIR"])
             if "TAMPER" in prompt:  # a write the guard does not see; the platform must revert it
                 (gdir / "goal.md").write_text("- nothing to do\n")
+            if "RAMJOB" in prompt:
+                # A tool process goes first to the OOM killer within a second; the CLI and a granted job do not
+                tool = subprocess.Popen(["sleep", "5"])
+                time.sleep(2.5)
+                adj = " ".join(Path(f"/proc/{pid}/oom_score_adj").read_text().strip() for pid in (os.getpid(), tool.pid))
+                tool.kill()
+                ok = loop("run", "--ram", "0.5", "--", sys.executable, "-c",
+                          "print('job ran, adj', open('/proc/self/oom_score_adj').read().strip())")
+                # A job that outgrows its grant is killed in its own scope; steering is refused to a worker
+                over = loop("run", "--ram", "0.1", "--", sys.executable, "-c",
+                            "import time; x = bytearray(300 * 2**20); time.sleep(10)")
+                spawn = loop("spawn", "--agent", "fake", "--role", "x", "--prompt", "x")
+                # The job of a killed `loop run` helper is stopped with it, not left running without a grant
+                helper = subprocess.Popen(["loop", "run", "--ram", "0.2", "--", "sleep", "30"],
+                                          stderr=subprocess.PIPE, text=True)
+                helper.stderr.readline()
+                time.sleep(0.5)
+                job = psutil.Process(helper.pid).children()[0]
+                helper.kill()
+                helper.wait()
+                try:
+                    job.wait(timeout=10)
+                    orphan = "job stopped"
+                except psutil.TimeoutExpired:
+                    orphan = "job still running"
+                Path(".artifacts/ram.txt").write_text("\n---\n".join([adj, ok, over, spawn, orphan]))
             emit({"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "Bash", "input": {"command": "python hello.py"}}]}})
             emit({"type": "user", "message": {"content": [{"type": "tool_result", "content": "hello"}]}})
@@ -121,7 +149,7 @@ def main():
             text += "\n" + loop("done", "--status", "partial", stdin="- wip only")
         elif "[Kickoff]" in prompt:
             (gdir / "plan.md").write_text("# Plan\n\n- [ ] create hello.py\n")
-            task = "Create hello.py" + (" TAMPER" if "TAMPER" in (gdir / "spec.md").read_text() else "")
+            task = "Create hello.py" + "".join(f" {k}" for k in ("TAMPER", "RAMJOB") if k in _spec(gdir))
             text = loop("spawn", "--agent", "fake", "--role", "coder", "--prompt", task)
         elif m := re.search(r"\[Worker (w-\w+)", prompt):
             (wt / "meta_note.txt").write_text("written by the meta-work\n")  # uncommitted: the merge must keep it

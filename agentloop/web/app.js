@@ -1012,7 +1012,7 @@ function renderInfra() {
     <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>goal</th><th>memory</th></tr>
       ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)} ${esc(x.role || '')}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td></tr>`).join('')}</table>`
         : '<div class="empty">No agent sessions running.</div>'}
-      <p class="hint">Workers run in a systemd scope capped by infra.worker_memory_max_gb (loop.yaml); new workers are refused below min_free_ram_gb.</p>`)}</div></div>`;
+      <p class="hint">All sessions share one RAM pool: host RAM minus infra.pool_reserve_gb (loop.yaml). Jobs over about 2 GB hold a grant through <code>loop run --ram</code>; new workers are refused while less than min_free_ram_gb is left to grant.</p>`)}</div></div>`;
   drawChart($('#infra-chart'), 600);
 }
 // Line chart of cpu/ram(/vram) %; `pct` labels the grid lines as 0%…100% (sidebar)

@@ -5,6 +5,9 @@
   one or install into the user or system Python. Run the project from your checkout instead of installing it
   there; to test packaging, use a throwaway venv in `$TMPDIR`.
 - Scratch work goes in `$TMPDIR`, which is emptied when your turn ends.
+- RAM on this machine is shared. Run any job that may need more than about 2 GB (training, fine-tuning, large
+  data loads) as `loop run --ram <GB> -- <cmd>`: it waits until that RAM is free, and a job that outgrows it is
+  killed, so ask for its peak plus a margin. `loop infra` shows what is free.
 - Outputs that are not code (logs, metrics, plots, reports) go under `.artifacts/` in the project directory
   unless the prompt names another place. It is kept for the requester, so it holds only results and evidence
   worth keeping. `.artifacts/` is never committed.

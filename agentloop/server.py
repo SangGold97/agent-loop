@@ -277,6 +277,9 @@ def create_app(api_url: str) -> FastAPI:
     @app.post("/api/agent/{cmd}")
     async def agent_cmd(cmd: str, req: Request, x_loop_token: str | None = Header(None)):
         caller, b = engine.caller(x_loop_token), await body(req)
+        # Workers only use the RAM pool; steering the goal stays with the meta-work
+        if caller["kind"] == "worker" and cmd not in ("ram", "ram-release", "infra"):
+            raise AgentError("workers can only use `loop run` and `loop infra`")
         if caller["kind"] == "meta-advisor" and cmd not in ("ls", "show", "status", "budget", "infra"):
             raise AgentError("the advisor has read-only access; return advice to the meta-work in your final reply")
         if cmd in ("spawn", "send", "stop", "merge", "done", "advise") and caller["kind"] != "meta-work":
@@ -310,6 +313,11 @@ def create_app(api_url: str) -> FastAPI:
             text = digest.budget_line(engine.budget(caller["ws"], caller["goal"]))
         elif cmd == "infra":
             text = engine.infra_text()
+        elif cmd == "ram":
+            return await engine.ram_grant(caller, float(b.get("gb") or 0), float(b.get("wait") or 0),
+                                          int(b.get("pid") or 0), str(b.get("cmd", "")))
+        elif cmd == "ram-release":
+            text = engine.ram_release(caller, int(b.get("grant") or 0), bool(b.get("killed")))
         else:
             raise HTTPException(404, f"unknown command {cmd}")
         return {"text": text}

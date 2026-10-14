@@ -22,7 +22,7 @@ make serve          # http://127.0.0.1:8765
 make test           # unit + end-to-end tests (scripted fake agent, no API cost)
 ```
 
-Requirements: Linux/WSL with systemd (for per-worker memory caps), Python ≥ 3.10.
+Requirements: Linux/WSL with systemd (for the shared RAM pool), Python ≥ 3.10.
 The platform uses your existing CLI logins; it never asks for keys.
 
 ## Concepts
@@ -65,9 +65,18 @@ The platform uses your existing CLI logins; it never asks for keys.
   CLI keep running, a refused worker turn is not counted, and spawns on that CLI are refused until the reset.
 - Every turn runs in its own `systemd-run --user --scope`. Processes still running when the CLI exits (a job the
   agent backgrounded) are stopped and named in the digest; orphans are stopped on restart. Each turn also gets its
-  own `TMPDIR`, removed when the turn ends, so scratch files never pile up in `/tmp`. Workers, meta-work
-  and advisors also get `MemoryMax`. Spawns are refused under `min_free_ram_gb`; GPUs are hidden unless a worker
-  is spawned with `--gpu` (slots in `loop.yaml → infra`).
+  own `TMPDIR`, removed when the turn ends, so scratch files never pile up in `/tmp`. GPUs are hidden unless a
+  worker is spawned with `--gpu` (slots in `loop.yaml → infra`).
+- RAM is one pool for all sessions: their scopes share a slice capped at host RAM minus `pool_reserve_gb`, so an
+  out-of-memory kill stays among agent processes. A job that needs more than about 2 GB runs through
+  `loop run --ram <GB> -- <cmd>`, which waits until that much is left to grant and holds it until the job ends.
+  The job runs in a scope of its own capped at its grant, so a job that outgrows it is killed there and costs no
+  other process; if the helper dies, the platform stops the job with it. Within a second of starting, every other
+  process of a turn but the CLI is marked first in line for the OOM killer, so when the pool runs out the kernel
+  kills a tool process without a grant, not an agent or a job that keeps to its grant. Processes outside the
+  platform can still exhaust the host's reserve. Spawns, sends and advice are refused while less than
+  `min_free_ram_gb` is left to grant; the refused goal then waits without counting as idle and gets an event once
+  enough is free again. The digest reports a turn's memory peak and kills.
 - Events handed to a meta-work turn stay "in flight" until it completes; a crash, restart or stop puts them back.
 - The advisor is read-only like a meta-chat: the guard blocks its edits, its `loop` token permits read commands
   only, and a turn that still changes `repo/` or the integration worktree raises an alert. A stopped or

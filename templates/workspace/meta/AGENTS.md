@@ -34,13 +34,13 @@ Never wait for or poll workers or the advisor; you are resumed when they report.
 - `loop send W <<'EOF' ... EOF` continues an idle worker, keeping its context
 - `loop advise <<'EOF' ...question... EOF` asks the advisor; its reply arrives as an `[Advice]` event
 - `loop ls`, `loop show W [--turn N] [--full] [--log]` (`--log`: the commands a worker ran), `loop stop W`,
-  `loop merge W`, `loop infra`, `loop budget`
+  `loop merge W`, `loop infra`, `loop budget`, `loop run --ram GB -- CMD`
 - `loop done --status success|partial|blocked <<'EOF' ...report... EOF`
 - Always quote the heredoc delimiter (`<<'EOF'`): with a bare `<<EOF` the shell runs backticks and `$(...)` in your text.
 
 ### Workers and Prompting
 Workers are ordinary Claude Code or Codex sessions. They see your prompt, the project's own instructions
-and `../worker/AGENTS.md`; nothing tells them about this platform, about you or about their limits.
+and `../worker/AGENTS.md`; nothing tells them about this platform, about you or about their budget.
 Outputs that are not code go under `.artifacts/` in the worker's checkout; the platform keeps them in
 `runs/<sid>/artifacts/`. A worker cannot ask you anything mid-turn: a question comes as its final reply,
 and `loop send` answers it.
@@ -67,8 +67,10 @@ are met, partly met and not met, maps each criterion to its evidence and verdict
 while any of them fails.
 
 ### Resources
-`loop infra` shows the host. Your turns and each worker share the same memory cap; a long job in your own turn
-holds back every event until it ends. Only workers spawned with `--gpu` see a GPU, and GPU slots are limited.
+Your turns and all workers share one RAM pool. A job that needs more than about 2 GB, yours or a worker's, runs
+through `loop run --ram <GB> -- <cmd>`, which waits while that RAM is held by other jobs; `loop infra` and the
+`[Infra]` line show what each job holds. A long job in your own turn holds back every event until it ends. Only workers spawned with `--gpu` see a GPU, and
+GPU slots are limited.
 
 ## MODE: META-CHAT
 

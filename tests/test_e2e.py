@@ -1,4 +1,6 @@
 """End-to-end with the scripted fake agent: workspace -> goal -> meta-work -> worker -> merge -> done."""
+import asyncio
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -8,7 +10,7 @@ import yaml
 
 from agentloop import workspace
 from agentloop.engine import AgentError
-from agentloop.runner import scratch_root
+from agentloop.runner import scratch_root, systemd_available
 
 from conftest import wait_for
 
@@ -471,3 +473,70 @@ def test_goal_id_is_the_title_slug_and_must_be_new(server):
     time.sleep(1.1)
     assert new("Another goal").json()["id"] == "another-goal"
     assert workspace.list_goals(ws) == ["another-goal", "loc-tu-theo-tan-suat"]
+
+
+def test_loop_run_grants_ram_and_stops_a_job_over_its_grant(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "ram"})
+    ws = Path(engine.wsp("ram"))
+    gid = client.post("/api/workspaces/ram/goals", json={
+        "title": "RAM job", "spec": "Create hello.py RAMJOB", "goal": "- hello.py exists",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/ram/{gid}/start")
+    view = wait_for(lambda: (v := client.get(f"/api/goals/ram/{gid}").json())["row"]["status"]
+                    == "awaiting_review" and v)
+    sid = next(s["id"] for s in view["sessions"] if s["kind"] == "worker")
+    out = (ws / "goals" / gid / "runs" / sid / "artifacts" / "ram.txt").read_text().split("\n---\n")
+    adj, ok, over, spawn, orphan = out
+    assert "granted 0.5 GB" in ok and "job ran, adj 0" in ok and "done (exit 0)" in ok
+    assert "workers can only use" in spawn
+    assert not engine.grants and not engine.ram_waiting
+    if systemd_available():  # the pool, the job scopes and the OOM order need systemd
+        assert adj == "0 1000"
+        assert "outgrowing its 0.1 GB grant" in over and orphan == "job stopped"
+        digest = engine.db.one("SELECT payload FROM inbox WHERE ws='ram' AND kind='worker_done'")["payload"]
+        assert "Memory in this worker's turn" in digest and "outgrowing its 0.1 GB grant" in digest
+
+
+def test_goal_refused_for_ram_waits_instead_of_pausing(server, monkeypatch):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "ramwait"})
+    monkeypatch.setattr(engine, "ram_free", lambda: 0.0)  # another goal holds the pool
+    gid = client.post("/api/workspaces/ramwait/goals", json={
+        "title": "RAM wait", "spec": "Create hello.py", "goal": "- hello.py exists",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/ramwait/{gid}/start")
+    wait_for(lambda: engine.db.one("SELECT 1 FROM turns t JOIN sessions s ON s.id=t.session WHERE s.ws='ramwait' "
+                                   "AND s.kind='meta-work' AND t.status='idle'"))
+    time.sleep(1.5)
+    # The refused spawn leaves the goal waiting: still running, not counted idle, not re-prompted
+    row = client.get(f"/api/goals/ramwait/{gid}").json()["row"]
+    assert row["status"] == "running" and row["idle_streak"] == 0 and row["meta_turns"] == 1
+    assert ("ramwait", gid) in engine.ram_wait_goals
+    monkeypatch.undo()
+    # RAM is back: one event wakes the meta-work, whose next turn (here) closes the goal
+    wait_for(lambda: client.get(f"/api/goals/ramwait/{gid}").json()["row"]["status"] == "awaiting_review")
+    assert engine.db.one("SELECT 1 FROM inbox WHERE ws='ramwait' AND payload LIKE '%RAM is free again%'")
+    assert ("ramwait", gid) not in engine.ram_wait_goals
+
+
+def test_ram_grant_counts_grants_in_full(server):
+    _, engine = server
+    worker = {"id": "w-ramtest", "kind": "worker"}
+    with pytest.raises(AgentError, match="belongs to workers"):
+        asyncio.run(engine.ram_grant({"id": "mc-x", "kind": "meta-chat"}, 1, 0, os.getpid(), "x"))
+    with pytest.raises(AgentError, match="at most"):
+        asyncio.run(engine.ram_grant(worker, engine.pool_gb() + 1, 0, os.getpid(), "x"))
+    free = engine.ram_free()
+    first = asyncio.run(engine.ram_grant(worker, round(free * 0.6, 1), 0, os.getpid(), "python big.py"))
+    # The first grant still counts in full although its job uses nothing yet, so a second one cannot see that RAM
+    with pytest.raises(AgentError, match="not free") as refused:
+        asyncio.run(engine.ram_grant(worker, round(free * 0.6, 1), 0, os.getpid(), "python other.py"))
+    assert "w-ramtest" in str(refused.value) and "python big.py" in str(refused.value)
+    engine.ram_release(worker, first["grant"])
+    assert not engine.grants
+    # A grant whose `loop run` died without releasing it is dropped by the sampling loop
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    asyncio.run(engine.ram_grant(worker, 0.1, 0, dead.pid, "true"))
+    wait_for(lambda: not engine.grants, timeout=10)
