@@ -22,6 +22,7 @@ DEFAULTS: dict = {
         "workers": {
             "claude": {"enabled": True, "model": "opus", "effort": "high", "autocompact": None},
             "codex": {"enabled": True, "model": "gpt-6-astra", "effort": "high", "autocompact": None},
+            "agy": {"enabled": False, "model": "gemini-4-argon", "effort": "high"},  # no autocompact setting
         },
         "budget": {"max_concurrent_workers": 3, "max_worker_turns": 40, "max_meta_turns": 80},
         # Language of everything agents write for the human; code and commit messages follow the project

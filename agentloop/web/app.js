@@ -5,7 +5,8 @@ const S = { workspaces: [], route: {}, goal: null, feeds: {}, infra: null, histo
   chat: { sid: null, messages: [], busy: false, liveEvs: [], creating: false }, edit: {}, cfgDirty: false,
   partial: {}, modal: null, open: {}, chatOut: false };
 const main = document.getElementById('main');
-const AGENTS = ['claude', 'codex'];
+const AGENTS = ['claude', 'codex', 'agy'];
+const NO_AUTOCOMPACT = ['agy'];  // CLIs without an auto-compact setting
 const FEED_TYPES = ['turn', 'text', 'tool', 'tool_result', 'thinking', 'turn_end', 'error'];
 
 // ---------- helpers ----------
@@ -119,7 +120,7 @@ function agentRow(key, conf = {}, opts = {}) {
     ${opts.fixedAgent ? `<div>${esc(agent)}</div>` : `<select data-f="agent">${AGENTS.map(a => `<option ${a === agent ? 'selected' : ''}>${a}</option>`).join('')}</select>`}
     <select data-f="model">${modelOptions(agent, conf.model)}</select>
     <select data-f="effort">${effortOptions(agent, conf.model, conf.effort)}</select>
-    ${opts.noAutocompact ? '<span></span>' : `<input type="text" data-f="autocompact" value="${esc(conf.autocompact ?? '')}" placeholder="${esc(autocompactHint(agent))}">`}
+    ${opts.noAutocompact ? '<span></span>' : `<input type="text" data-f="autocompact" value="${esc(conf.autocompact ?? '')}" placeholder="${esc(autocompactHint(agent))}" ${NO_AUTOCOMPACT.includes(agent) ? 'disabled' : ''}>`}
   </div>`;
 }
 function agentHeader() {
@@ -134,7 +135,11 @@ function wireAgentRows(root, onChange) {
         row.dataset.agent = e.target.value;
         $('[data-f=model]', row).innerHTML = modelOptions(e.target.value, null);
         const ac = $('[data-f=autocompact]', row);
-        if (ac) ac.placeholder = autocompactHint(e.target.value);
+        if (ac) {
+          ac.placeholder = autocompactHint(e.target.value);
+          ac.disabled = NO_AUTOCOMPACT.includes(e.target.value);
+          if (ac.disabled) ac.value = '';
+        }
       }
       if (f === 'agent' || f === 'model') {
         const agent = row.dataset.agent, eff = $('[data-f=effort]', row);
@@ -161,7 +166,7 @@ function configForm(conf) {
       ${agentRow('meta_work', mw, { title: 'meta-work' })}
       ${agentRow('meta_advisor', conf.meta_advisor || {}, { title: 'meta-advisor' })}
       ${AGENTS.map(a => agentRow(`worker:${a}`, { agent: a, ...(wk[a] || {}) }, { title: 'worker', toggle: true, fixedAgent: true })).join('')}
-      <div class="hint">The meta-work picks <code>--agent claude|codex</code> per worker; model and effort are always taken from here.</div></div>
+      <div class="hint">The meta-work picks <code>--agent ${AGENTS.join('|')}</code> per worker; model and effort are always taken from here.</div></div>
     <div class="k">rotate</div><div class="row"><span class="muted small">start a fresh meta-work session when its context exceeds</span>
       <input type="text" data-rotate value="${esc(mw.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)" style="width:160px"></div>
     <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'concurrent workers')}
@@ -1049,7 +1054,7 @@ async function renderAgents() {
     const op = S.agents.ops[name], res = op?.result;
     const smoke = res?.smoke || (op?.op === 'smoke' ? res : null);
     const models = modelList(name);
-    return box(name === 'claude' ? 'claude code' : 'codex', `<div class="row"><span>${esc(S.agents.versions[name])}</span><span class="spacer"></span>
+    return box(cliName(name), `<div class="row"><span>${esc(S.agents.versions[name])}</span><span class="spacer"></span>
         ${op?.state === 'running' ? `<span class="thinking">${op.op} running</span>` : ''}</div>
       <div class="row" style="margin-top:8px"><button class="btn" data-op="${name}/smoke" ${op?.state === 'running' ? 'disabled' : ''}>smoke test</button>
         <button class="btn primary" data-op="${name}/update" ${op?.state === 'running' ? 'disabled' : ''}>update to latest</button></div>
@@ -1065,7 +1070,7 @@ async function renderAgents() {
       <p class="muted small">Sessions use your existing logins. Update runs the CLI's own updater, then a smoke turn, then re-reads the model list;
         every model/effort selector in the UI uses this list.</p></div>
       <div class="actions"><button class="btn" id="models-refresh">refresh model list</button></div></div>
-    <div class="grid cols-2" style="margin-top:18px">${card('claude')}${card('codex')}</div></div>`;
+    <div class="grid cols-2" style="margin-top:18px">${AGENTS.map(card).join('')}</div></div>`;
   $$('[data-op]').forEach(b => b.onclick = () => act(async () => {
     await api(`/api/agents/${b.dataset.op}`, { body: {} }); await renderAgents();
   }, 'Started'));

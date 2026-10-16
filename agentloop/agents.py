@@ -13,8 +13,9 @@ from .adapters import ADAPTERS, RunSpec
 from .config import state_dir
 from .runner import Runner, child_env
 
-UPDATE_CMD = {"claude": ["claude", "update"], "codex": ["codex", "update"]}
-SMOKE_MODEL = {"claude": ("haiku", None), "codex": (None, "low")}
+UPDATE_CMD = {"claude": ["claude", "update"], "codex": ["codex", "update"], "agy": ["agy", "update"]}
+SMOKE_MODEL = {"claude": ("haiku", None), "codex": (None, "low"), "agy": ("gemini-3.8-flash", "low")}
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 async def run_cmd(argv: list[str], timeout: float = 30) -> tuple[int, str]:
@@ -98,6 +99,24 @@ async def _codex_catalog() -> list[dict]:
             for m in data.get("models", []) if m.get("visibility") == "list"]
 
 
+async def _agy_catalog() -> list[dict]:
+    """agy lists one slug per model and effort (`gemini-4-argon-high`, `--model gemini-4-argon --effort high` picks
+    the same), so its slugs are grouped into models with efforts like the other CLIs' catalogs."""
+    code, text = await run_cmd(["agy", "models"], timeout=60)
+    models: dict[str, dict] = {}
+    for line in text.splitlines() if code == 0 else []:
+        slug, _, label = line.strip().partition("\t")
+        if not label:  # progress lines
+            continue
+        base, _, effort = slug.rpartition("-") if slug.rsplit("-", 1)[-1] in EFFORTS else (slug, "", "")
+        entry = models.setdefault(base, {"id": base, "name": re.sub(r"\s*\([^)]*\)$", "", label), "efforts": []})
+        if effort:
+            entry["efforts"].append(effort)
+    for m in models.values():
+        m["efforts"].sort(key=EFFORTS.index)
+    return list(models.values())
+
+
 def models_path() -> Path:
     return state_dir() / "models.json"
 
@@ -113,7 +132,8 @@ async def refresh_models() -> dict:
     """Available models and efforts per CLI, as the installed CLI versions report them."""
     vers = await versions()
     catalog = {"claude": {"version": vers["claude"], "models": _claude_catalog(vers["claude"])},
-               "codex": {"version": vers["codex"], "models": await _codex_catalog()}, "fetched": time.time()}
+               "codex": {"version": vers["codex"], "models": await _codex_catalog()},
+               "agy": {"version": vers["agy"], "models": await _agy_catalog()}, "fetched": time.time()}
     models_path().write_text(json.dumps(catalog, indent=1))
     return catalog
 
@@ -143,12 +163,12 @@ def config_errors(doc: dict) -> list[str]:
         if not mw:
             continue
         if mw.get("agent") not in ADAPTERS:
-            errors.append(f"{kind}.agent must be claude or codex, not {mw.get('agent')!r}")
+            errors.append(f"{kind}.agent must be one of {', '.join(ADAPTERS)}, not {mw.get('agent')!r}")
         else:
             errors.append(check_agent_conf(mw["agent"], mw, catalog))
     for agent, conf in (doc.get("workers") or {}).items():
         if agent not in ADAPTERS:
-            errors.append(f"unknown worker agent {agent!r} (use claude or codex)")
+            errors.append(f"unknown worker agent {agent!r} (use {', '.join(ADAPTERS)})")
         elif isinstance(conf, dict) and conf.get("enabled", True):
             errors.append(check_agent_conf(agent, conf, catalog))
     return [e for e in errors if e]

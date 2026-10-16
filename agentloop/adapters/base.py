@@ -28,7 +28,7 @@ class RunSpec:
     settings_file: Path | None = None                         # Claude: hooks/settings
     plugin_dir: Path | None = None                            # Claude: worker harness plugin
     append_file: Path | None = None                           # Claude: extra system prompt file
-    system_text: str | None = None                            # mode instructions
+    system_text: str | None = None                            # mode instructions (agy: worker instructions too)
     codex_home: Path | None = None
     last_message_file: Path | None = None
 
@@ -44,6 +44,7 @@ class ParseState:
     error: str = ""
     started: float = field(default_factory=time.time)        # when the turn started
     call_usage: list[dict] = field(default_factory=list)     # usage of each model call so far in this turn
+    steps: dict = field(default_factory=dict)                # per-step scratch of adapters that stream steps
 
 
 def billed_tokens(usage: dict) -> int:
@@ -64,6 +65,10 @@ class Adapter:
     def env(self, spec: RunSpec) -> dict:
         return {}
 
+    def stdin(self, spec: RunSpec) -> str:
+        """What the CLI reads on stdin: the prompt itself by default."""
+        return spec.prompt
+
     def parse(self, obj: dict, st: ParseState) -> list[dict]:
         raise NotImplementedError
 
@@ -75,8 +80,9 @@ class Adapter:
 
 
 # Plan/quota exhaustion as the CLIs word it ("You've hit your usage limit ... try again at 9:45 PM",
-# "Claude AI usage limit reached|<epoch>", "You've hit your limit · resets 9pm"); a plain 429 rate limit is not one
-USAGE_LIMIT_RE = re.compile(r"usage limit|hit your (?:usage )?limit|limit reached", re.I)
+# "Claude AI usage limit reached|<epoch>", "You've hit your limit · resets 9pm", "You have exhausted your quota on
+# this model."); a plain 429 rate limit is not one
+USAGE_LIMIT_RE = re.compile(r"usage limit|hit your (?:usage )?limit|limit reached|exhausted your quota", re.I)
 
 
 def usage_limit_until(text: str, now: float | None = None) -> float | None:

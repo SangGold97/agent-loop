@@ -1,10 +1,12 @@
+import io
 import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agentloop import digest, guard
-from agentloop.adapters.base import RunSpec, ParseState, to_tokens
+from agentloop.adapters.agy import AgyAdapter
+from agentloop.adapters.base import RunSpec, ParseState, to_tokens, usage_limit_until
 from agentloop.adapters.claude import ClaudeAdapter
 from agentloop.adapters.codex import CodexAdapter
 from agentloop.config import deep_merge
@@ -53,6 +55,55 @@ def test_codex_parse_stream():
     assert st.vendor_id == "T" and st.last_text == "DONE" and st.tokens == 45
     assert [e["type"] for e in events] == ["init", "tool", "tool_result", "text", "usage"]
 
+
+
+def test_agy_argv_and_stdin(tmp_path):
+    s = RunSpec(agent="agy", kind="meta", cwd=tmp_path, prompt="[Kickoff] go", model="gemini-4-argon",
+                effort="high", autocompact="300k", resume_id="c1", system_text="MODE: META-WORK")
+    a = AgyAdapter().argv(s)
+    assert a[:5] == ["agy", "--output-format", "stream-json", "--input-format", "stream-json"]
+    assert a[a.index("--model") + 1] == "gemini-4-argon" and a[a.index("--effort") + 1] == "high"
+    assert a[a.index("--conversation") + 1] == "c1" and "--dangerously-skip-permissions" in a and "300000" not in a
+    msg = json.loads(AgyAdapter().stdin(s))
+    assert msg["event"] == "user" and msg["message"]["content"].startswith("<instructions>\nMODE: META-WORK\n")
+    assert msg["message"]["content"].endswith("\n\n[Kickoff] go")
+    s.system_text = None
+    assert json.loads(AgyAdapter().stdin(s))["message"]["content"] == "[Kickoff] go"
+
+
+def test_agy_parse_stream():
+    st, ad = ParseState(), AgyAdapter()
+    usage = lambda i, o: {"input_tokens": i, "output_tokens": o, "cache_read_tokens": 40, "total_tokens": i + o}
+    step = lambda n, state, kind, **kw: {"event": "step_update", "step_update": {
+        "conversation_id": "C", "step_index": n, "state": state, "step_type": kind, **kw}}
+    call = {"name": "run_command", "parameters": {"CommandLine": "ls", "Cwd": "/w"}}
+    lines = [{"event": "init", "conversation_id": "C", "init": {"model": "gemini-4-argon-high"}},
+             step(0, "DONE", "user_input"),
+             step(1, "DONE", "agent_response", usage=usage(100, 5)),
+             step(2, "ACTIVE", "tool", tool_name="run_command", tool_info=call),
+             step(2, "ACTIVE", "tool", tool_name="run_command", tool_info=call),
+             step(2, "DONE", "tool", tool_name="run_command", tool_info={**call, "output": "a.txt"}),
+             step(3, "ACTIVE", "tool", tool_name="write_to_file", tool_info={"parameters": {"TargetFile": "/x"}}),
+             step(3, "ERROR", "tool", tool_name="write_to_file", tool_info={
+                 "parameters": {"TargetFile": "/x"}, "error": {"type": "TOOL_ERROR", "message": "denied"}}),
+             step(4, "ACTIVE", "agent_response", text_delta="DO"),
+             step(4, "DONE", "agent_response", text_delta="NE\n", usage=usage(200, 10)),
+             {"event": "result", "result": {"conversation_id": "C", "status": "SUCCESS", "response": "DONE\n",
+                                            "num_turns": 3, "usage": usage(9000, 99)}}]
+    events = [e for obj in lines for e in ad.parse(obj, st)]
+    assert [e["type"] for e in events] == ["init", "usage", "tool", "tool_result", "tool", "tool_result", "delta",
+                                           "text", "usage"]
+    assert events[2]["detail"] == "ls" and events[5]["error"] and events[5]["text"] == "denied"
+    # This turn's own calls count, not the conversation total in `result`; context is the last call's input
+    assert st.vendor_id == "C" and st.final == "DONE" and st.tokens == 315 and st.context == 240
+    assert not st.is_error
+
+
+def test_agy_failed_result():
+    st = ParseState()
+    out = AgyAdapter().parse({"event": "result", "result": {"conversation_id": "", "status": "ERROR", "response": "",
+                                                            "error": "You have exhausted your quota on this model."}}, st)
+    assert st.is_error and out[0]["type"] == "error" and usage_limit_until(st.error)
 
 
 def test_codex_ignores_hook_trust_notice():
@@ -169,6 +220,52 @@ def test_guard_ignores_prompt_text(tmp_path):
     assert guard.check(ev("cd ../repo && git push"), m)
     assert guard.check(ev("git push origin HEAD"), guard_env(tmp_path, "worker"))
     assert guard.check(ev("cat <<EOF > $LOOP_GOAL_DIR/goal.md\nx\nEOF"), m)
+
+
+def test_guard_agy_payload(tmp_path, monkeypatch, capsys):
+    (tmp_path / "wt/w-1").mkdir(parents=True)
+    w, m = guard_env(tmp_path, "worker"), guard_env(tmp_path, "meta-work")
+    # agy runs hooks in the plugin dir: the agent's cwd comes from the call or the session's workspace
+    ev = lambda name, **args: {"toolCall": {"name": name, "args": args}, "workspacePaths": [str(tmp_path / "wt/w-1")]}
+    assert guard.check(ev("run_command", CommandLine="git push"), w)
+    assert guard.check(ev("run_command", CommandLine="git -C ../../repo commit -am x", Cwd=str(tmp_path / "wt/w-1")), m)
+    assert not guard.check(ev("run_command", CommandLine="pytest -q"), w)
+    assert guard.check(ev("write_to_file", TargetFile=str(tmp_path / "goals/m1/goal.md")), w)
+    assert not guard.check(ev("replace_file_content", TargetFile=str(tmp_path / "wt/w-1/app.py")), w)
+    assert guard.check(ev("write_to_file", TargetFile="/x"), guard_env(tmp_path, "meta-advisor"))
+    # A denial is a JSON decision on stdout, not an exit code
+    for key, val in w.items():
+        monkeypatch.setenv(key, val)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(ev("run_command", CommandLine="git push"))))
+    guard.main()
+    assert json.loads(capsys.readouterr().out)["decision"] == "deny"
+
+
+def test_agy_plugin_and_worker_text(tmp_path, monkeypatch):
+    from agentloop import workspace
+    monkeypatch.setattr(workspace, "AGY_PLUGIN", tmp_path / "plugin")
+    hooks = json.loads((workspace.agy_plugin() / "hooks.json").read_text())["agentloop-guard"]["PreToolUse"][0]
+    assert "run_command" in hooks["matcher"] and hooks["hooks"][0]["command"].startswith('[ -z "$LOOP_ROLE" ] ||')
+    ws = tmp_path / "ws"
+    (ws / "worker/skills/plot").mkdir(parents=True)
+    (ws / "worker/AGENTS.md").write_text("# Environment\n")
+    assert workspace.agy_worker_text(ws) == "# Environment"
+    (ws / "worker/skills/plot/SKILL.md").write_text("---\nname: plot\ndescription: >-\n  Use for\n  plots.\n---\nx\n")
+    assert workspace.agy_worker_text(ws).endswith(f"- plot: Use for plots. ({ws / 'worker/skills/plot/SKILL.md'})")
+
+
+def test_agy_catalog_groups_efforts(monkeypatch):
+    import asyncio
+    from agentloop import agents
+
+    async def fake(argv, timeout=30):
+        return 0, ("Fetching available models...\ngemini-4-argon-medium\tGemini 4 Argon (Medium)\n"
+                   "gemini-4-argon-high\tGemini 4 Argon (High)\ngemini-4-argon-low\tGemini 4 Argon (Low)\n"
+                   "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n")
+    monkeypatch.setattr(agents, "run_cmd", fake)
+    assert asyncio.run(agents._agy_catalog()) == [
+        {"id": "gemini-4-argon", "name": "Gemini 4 Argon", "efforts": ["low", "medium", "high"]},
+        {"id": "gpt-oss-120b", "name": "GPT-OSS 120B", "efforts": ["medium"]}]
 
 
 def test_guard_blocks_only_writes_to_human_files(tmp_path):

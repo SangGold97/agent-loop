@@ -12,7 +12,7 @@ No linter or formatter is configured. The web UI (`agentloop/web/`) is vanilla J
 
 ## Architecture
 
-agent-loop wraps the headless Claude Code and Codex CLIs. Per goal, a meta-work session plans, spawns worker
+agent-loop wraps the headless Claude Code, Codex and Antigravity (`agy`) CLIs. Per goal, a meta-work session plans, spawns worker
 sessions, merges their work and closes the goal; the human steers from the web UI. README.md explains the concepts
 (workspace, goal, meta-work, meta-chat, worker, digest) and the guardrails.
 
@@ -32,11 +32,12 @@ sessions, merges their work and closes the goal; the human steers from the web U
 - **Running a CLI**: `runner.py` starts each turn in `systemd-run --user --scope` (anything left in the scope when
   the CLI exits is killed and reported as `TurnResult.leftover`), inside the workspace's shared `.venv`
   (`workspace.ensure_venv`) and with its own `TMPDIR` under `runner.scratch_root()` that `Engine.run_turn` removes
-  when the turn ends. It streams JSON lines through an adapter (`adapters/claude.py`, `adapters/codex.py`) that maps
+  when the turn ends. It streams JSON lines through an adapter (`adapters/claude.py`, `codex.py`, `agy.py`) that maps
   vendor events to the normalized events listed in `adapters/base.py`. A new CLI means a new `Adapter` registered
   in `ADAPTERS`.
-- **Guardrails**: `guard.py` is the PreToolUse hook for both CLIs, wired through `templates/workspace/*/hooks.json`
-  (`{{PY}}` is replaced by the venv Python). Claude gets it through `workspace.claude_settings`, which rebuilds
+- **Guardrails**: `guard.py` is the PreToolUse hook for every CLI, wired through `templates/workspace/*/hooks.json`
+  (`{{PY}}` is replaced by the venv Python); agy, which has no per-session settings, gets it from the plugin
+  `workspace.agy_plugin` writes to `~/.gemini/config/plugins/agentloop/`. Claude gets it through `workspace.claude_settings`, which rebuilds
   `.loop/claude/<layer>-settings.json` each turn from `hooks.json` plus `claudeMdExcludes`, so agents never read
   instruction files above their own directory. After every turn `workspace.enforce_protected` reverts edits to
   human-owned files.

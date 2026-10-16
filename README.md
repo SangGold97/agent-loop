@@ -1,6 +1,6 @@
 # agent-loop
 
-A local, human-on-the-loop platform that wraps **Claude Code** and **Codex** (headless CLIs).
+A local, human-on-the-loop platform that wraps **Claude Code**, **Codex** and **Antigravity** (`agy`) (headless CLIs).
 You write a **spec** and a **goal**; a **meta-work** session (meta-agent) plans, writes prompts for
 **worker** sessions, evaluates their evidence against the goal, and keeps iterating until it decides the goal is
 done. You steer with notes, chat with a **meta-chat** session (meta-agent), review the report, and merge.
@@ -10,14 +10,14 @@ Human ──► UI (goals, live sessions, notes, meta-chat, infra)
             │
      control plane (FastAPI + SQLite)  ── budgets · guard · git · digests · infra caps
             │
-   meta-work (meta-agent) ── `loop spawn / send / merge / done` ──► workers (Claude Code | Codex)
+   meta-work (meta-agent) ── `loop spawn / send / merge / done` ──► workers (Claude Code | Codex | agy)
                                                                   one git worktree + branch each
 ```
 
 ## Setup
 
 ```bash
-make setup          # venv + editable install (needs git, and logged-in `claude` / `codex` CLIs)
+make setup          # venv + editable install (needs git, and logged-in `claude` / `codex` / `agy` CLIs)
 make serve          # http://127.0.0.1:8765
 make test           # unit + end-to-end tests (scripted fake agent, no API cost)
 ```
@@ -35,7 +35,7 @@ To run it on another machine and use the UI from this one, see [remote/README.md
 | **Meta-work** | One meta session per goal, driven by events (kickoff, worker finished, note, goal changed, budget). It does simple work itself in the integration worktree, where the platform commits its changes as `meta-work(<sid>)` (before a spawn, merge or `loop done` and after each turn), and delegates the rest to workers. |
 | **Meta-chat** | Prompt-by-prompt chat bound to a goal (agent/model/effort chosen per chat); runs commands and tools freely but does not change project code, and steers the goal only through notes you approve. |
 | **Meta-advisor** | Consulted through `loop advise`, with agent/model/effort from `goal.yaml → meta_advisor`. Each question starts a new read-only session for one turn. Its final text returns to the meta-work inbox as `[Advice]`; the Advisor button beside META-WORK opens its session log, without a chat composer. |
-| **Worker** | A Claude Code or Codex session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<role>-<sid>`; accepted work is merged into `loop/<goal>/integration`. It receives the meta-work's prompt as is and a generic `worker/AGENTS.md`, nothing about the platform; `.venv/` and `.artifacts/` stay out of git, and `.artifacts/` is kept in `runs/<sid>/artifacts/`. |
+| **Worker** | A Claude Code, Codex or agy session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<role>-<sid>`; accepted work is merged into `loop/<goal>/integration`. It receives the meta-work's prompt as is and a generic `worker/AGENTS.md`, nothing about the platform; `.venv/` and `.artifacts/` stay out of git, and `.artifacts/` is kept in `runs/<sid>/artifacts/`. |
 | **Digest** | What a finished worker turn sends to the meta-work: a line naming the worker, role and turn, then its final reply as is (kept in `runs/<sid>/t<n>.out.md`). Its changes and the commands it ran are pulled on demand, with git and `loop show W --log`. |
 | **goal.md** | Success criteria, free text. Lines `- verify: \`cmd\`` are run on the committed integration branch before a `success` close (a run that edits tracked files is rejected and its edits and new files are undone); everything else is judged by the meta-work. |
 
@@ -56,6 +56,10 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   (the layer's `hooks.json` plus `claudeMdExcludes` for every directory above `meta/` or the worktree), so a
   `CLAUDE.md`/`AGENTS.md` in the platform repo or another parent never reaches them. Codex workers stop at the
   worktree's git root, and Codex meta sessions run with `project_root_markers=[]` so they read only `meta/`.
+  agy sessions run agy's default agent, with your own agy skills, plugins and MCP servers, and stop at the git root
+  as Codex does; their layer's instructions (mode text, `worker/AGENTS.md` and an index of `worker/skills/`) lead
+  each turn's prompt, and the guard reaches them through `~/.gemini/config/plugins/agentloop/`, a plugin whose hook
+  does nothing outside agent-loop sessions. agy has no autocompact setting.
 - After every agent turn the control plane reverts edits to `spec.md`, `goal.md`, `goal.yaml`, `loop.yaml`, `hooks.json`
   (the changed copy is kept in `.loop/reverted/<time>/`, and the UI shows an alert).
 - Budgets (concurrency, worker/meta turns) are enforced by the control plane; advisor consultations count toward
@@ -89,6 +93,6 @@ To run it on another machine and use the UI from this one, see [remote/README.md
 ## Customising per project
 
 Edit the workspace harness from the UI (workspace page → Harness) or any editor:
-`meta/AGENTS.md` (meta-work/meta-chat/advisor behaviour), `worker/AGENTS.md`, `*/skills/<name>/SKILL.md` (shared by both CLIs),
+`meta/AGENTS.md` (meta-work/meta-chat/advisor behaviour), `worker/AGENTS.md`, `*/skills/<name>/SKILL.md` (shared by all CLIs),
 `*/memory/`, `*/docs/`, `*/hooks.json`, optional `*/codex.toml` (extra Codex config). The project's own
 `CLAUDE.md`/`AGENTS.md` in `repo/` still apply to workers.

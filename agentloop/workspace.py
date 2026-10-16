@@ -303,6 +303,40 @@ def codex_home(ws: Path, layer: str) -> Path:
     return home
 
 
+# agy has no per-session settings, so the guard reaches its sessions through a plugin in the user's agy config. Its
+# hook does nothing outside agent-loop sessions (no LOOP_ROLE): the human's own agy runs as before
+AGY_PLUGIN = Path.home() / ".gemini" / "config" / "plugins" / "agentloop"
+AGY_GUARDED = "run_command|write_to_file|replace_file_content|multi_replace_file_content|sed_file|notebook_edit"
+
+
+def agy_plugin() -> Path:
+    """Write the guard plugin agy sessions load (rewritten only when it changes, e.g. on another venv path)."""
+    hook = {"type": "command", "command": f'[ -z "$LOOP_ROLE" ] || exec "{PYTHON}" -m agentloop.guard', "timeout": 30}
+    docs = {"plugin.json": {"name": "agentloop", "description": "agent-loop guard, inactive outside its sessions"},
+            "hooks.json": {"agentloop-guard": {"PreToolUse": [{"matcher": AGY_GUARDED, "hooks": [hook]}]}}}
+    AGY_PLUGIN.mkdir(parents=True, exist_ok=True)
+    for name, doc in docs.items():
+        text = json.dumps(doc, indent=2) + "\n"
+        if not (AGY_PLUGIN / name).exists() or (AGY_PLUGIN / name).read_text() != text:
+            (AGY_PLUGIN / name).write_text(text)
+    return AGY_PLUGIN
+
+
+def agy_worker_text(ws: Path) -> str:
+    """Worker instructions for agy, which loads no instructions or skills from outside the worktree:
+    worker/AGENTS.md plus an index of the worker skills, read on demand like agy's own."""
+    text = (ws / "worker" / "AGENTS.md").read_text().strip()
+    index = []
+    for path in sorted((ws / "worker" / "skills").glob("*/SKILL.md")):
+        m = re.match(r"---\n(.*?)\n---", path.read_text(), re.S)
+        meta = yaml.safe_load(m.group(1)) if m else None
+        about = meta.get("description", "") if isinstance(meta, dict) else ""
+        index.append(f"- {path.parent.name}: {' '.join(str(about).split())} ({path})")
+    if index:
+        text += "\n\n## Skills\n\nRead a skill's SKILL.md before work its description fits:\n" + "\n".join(index)
+    return text
+
+
 # Instruction files Claude Code loads from every directory above its cwd
 CLAUDE_MEMORY_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLAUDE.md", ".claude/AGENTS.md")
 

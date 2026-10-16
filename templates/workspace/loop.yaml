@@ -5,7 +5,7 @@ limits:
 
 defaults:
   meta_work:                  # the session that runs a goal (fixed for every meta-work turn)
-    agent: claude             # claude | codex
+    agent: claude             # claude | codex | agy
     model: opus               # models and efforts: Agent CLIs page (follows the installed CLI version)
     effort: high
     autocompact: null         # tokens before auto-compaction (null = CLI default)
@@ -18,6 +18,7 @@ defaults:
   workers:                    # the meta-work picks the CLI per worker; model/effort are fixed here
     claude: {enabled: true, model: opus, effort: high, autocompact: null}
     codex:  {enabled: true, model: gpt-6-astra, effort: high, autocompact: null}
+    agy:    {enabled: false, model: gemini-4-argon, effort: high}   # agy has no autocompact setting
   budget:                     # tokens and time are tracked, not limited
     max_concurrent_workers: 3
     max_worker_turns: 40      # spawn + send, over the whole goal

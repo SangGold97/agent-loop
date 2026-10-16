@@ -168,7 +168,7 @@ class Runner:
         stderr_tail: list[str] = []
 
         async def feed_stdin():
-            proc.stdin.write(spec.prompt.encode())
+            proc.stdin.write(adapter.stdin(spec).encode())
             await proc.stdin.drain()
             proc.stdin.close()
 

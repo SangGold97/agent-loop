@@ -1,4 +1,5 @@
-"""PreToolUse guard shared by Claude Code and Codex (same hook protocol): exit code 2 blocks a call.
+"""PreToolUse guard shared by Claude Code, Codex (same hook protocol: exit code 2 blocks a call) and agy (a deny
+decision on stdout).
 
 Guards against mistakes, not adversaries: agents never push, never touch human-owned files or
 the user's Python, workers stay inside their own worktree, and meta sessions change project code only in their
@@ -16,8 +17,9 @@ from pathlib import Path
 
 PROTECTED_RE = re.compile(
     r"^(goals/[^/]+/(spec\.md|goal\.md|goal\.yaml)|loop\.yaml|(meta|worker)/hooks\.json)$")
-EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
-SHELL_TOOLS = {"Bash", "shell", "exec_command", "local_shell"}
+EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit",
+              "write_to_file", "replace_file_content", "multi_replace_file_content", "sed_file", "notebook_edit"}
+SHELL_TOOLS = {"Bash", "shell", "exec_command", "local_shell", "run_command"}
 PROTECTED_IN_CMD = re.compile(
     r"(goals/\S*(spec|goal)\.md|goal\.yaml|LOOP_GOAL_DIR\S*(spec|goal)\.md|hooks\.json|loop\.yaml)")
 # Output redirections (`>`, `>>`, `2>`, `&>`, `>|`) and their target; `2>&1` and `>/dev/null` write nothing
@@ -38,7 +40,7 @@ def _patch_paths(text: str) -> list[str]:
 
 def edit_paths(tool: str, inp: dict) -> list[str]:
     if tool in EDIT_TOOLS:
-        return [p for p in (inp.get("file_path"), inp.get("notebook_path")) if p]
+        return [p for p in (inp.get("file_path"), inp.get("notebook_path"), inp.get("TargetFile")) if p]
     if tool == "apply_patch":
         text = inp.get("command") or inp.get("patch") or inp.get("input") or json.dumps(inp)
         if isinstance(text, list):
@@ -214,11 +216,14 @@ def check(event: dict, env: dict) -> str | None:
     if not env.get("LOOP_ROLE") or not env.get("LOOP_WS"):
         return None
     tool, inp = event.get("tool_name", ""), event.get("tool_input") or {}
+    cwd = Path(event.get("cwd") or os.getcwd())
+    if "toolCall" in event:  # agy names the call differently and runs its hooks in the plugin dir, not the cwd
+        tool, inp = event["toolCall"].get("name", ""), event["toolCall"].get("args") or {}
+        cwd = Path(inp.get("Cwd") or (event.get("workspacePaths") or [cwd])[0])
     if env.get("LOOP_ROLE") == "meta-advisor" and tool in EDIT_TOOLS | {"apply_patch"}:
         return "the advisor is read-only; return advice in your final reply"
-    cwd = Path(event.get("cwd") or os.getcwd())
     if tool in SHELL_TOOLS:
-        cmd = inp.get("command") or inp.get("cmd") or ""
+        cmd = inp.get("command") or inp.get("cmd") or inp.get("CommandLine") or ""
         return check_command(" ".join(cmd) if isinstance(cmd, list) else str(cmd), env, cwd)
     for p in edit_paths(tool, inp):
         reason = check_path(cwd / os.path.expanduser(p), env)
@@ -233,7 +238,9 @@ def main() -> None:
         reason = check(event, dict(os.environ))
     except Exception:  # never break the agent because the guard itself failed
         return
-    if reason:
+    if reason and "toolCall" in event:
+        print(json.dumps({"decision": "deny", "reason": reason}))
+    elif reason:
         print(f"blocked: {reason}", file=sys.stderr)
         sys.exit(2)
 

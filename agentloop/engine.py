@@ -543,6 +543,8 @@ class Engine:
                 env["CUDA_VISIBLE_DEVICES"] = ""
             if sess["agent"] == "codex":
                 spec.codex_home = workspace.codex_home(p, "worker")
+            elif sess["agent"] == "agy":
+                spec.system_text = workspace.agy_worker_text(p)
             else:
                 spec.plugin_dir, spec.append_file = p / "worker" / "claude-plugin", p / "worker" / "AGENTS.md"
                 spec.settings_file, spec.add_dirs = workspace.claude_settings(p, "worker"), [gdir, p / "data"]
@@ -552,10 +554,12 @@ class Engine:
             spec.system_text = self.mode_text(sess)
             if sess["agent"] == "codex":
                 spec.codex_home = workspace.codex_home(p, "meta")
-            else:
+            elif sess["agent"] != "agy":  # agy reads meta/AGENTS.md and meta/.agents/skills from its cwd
                 spec.settings_file, spec.add_dirs = workspace.claude_settings(p, "meta"), [p]
         if sess["agent"] == "codex":
             spec.last_message_file = self.logs(ws, sid)[0].with_name(f"{sid}.t{n}.last.txt")
+        elif sess["agent"] == "agy":
+            workspace.agy_plugin()
         if sess["kind"] == "meta-advisor":
             spec.resume_id = None  # every consultation starts with a fresh context
         return spec

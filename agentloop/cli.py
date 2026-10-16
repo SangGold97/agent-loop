@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="loop", description=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("spawn", help="start a new worker")
-    sp.add_argument("--agent", required=True, help="worker CLI (claude or codex); model and effort are fixed by the human")
+    sp.add_argument("--agent", required=True, help="worker CLI (claude, codex or agy); model and effort are fixed by the human")
     sp.add_argument("--role", required=True, help="what the worker does, e.g. coder, reviewer, research")
     sp.add_argument("--gpu", action="store_true")
     for name, sparser in (("spawn", sp), ("send", sub.add_parser("send", help="continue an idle worker")),

@@ -7,7 +7,7 @@ This workspace is run by agent-loop. The workspace root is `$LOOP_WS`; paths bel
 | `loop.yaml` | Workspace defaults: agents, models, budgets, limits | human |
 | `meta/` | Harness for meta-work, meta-chat and advisor: `AGENTS.md`, `skills/`, `memory/`, `docs/` | human; meta-work/meta-chat may improve memory/docs/skills |
 | `worker/` | Worker harness: `AGENTS.md`, `skills/`, `memory/`, `docs/`, `claude-plugin/` | human; meta may improve memory/docs/skills |
-| `*/hooks.json` | Guard hooks (Claude Code and Codex share the format) | human only |
+| `*/hooks.json` | Guard hooks (Claude Code and Codex share the format; agy gets the same guard from the platform) | human only |
 | `goals/<id>/spec.md`, `goal.md`, `goal.yaml` | Context and requirements, success criteria, goal config | human only |
 | `goals/<id>/plan.md` | Current state: strategy, what was ruled out and why, checklist | meta-work |
 | `goals/<id>/notes.md` | Human guidance for the meta-work | platform (from the human) |
