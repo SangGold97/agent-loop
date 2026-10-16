@@ -37,12 +37,15 @@ if compgen -G "$HOME/.claude/projects/$enc-*" >/dev/null; then
     sync --relative ~/.claude/projects/./"$enc"-* "$HOST":.claude/projects/
 fi
 
-# Workspace venvs are rebuilt there from their package lists: the base Python may differ, and torch comes from
-# PyPI, whose Linux wheels are CUDA builds. Packages installed from a path or URL are left out.
+# Workspace venvs are rebuilt there from their package lists, on the same base interpreter when the server has
+# it (e.g. the same conda path; an SSH command does not load the shell's conda PATH), else on its python3.
+# torch comes from PyPI, whose Linux wheels are CUDA builds. Packages installed from a path or URL are left out.
 for venv in "$DATA"/workspaces/*/.venv; do
     reqs=$("$venv/bin/python" -m pip freeze 2>/dev/null | grep -v -e ' @ ' -e '^-e ' | sed 's/+cpu$//') || true
     [ -n "$reqs" ] || continue
-    printf '%s\n' "$reqs" | ssh "$HOST" "python3 -m venv '$venv' && '$venv/bin/pip' install -q -r /dev/stdin" ||
+    base=$(readlink -f "$venv/bin/python")
+    printf '%s\n' "$reqs" | ssh "$HOST" "py='$base'; [ -x \"\$py\" ] || py=python3
+        \"\$py\" -m venv --clear '$venv' && '$venv/bin/pip' install -q -r /dev/stdin" ||
         echo "WARNING: rebuilding $venv on $HOST failed; the agents can install what they need"
 done
 
