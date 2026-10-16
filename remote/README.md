@@ -35,8 +35,17 @@ user name and the same repo path as the client, because worktrees, hooks and ven
    [server-name]`. It copies the workspaces, the state, the workspace session transcripts and the CLI builds, and
    rebuilds the workspace venvs there with CUDA torch. `--skip-data` leaves each workspace's `data/` empty there.
    An interrupted copy resumes when run again. A server that already has its own state is never overwritten.
-5. **Server**: run `remote/server-finish.sh`, then the login, smoke and enable commands it prints.
-6. **Client**: run `systemctl --user enable --now agentloop-tunnel` and open http://127.0.0.1:18765.
+5. **Server**: run `remote/server-finish.sh`, then the login and smoke commands it prints.
+
+## Daily use
+
+Nothing starts by itself on either side:
+- **Server**: `systemctl --user start agentloop` (or `make serve`) when the platform should run, and `stop` it
+  when it should not; never both at once. Keep the server on the tailnet: after a `tailscale down` there, only
+  someone at the server can bring it back.
+- **Client**: `sudo tailscale up` (if you left the tailnet), then `systemctl --user start agentloop-tunnel` and open
+  http://127.0.0.1:18765. `systemctl --user stop agentloop-tunnel` closes the tunnel, and `sudo tailscale down`
+  leaves the tailnet. While the tunnel runs, it reconnects every 10 s whenever the server or the network drops.
 
 After a migration, the client's own `workspaces/` and `state/` are stale: do not serve them again. To go back to
-one machine, run `systemctl --user disable --now agentloop-tunnel` on the client and `make serve` where the data is.
+one machine, stop the client's tunnel and run `make serve` where the data is.

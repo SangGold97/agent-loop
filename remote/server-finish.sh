@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Server, after the clone (and migrate.sh, if any): the platform venv and a user service that serves it.
-# The service is enabled only after the CLI logins (see what this prints).
+# The service is started on demand, after the CLI logins (see what this prints); it does not start with the machine.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -36,5 +36,5 @@ Next:
   claude                      # log in once (/login), then exit
   codex login --device-auth   # log in once (plain 'codex login' at this machine's own browser)
   $ROOT/.venv/bin/agentloop smoke
-  systemctl --user enable --now agentloop
+  systemctl --user start agentloop   # each time it should serve (or 'make serve'; 'enable' starts it with the machine)
 EOF
