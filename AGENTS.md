@@ -80,5 +80,4 @@ sessions, merges their work and closes the goal; the human steers from the web U
 
 ## Answers
 
-- In chat, reply in Vietnamese. Lead with the answer or result, then give the explanation needed to act on it. Keep
-  code, paths, commands and identifiers in their original form.
+- Provide concise answers and easy to understand inline chat, clear explanations, and get straight to the point.
