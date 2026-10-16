@@ -24,6 +24,7 @@ make test           # unit + end-to-end tests (scripted fake agent, no API cost)
 
 Requirements: Linux/WSL with systemd (for the shared RAM pool), Python ≥ 3.10.
 The platform uses your existing CLI logins; it never asks for keys.
+To run it on another machine and use the UI from this one, see [remote/README.md](remote/README.md).
 
 ## Concepts
 
