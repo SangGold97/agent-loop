@@ -111,7 +111,8 @@ async function loadModels() { try { S.models = await api('/api/models'); } catch
 
 // ---------- agent settings form (HUMAN layer, new goal, new meta-chat) ----------
 // Empty autocompact = the CLI's own setting (for Claude Code: autoCompactWindow in ~/.claude/settings.json)
-const autocompactHint = agent => S.models?.[agent]?.autocompact ? `CLI setting: ${fmtTok(S.models[agent].autocompact)}` : 'CLI default';
+const autocompactHint = agent => NO_AUTOCOMPACT.includes(agent) ? 'n/a'
+  : S.models?.[agent]?.autocompact ? `CLI setting: ${fmtTok(S.models[agent].autocompact)}` : 'CLI default';
 function agentRow(key, conf = {}, opts = {}) {
   const agent = conf.agent || opts.agent || 'claude';
   const off = opts.toggle && conf.enabled === false;
@@ -270,7 +271,7 @@ window.addEventListener('hashchange', () => { closeModal(); render(); });
 function renderHome() {
   main.innerHTML = `<div class="hero">
     <h1>$ human on the loop</h1>
-    <p class="muted" style="max-width:760px">Write a spec and a goal. A meta-work agent plans, delegates to Claude Code / Codex
+    <p class="muted" style="max-width:760px">Write a spec and a goal. A meta-work agent plans, delegates to Claude Code / Codex / agy
       workers, evaluates evidence and iterates until the goal is met. You steer with notes and meta-chat, review the report, and merge.</p>
     <div class="row" style="margin-top:14px"><button class="btn primary" id="h-new-ws">new workspace</button></div>
     <div class="ws-cards">${S.workspaces.map(w => {
