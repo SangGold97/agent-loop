@@ -217,7 +217,7 @@ def test_fixed_agent_settings(server):
     import asyncio
     engine.db.update("goals", {"ws": "fixed", "id": gid}, status="running")
     try:
-        asyncio.run(engine.spawn_worker(caller, "fake", "coder", "x", "do it"))
+        asyncio.run(engine.spawn_worker(caller, "fake", "coder", "do it"))
         raise AssertionError("disabled agent was accepted")
     except Exception as exc:
         assert "not enabled" in str(exc)
@@ -487,8 +487,12 @@ def test_loop_run_grants_ram_and_stops_a_job_over_its_grant(server):
                     == "awaiting_review" and v)
     sid = next(s["id"] for s in view["sessions"] if s["kind"] == "worker")
     out = (ws / "goals" / gid / "runs" / sid / "artifacts" / "ram.txt").read_text().split("\n---\n")
-    adj, ok, over, spawn, orphan = out
-    assert "granted 0.5 GB" in ok and "job ran, adj 0" in ok and "done (exit 0)" in ok
+    adj, ok, over, spawn, orphan, gpu = out
+    assert "granted 0.5 GB" in ok and "job ran, adj 0 cuda ''" in ok and "done (exit 0)" in ok
+    if engine.infra.latest()["gpus"]:
+        assert "0.5 GB VRAM on GPU" in gpu and "gpu job" in gpu and " 0.5" in gpu
+    else:
+        assert "no GPU on this host" in gpu
     assert "workers can only use" in spawn
     assert not engine.grants and not engine.ram_waiting
     if systemd_available():  # the pool, the job scopes and the OOM order need systemd
@@ -540,3 +544,73 @@ def test_ram_grant_counts_grants_in_full(server):
     dead.wait()
     asyncio.run(engine.ram_grant(worker, 0.1, 0, dead.pid, "true"))
     wait_for(lambda: not engine.grants, timeout=10)
+
+
+def test_vram_grants_fit_gpus_and_stop_the_job_furthest_over(server, monkeypatch):
+    _, engine = server
+    worker = {"id": "w-vramtest", "kind": "worker"}
+    gpus = [{"index": 0, "name": "big", "mem_used_gb": 2.0, "mem_total_gb": 24.0, "util": 0.0, "procs": {}},
+            {"index": 1, "name": "small", "mem_used_gb": 0.0, "mem_total_gb": 12.0, "util": 0.0, "procs": {}}]
+    snap = {**engine.infra.latest(), "gpus": gpus, "sessions": []}
+    # The sampling loop sees the same two fake GPUs, so it measures and polices them too
+    monkeypatch.setattr(engine.infra, "latest", lambda: snap)
+    monkeypatch.setattr(engine.infra, "sample", lambda: snap)
+    helpers = [subprocess.Popen(["sleep", "60"]) for _ in range(6)]
+
+    def grant(vram, i):
+        return asyncio.run(engine.ram_grant(worker, 0.1, 0, helpers[i].pid, f"job{i}", vram=vram))
+
+    try:
+        with pytest.raises(AgentError, match="at most 23.0 GB"):
+            grant(30, 0)
+        # Best fit: the 10 GB job takes the small GPU, the 15 GB one the big GPU, and only it sees that GPU
+        a, b = grant(10, 0), grant(15, 1)
+        assert a["env"]["CUDA_VISIBLE_DEVICES"] == "1" and "10 GB VRAM on GPU1" in a["text"]
+        assert b["env"] == {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "0", "LOOP_VRAM_GB": "15"}
+        # Grants count in full before their jobs load: GPU0 has 23 - 2 - 15 = 6 GB left, GPU1 1 GB
+        with pytest.raises(AgentError, match="10 GB VRAM not free"):
+            grant(10, 2)
+        d = grant(5, 3)
+        assert d["env"]["CUDA_VISIBLE_DEVICES"] == "0"
+        # With a process list, the job over its grant is stopped and the one within it is kept
+        gpus[0]["procs"] = {helpers[1].pid: 14.0, helpers[3].pid: 7.0}
+        gpus[0]["mem_used_gb"] = 23.5
+        engine.sample_vram(snap)
+        engine.police_vram(snap)
+        assert b["grant"] in engine.grants and d["grant"] not in engine.grants
+        assert "7.0 GB VRAM against its 5 GB grant while GPU0" in engine.ram_release(worker, d["grant"])
+        # Without one (WSL), what the GPU uses above its level without grants is its only job's
+        engine.vram_settle.clear()
+        gpus[1]["mem_used_gb"] = 11.5
+        engine.sample_vram(snap)
+        engine.police_vram(snap)
+        assert a["grant"] not in engine.grants
+        assert "11.5 GB VRAM against its 10 GB grant" in engine.ram_release(worker, a["grant"])
+        # Several grants without a process list: the GPU's jobs together are over, so the newest goes first
+        gpus[1]["mem_used_gb"] = 0.0
+        engine.sample_vram(snap)
+        e, f = grant(4, 4), grant(4, 5)
+        assert e["env"]["CUDA_VISIBLE_DEVICES"] == f["env"]["CUDA_VISIBLE_DEVICES"] == "1"
+        engine.vram_settle.clear()
+        gpus[1]["mem_used_gb"] = 11.5
+        engine.sample_vram(snap)
+        engine.police_vram(snap)
+        assert e["grant"] in engine.grants and f["grant"] not in engine.grants
+        assert "using more VRAM" in engine.ram_release(worker, f["grant"])
+        # While the stopped job's memory frees, the job left on that GPU is not blamed for it
+        engine.sample_vram(snap)
+        engine.police_vram(snap)
+        assert e["grant"] in engine.grants
+        # Memory outside the jobs filling a GPU stops nothing
+        engine.vram_settle.clear()
+        gpus[0]["procs"] = {helpers[1].pid: 14.0}
+        engine.sample_vram(snap)
+        engine.police_vram(snap)
+        assert b["grant"] in engine.grants
+    finally:
+        for key in [k for k, g in engine.grants.items() if g["sid"] == worker["id"]]:
+            engine.ram_release(worker, key)
+        for h in helpers:
+            h.kill()
+            h.wait()
+    assert not engine.grants

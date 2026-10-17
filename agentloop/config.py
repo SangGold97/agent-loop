@@ -29,7 +29,7 @@ DEFAULTS: dict = {
         "language": "English",
         "base_branch": None,
     },
-    "infra": {"min_free_ram_gb": 2, "pool_reserve_gb": 4, "worker_memory_max_gb": None, "gpu_slots": 1},
+    "infra": {"min_free_ram_gb": 2, "pool_reserve_gb": 4, "worker_memory_max_gb": None, "vram_reserve_gb": 1},
     "turn_timeout_min": 180,
     "guard": {"deny_patterns": []},
 }

@@ -8,6 +8,9 @@
 - RAM on this machine is shared. Run any job that may need more than about 2 GB (training, fine-tuning, large
   data loads) as `loop run --ram <GB> -- <cmd>`: it waits until that RAM is free, and a job that outgrows it is
   killed, so ask for its peak plus a margin. `loop infra` shows what is free.
+- Only a job run with `--vram <GB>` as well sees a GPU (`loop run --ram 8 --vram 12 -- <cmd>`); `$LOOP_VRAM_GB`
+  holds its grant. It may use more while the GPU has room, but is stopped first when the GPU fills up, so ask
+  for its peak VRAM.
 - Outputs that are not code (logs, metrics, plots, reports) go under `.artifacts/` in the project directory
   unless the prompt names another place. It is kept for the requester, so it holds only results and evidence
   worth keeping. `.artifacts/` is never committed.

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS sessions(
   id TEXT PRIMARY KEY, ws TEXT, goal TEXT, kind TEXT, parent TEXT, role TEXT,
   label TEXT, agent TEXT, model TEXT, effort TEXT, autocompact TEXT, vendor_id TEXT,
   cwd TEXT, branch TEXT, status TEXT, turns INT DEFAULT 0, tokens INT DEFAULT 0,
-  context INT DEFAULT 0, token TEXT, gpu INT DEFAULT 0,
+  context INT DEFAULT 0, token TEXT,
   merged INT DEFAULT 0, created REAL, updated REAL);
 CREATE TABLE IF NOT EXISTS turns(
   id INTEGER PRIMARY KEY, session TEXT, n INT, started REAL, ended REAL, status TEXT,
@@ -35,8 +35,8 @@ CREATE TABLE IF NOT EXISTS messages(
 # Columns added after the first release: (table, column, type)
 ADDED_COLUMNS = [("goals", "first_started", "REAL"), ("goals", "base", "TEXT"), ("goals", "pushed", "REAL"),
                  ("goals", "pr", "TEXT")]
-# Columns no longer kept: the platform does not track spend
-DROPPED_COLUMNS = [("goals", "cost"), ("sessions", "cost"), ("turns", "cost")]
+# Columns no longer kept: the platform does not track spend, and GPUs go to jobs (`loop run --vram`), not sessions
+DROPPED_COLUMNS = [("goals", "cost"), ("sessions", "cost"), ("turns", "cost"), ("sessions", "gpu")]
 
 
 class DB:

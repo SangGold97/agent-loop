@@ -70,8 +70,8 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   CLI keep running, a refused worker turn is not counted, and spawns on that CLI are refused until the reset.
 - Every turn runs in its own `systemd-run --user --scope`. Processes still running when the CLI exits (a job the
   agent backgrounded) are stopped and named in the digest; orphans are stopped on restart. Each turn also gets its
-  own `TMPDIR`, removed when the turn ends, so scratch files never pile up in `/tmp`. GPUs are hidden unless a
-  worker is spawned with `--gpu` (slots in `loop.yaml → infra`).
+  own `TMPDIR`, removed when the turn ends, so scratch files never pile up in `/tmp`. GPUs are hidden from every
+  session; a job sees one only through `loop run --vram` (below).
 - RAM is one pool for all sessions: their scopes share a slice capped at host RAM minus `pool_reserve_gb`, so an
   out-of-memory kill stays among agent processes. A job that needs more than about 2 GB runs through
   `loop run --ram <GB> -- <cmd>`, which waits until that much is left to grant and holds it until the job ends.
@@ -82,6 +82,12 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   platform can still exhaust the host's reserve. Spawns, sends and advice are refused while less than
   `min_free_ram_gb` is left to grant; the refused goal then waits without counting as idle and gets an event once
   enough is free again. The digest reports a turn's memory peak and kills.
+- VRAM is granted per job too: `loop run --ram <GB> --vram <GB> -- <cmd>` waits until one GPU has that much left
+  to grant (its total minus `vram_reserve_gb`, minus every grant in full and what other programs use), then shows
+  the job that GPU alone. VRAM has no hard cap, so a job may use more than its grant while the GPU has room; once
+  less than `vram_reserve_gb` is free there, the job furthest over its grant is stopped, and a job that keeps to
+  its grant is never stopped for another's overuse. Where the driver lists no processes (WSL), a GPU's jobs are
+  measured by what it uses above its level without grants, and with several grants the newest goes first.
 - Events handed to a meta-work turn stay "in flight" until it completes; a crash, restart or stop puts them back.
 - The advisor is read-only like a meta-chat: the guard blocks its edits, its `loop` token permits read commands
   only, and a turn that still changes `repo/` or the integration worktree raises an alert. A stopped or

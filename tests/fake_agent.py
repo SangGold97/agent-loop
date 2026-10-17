@@ -89,7 +89,12 @@ def main():
                 adj = " ".join(Path(f"/proc/{pid}/oom_score_adj").read_text().strip() for pid in (os.getpid(), tool.pid))
                 tool.kill()
                 ok = loop("run", "--ram", "0.5", "--", sys.executable, "-c",
-                          "print('job ran, adj', open('/proc/self/oom_score_adj').read().strip())")
+                          "import os; print('job ran, adj', open('/proc/self/oom_score_adj').read().strip(), "
+                          "'cuda', repr(os.environ.get('CUDA_VISIBLE_DEVICES')))")
+                # Only a job granted VRAM sees a GPU (refused on a host without one)
+                gpu = loop("run", "--ram", "0.1", "--vram", "0.5", "--", sys.executable, "-c",
+                           "import os; print('gpu job', os.environ.get('CUDA_VISIBLE_DEVICES'), "
+                           "os.environ.get('LOOP_VRAM_GB'))")
                 # A job that outgrows its grant is killed in its own scope; steering is refused to a worker
                 over = loop("run", "--ram", "0.1", "--", sys.executable, "-c",
                             "import time; x = bytearray(300 * 2**20); time.sleep(10)")
@@ -107,7 +112,7 @@ def main():
                     orphan = "job stopped"
                 except psutil.TimeoutExpired:
                     orphan = "job still running"
-                Path(".artifacts/ram.txt").write_text("\n---\n".join([adj, ok, over, spawn, orphan]))
+                Path(".artifacts/ram.txt").write_text("\n---\n".join([adj, ok, over, spawn, orphan, gpu]))
             emit({"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "Bash", "input": {"command": "python hello.py"}}]}})
             emit({"type": "user", "message": {"content": [{"type": "tool_result", "content": "hello"}]}})

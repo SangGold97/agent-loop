@@ -1045,14 +1045,14 @@ function renderInfra() {
       <div class="card stat"><div class="label">ram</div><div class="value">${usedRam} / ${s.ram_total_gb} GB</div>${meter(s.ram_pct, 100)}<div class="sub">${s.ram_free_gb} GB available · swap ${s.swap_pct}%</div></div>
       <div class="card stat"><div class="label">disk</div><div class="value">${s.disk_free_gb} GB free</div>${meter(s.disk_total_gb - s.disk_free_gb, s.disk_total_gb)}<div class="sub">of ${s.disk_total_gb} GB</div></div>
       <div class="card stat"><div class="label">gpu</div>${s.gpus.length ? s.gpus.map(g => `<div class="value">${esc(g.name)}</div>${meter(g.mem_used_gb, g.mem_total_gb)}<div class="sub">VRAM ${g.mem_used_gb}/${g.mem_total_gb} GB · util ${g.util}%</div>`).join('')
-        : '<div class="value">none</div><div class="sub">workers run CPU-only; --gpu spawns are refused</div>'}</div>
+        : '<div class="value">none</div><div class="sub">jobs run CPU-only; loop run --vram is refused</div>'}</div>
     </div>
     <div style="margin-top:22px">${box('last 10 minutes', `<div class="legend"><span><i style="background:var(--accent)"></i>cpu %</span><span><i style="background:var(--reply)"></i>ram %</span>${s.gpus.length ? '<span><i style="background:var(--warn)"></i>vram %</span>' : ''}</div>
       <canvas class="chart" id="infra-chart"></canvas>`)}</div>
     <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>goal</th><th>memory</th></tr>
       ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)} ${esc(x.role || '')}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td></tr>`).join('')}</table>`
         : '<div class="empty">No agent sessions running.</div>'}
-      <p class="hint">All sessions share one RAM pool: host RAM minus infra.pool_reserve_gb (loop.yaml). Jobs over about 2 GB hold a grant through <code>loop run --ram</code>; new workers are refused while less than min_free_ram_gb is left to grant.</p>`)}</div></div>`;
+      <p class="hint">All sessions share one RAM pool: host RAM minus infra.pool_reserve_gb (loop.yaml). Jobs over about 2 GB hold a grant through <code>loop run --ram</code>; new workers are refused while less than min_free_ram_gb is left to grant. A GPU is visible only to jobs run with <code>loop run --vram</code>, granted per GPU with infra.vram_reserve_gb kept free.</p>`)}</div></div>`;
   drawChart($('#infra-chart'), 600);
 }
 // Line chart of cpu/ram(/vram) %; `pct` labels the grid lines as 0%…100% (sidebar)
