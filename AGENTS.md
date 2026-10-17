@@ -81,4 +81,4 @@ sessions, merges their work and closes the goal; the human steers from the web U
 
 ## Answers
 
-- Provide concise answers and easy to understand inline chat, clear explanations, and get straight to the point.
+- Provide concise answers and easy to understand inline chat in Vietnamese, clear explanations, and get straight to the point.
