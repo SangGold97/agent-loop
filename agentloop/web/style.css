@@ -200,6 +200,9 @@ table.t { width: 100%; border-collapse: collapse; }
 .box.mw > .lt, .box.chat > .lt { font-size: 10.5px; top: -8px; line-height: 14px; }
 .box.mw, .box.chat { display: flex; flex-direction: column; min-height: 0; padding: 10px 8px 6px; }
 .box.mw { flex: 3 1 0; } .box.chat { flex: 2 1 0; }
+.box.chat.folded { flex: none; min-height: 0; }
+.box.chat.folded > :not(.lt):not(.chat-bar) { display: none; }
+.box.chat.folded > .chat-bar { margin-bottom: 0; }
 .pane-head { margin-bottom: 4px; }
 .wlist { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
 .cfg { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 12px; align-items: center; }

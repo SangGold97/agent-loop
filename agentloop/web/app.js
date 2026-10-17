@@ -561,7 +561,7 @@ function renderSideInfra() {
   const gpu = s.gpus[0];
   $('#si-ts').textContent = hhmm(s.ts);
   $('#si-vals').innerHTML = `<span class="c-cpu">cpu ${s.cpu_pct.toFixed(0)}%</span><span class="c-ram">ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb}G</span>`
-    + (gpu ? `<span class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G</span>` : '');
+    + (gpu ? `<span class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G · util ${gpu.util.toFixed(0)}%</span>` : '');
   $('#nav-infra').title = `${s.sessions?.length || 0} agent sessions using ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB · open the infra page`;
   drawChart($('#side-chart'), 120, true);
 }
@@ -641,19 +641,40 @@ function feedShell(key) {
 async function loadFeed(sid) {
   if (!S.feeds[sid]) S.feeds[sid] = (await api(`/api/sessions/${sid}/events?limit=4000&types=${FEED_TYPES.join(',')}`)).events;
 }
-// Which sessions a pane shows, and how prompts/replies are labelled
+// A finished turn folds to its prompt, final reply and failure, as in the meta-chat; the running turn shows every
+// step. `done` counts the folded turns: when it changes, already painted steps must go, so the pane repaints
+function foldTurns(evs, sid) {
+  const out = [];
+  let start = 0, done = 0;
+  const fold = end => {
+    const seg = evs.slice(start, end), reply = seg.findLast(e => e.type === 'text' && !e.sub);
+    out.push(...seg.filter(e => e.type === 'turn' || e.type === 'turn_end' || e === reply));
+    start = end; done++;
+  };
+  evs.forEach((e, i) => {
+    if (e.type === 'turn' && i > start) fold(i);  // the previous turn never logged its end
+    else if (e.type === 'turn_end') fold(i + 1);
+  });
+  // A turn cut by a server restart stays open in the log; its session is marked interrupted
+  if (start < evs.length && S.goal.sessions.find(x => x.id === sid)?.status === 'interrupted') fold(evs.length);
+  else out.push(...evs.slice(start));
+  return { evs: out, done };
+}
+// Which sessions a pane shows, and how prompts/replies are labelled; the log window keeps every step
 function feedSource(key) {
   if (key === 'modal') {
     const s = S.goal?.sessions.find(x => x.id === S.modal.sid) || {};
-    return { evs: S.modal.evs, sids: [S.modal.sid], sig: S.modal.sid, who: s.kind === 'worker'
+    return { evs: S.modal.evs, done: 0, sids: [S.modal.sid], sig: S.modal.sid, who: s.kind === 'worker'
       ? { prompt: 'meta-work → worker', reply: cliName(s.agent) } : { prompt: `→ ${s.kind || 'session'}`, reply: s.kind || 'session' } };
   }
   if (key === 'meta-work') {
     const ids = S.goal.sessions.filter(s => s.kind === 'meta-work' && S.feeds[s.id]).map(s => s.id);
-    return { evs: ids.flatMap(id => S.feeds[id]), sids: ids, sig: ids.join(), who: { prompt: 'platform → meta-work', reply: 'meta-work' } };
+    const folded = ids.map(id => foldTurns(S.feeds[id], id));
+    return { evs: folded.flatMap(f => f.evs), done: folded.reduce((n, f) => n + f.done, 0), sids: ids, sig: ids.join(),
+      who: { prompt: 'platform → meta-work', reply: 'meta-work' } };
   }
   const s = S.goal.sessions.find(x => x.id === key);
-  return { evs: S.feeds[key] || [], sids: [key], sig: key, who: { prompt: 'meta-work → worker', reply: cliName(s?.agent) } };
+  return { ...foldTurns(S.feeds[key] || [], key), sids: [key], sig: key, who: { prompt: 'meta-work → worker', reply: cliName(s?.agent) } };
 }
 const liveKeys = () => ['meta-work', ...S.goal.sessions.filter(s => s.kind === 'worker').map(s => s.id), ...(S.modal ? ['modal'] : [])];
 const stick = el => { if (!el.dataset.free) el.scrollTop = el.scrollHeight; };
@@ -671,11 +692,11 @@ const paintLive = key => schedule('l', key, renderLive);
 function renderFeed(key) {
   const el = $(`[data-feed="${key}"]`);
   if (!el || (key === 'modal' && !S.modal)) return;
-  const { evs, who, sig } = feedSource(key), fs = $('.fs', el);
+  const { evs, who, sig, done } = feedSource(key), fs = $('.fs', el);
   let from = Number(el.dataset.n || 0);
-  // Append only what is new; repaint when the set of sessions changed
-  if (el.dataset.sig !== sig || from > evs.length) {
-    fs.innerHTML = ''; el.dataset.sig = sig; from = Math.max(0, evs.length - FEED_TAIL);
+  // Append only what is new; repaint when the set of sessions changed or a turn folded
+  if (el.dataset.sig !== sig || el.dataset.done !== String(done) || from > evs.length) {
+    fs.innerHTML = ''; el.dataset.sig = sig; el.dataset.done = done; from = Math.max(0, evs.length - FEED_TAIL);
   }
   const html = evs.slice(from).map(e => tuiEvent(e, who)).join('');
   if (html) { $('.empty', fs)?.remove(); fs.insertAdjacentHTML('beforeend', html); }
@@ -753,8 +774,18 @@ function renderAdvisorStatus() {
   };
 }
 
-// META-CHAT: chats bound to this goal; agent/model/effort chosen per chat
+// META-CHAT: chats bound to this goal; agent/model/effort chosen per chat. Folding it to its bar, like an idle
+// worker, gives the meta-work the room; the choice is remembered in this browser
+let chatFold = (() => { try { return localStorage.getItem('agentloop.chatFold') === '1'; } catch { return false; } })();
+function toggleChat(fold = !chatFold) {
+  chatFold = fold;
+  try { localStorage.setItem('agentloop.chatFold', fold ? '1' : '0'); } catch { /* storage blocked: fold for this page only */ }
+  $('#ov-chat')?.classList.toggle('folded', fold);
+  renderChatBar();
+  if (!fold && $('#chat-feed')) stick($('#chat-feed'));
+}
 function renderChat() {
+  $('#ov-chat').classList.toggle('folded', chatFold);
   $('#ov-chat').innerHTML = `<div class="lt">meta-chat</div>
     <div class="chat-bar" id="chat-bar"></div><div id="chat-new"></div>
     <div class="feed-wrap"><div class="feed" id="chat-feed"></div><button class="follow" hidden>▼ follow live</button></div>
@@ -775,13 +806,16 @@ function renderChatBar() {
   const chats = S.goal.sessions.filter(s => s.kind === 'meta-chat');
   if (!S.chat.sid && chats.length) S.chat.sid = chats[chats.length - 1].id;
   const cur = chats.find(c => c.id === S.chat.sid);
-  bar.innerHTML = `<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
+  // The expanded window shows the whole chat, so only the overview pane folds
+  const fold = S.chatOut ? '' : `<button class="icon-btn fold" id="chat-fold" title="${chatFold ? 'Show' : 'Hide'} the chat">${chatFold ? '▸' : '▾'}</button>`;
+  bar.innerHTML = `${fold}<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
       chat ${i + 1} · ${agentLine(c, c.context)}</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
     ${cur ? agentPill(simpleStatus(cur)) : ''}<button class="btn small" id="chat-new-btn">+ new chat</button>
     <button class="btn small" id="chat-expand">${S.chatOut ? 'collapse' : 'expand'}</button>`;
   $('#chat-expand').onclick = () => S.chatOut ? closeModal() : expandChat();
+  bar.onclick = e => { if (e.target === bar || e.target.id === 'chat-fold') toggleChat(); };
   $('#chat-sel').onchange = e => { S.chat.sid = e.target.value; S.chat.liveEvs = []; loadChatMessages(); };
-  $('#chat-new-btn').onclick = () => { S.chat.creating = !S.chat.creating; renderNewChat(); };
+  $('#chat-new-btn').onclick = () => { S.chat.creating = !S.chat.creating; if (chatFold) toggleChat(false); renderNewChat(); };
   renderNewChat();
 }
 function renderNewChat() {
