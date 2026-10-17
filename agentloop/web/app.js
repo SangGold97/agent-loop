@@ -3,7 +3,7 @@
 
 const S = { workspaces: [], route: {}, goal: null, feeds: {}, infra: null, history: [], agents: null, models: {},
   chat: { sid: null, messages: [], busy: false, liveEvs: [], creating: false }, edit: {}, cfgDirty: false,
-  partial: {}, modal: null, open: {}, chatOut: false };
+  partial: {}, modal: null, open: {}, more: {}, chatOut: false };
 const main = document.getElementById('main');
 const AGENTS = ['claude', 'codex', 'agy'];
 const NO_AUTOCOMPACT = ['agy'];  // CLIs without an auto-compact setting
@@ -13,7 +13,21 @@ const FEED_TYPES = ['turn', 'text', 'tool', 'tool_result', 'thinking', 'turn_end
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const md = s => (window.marked && window.DOMPurify) ? DOMPurify.sanitize(marked.parse(s || '')) : `<pre>${esc(s)}</pre>`;
+const mdHtml = s => (window.marked && window.DOMPurify) ? DOMPurify.sanitize(marked.parse(s || '')) : `<pre>${esc(s)}</pre>`;
+// Markdown also typesets math ($…$, $$…$$, \(…\), \[…\]). It is set aside before markdown parsing, which would eat
+// its underscores and backslashes, and KaTeX output goes in after sanitizing; code spans and blocks stay as written
+const MATH_RE = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)|\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$(?=[^\s$])([^$\n]*?[^\s$\\])\$(?!\d)/g;
+function md(s) {
+  if (!window.katex) return mdHtml(s);
+  const math = [];
+  const text = String(s || '').replace(MATH_RE, (m, code, dd, db, ip, id) => {
+    if (code) return m;
+    math.push({ tex: dd ?? db ?? ip ?? id, display: dd !== undefined || db !== undefined });
+    return `KATEX${math.length - 1}X`;
+  });
+  return mdHtml(text).replace(/KATEX(\d+)X/g, (m, i) => math[i]
+    ? katex.renderToString(math[i].tex, { displayMode: math[i].display, throwOnError: false, strict: false, output: 'html' }) : m);
+}
 const fmtTok = n => !n ? '0' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n);
 const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '–';
 const hhmm = ts => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
@@ -75,6 +89,73 @@ function meter(used, max) {
   return `<div class="meter ${cls}"><i style="width:${pct}%"></i></div>`;
 }
 const box = (title, body, attrs = '') => `<div class="box" ${attrs}><div class="lt">${title}</div>${body}</div>`;
+// A document box never grows past the window: its text scrolls inside, and expand opens it whole in a window
+const docBox = (key, title, body, cls = '', after = '') => `<div class="box doc-box ${cls}"><div class="lt">${title}
+  <button class="btn small" data-doc-expand="${esc(key)}">expand</button></div><div class="doc-scroll" data-scroll="${esc(key)}">${body}</div>${after}</div>`;
+// A long list item shows its first lines until opened; `open` is its default (the newest item), the human's choice wins
+const clamp = (key, body, open) => `<div class="clamp ${(S.more[key] ?? open) ? 'open' : ''}" data-clamp="${esc(key)}">
+  <div class="clamp-body">${body}</div><button class="more" data-more="${esc(key)}"></button></div>`;
+// Only items taller than the clamp get the toggle; measured folded, so an opened item keeps its button
+function fitClamps(root) {
+  $$('[data-clamp]', root).forEach(c => {
+    const open = c.classList.contains('open'), body = $('.clamp-body', c);
+    c.classList.remove('open');
+    c.classList.toggle('long', body.scrollHeight > body.clientHeight + 2);
+    c.classList.toggle('open', open);
+    $('.more', c).textContent = open ? 'show less' : 'show more';
+  });
+}
+// A refresh repaints a tab; readers stay where they were in every scrolled document or list
+function keepScroll(paint) {
+  const at = {};
+  $$('[data-scroll]').forEach(e => { at[e.dataset.scroll] = e.scrollTop; });
+  paint();
+  $$('[data-scroll]').forEach(e => { if (at[e.dataset.scroll]) e.scrollTop = at[e.dataset.scroll]; });
+}
+document.addEventListener('click', e => {
+  const more = e.target.closest('[data-more]'), exp = e.target.closest('[data-doc-expand]');
+  const head = !e.target.closest('button') && e.target.closest('[data-fold-item] > .ai-head');
+  if (head) {
+    const item = head.parentElement, open = !item.classList.contains('open');
+    S.more[item.dataset.foldItem] = open;
+    item.classList.toggle('open', open);
+    $('.fold', head).textContent = open ? '▾' : '▸';
+  } else if (more) {
+    const c = more.closest('[data-clamp]'), open = !c.classList.contains('open');
+    S.more[more.dataset.more] = open;
+    c.classList.toggle('open', open);
+    more.textContent = open ? 'show less' : 'show more';
+  } else if (exp) {
+    const key = exp.dataset.docExpand, body = $(`[data-scroll="${CSS.escape(key)}"]`);
+    if (body) docModal(key, body.innerHTML);
+  }
+});
+// The expanded window of spec.md and goal.md also edits them, as their boxes in the config tab do
+const EDITABLE_DOCS = { 'spec.md': 'spec', 'goal.md': 'goal' };
+function docModal(key, html) {
+  const name = S.route.tab === 'config' && EDITABLE_DOCS[key];
+  const m = modal(`<div class="modal-head"><h2>${esc(key)}</h2><span class="spacer"></span>
+      ${name ? '<button class="btn small" id="dm-edit">edit</button>' : ''}<button class="icon-btn" data-close>×</button></div>
+    <div class="doc-full">${html}</div>`, 'full');
+  if (!name) return;
+  $('#dm-edit', m).onclick = () => {
+    $('#dm-edit', m).hidden = true;
+    $('.doc-full', m).outerHTML = `<div class="doc-edit"><textarea class="editor wrap" id="dm-text" spellcheck="false">${esc(S.goal.files[key])}</textarea>
+      <div class="row" style="margin-top:6px"><span class="spacer"></span><button class="btn small" id="dm-cancel">cancel</button>
+        <button class="btn small primary" id="dm-save">save</button></div></div>`;
+    $('#dm-text', m).focus();
+    $('#dm-cancel', m).onclick = () => docModal(key, md(S.goal.files[key]));
+    $('#dm-save', m).onclick = () => act(async () => {
+      await saveDoc(name, $('#dm-text', m).value);
+      docModal(key, md(S.goal.files[key]));
+    }, `${key} saved`);
+  };
+}
+async function saveDoc(name, text) {
+  const { ws, gid } = S.route;
+  await api(`/api/goals/${ws}/${gid}/files/${name}.md`, { method: 'PUT', body: { text } });
+  S.edit[name] = false; await loadGoal(); renderConfigTab(true);
+}
 
 // ---------- YAML (small dumper for goal.yaml) ----------
 function yamlScalar(v) {
@@ -124,8 +205,8 @@ function agentRow(key, conf = {}, opts = {}) {
     ${opts.noAutocompact ? '<span></span>' : `<input type="text" data-f="autocompact" value="${esc(conf.autocompact ?? '')}" placeholder="${esc(autocompactHint(agent))}" ${NO_AUTOCOMPACT.includes(agent) ? 'disabled' : ''}>`}
   </div>`;
 }
-function agentHeader() {
-  return `<div class="agent-row faint small"><span></span><span>agent</span><span>model</span><span>effort</span><span>autocompact</span></div>`;
+function agentHeader(label = '') {
+  return `<div class="agent-row faint small"><span class="k">${label}</span><span>agent</span><span>model</span><span>effort</span><span>autocompact</span></div>`;
 }
 function wireAgentRows(root, onChange) {
   root.addEventListener('change', e => {
@@ -159,24 +240,28 @@ function readAgentRow(row) {
   if ($('[data-f=enabled]', row)) out.enabled = $('[data-f=enabled]', row).checked;
   return out;
 }
-function configForm(conf) {
+function configForm(conf, footer = '') {
   const b = conf.budget || {}, mw = conf.meta_work || {}, wk = conf.workers || {};
-  const num = (k, v, title) => `<label class="f">${title}<input type="number" min="0" step="1" data-b="${k}" value="${v ?? ''}" placeholder="∞"></label>`;
+  const num = (k, v, title, tip) => `<label class="f" title="${tip}">${title}<input type="number" min="0" step="1" data-b="${k}" value="${v ?? ''}" placeholder="∞"></label>`;
+  const lang = conf.language || 'English';
+  // Agents on the left, the short settings beside them; long explanations sit in tooltips so the form stays short
   return `<div class="cfg">
-    <div class="k">agents</div><div>${agentHeader()}
+    <div class="cfg-agents">${agentHeader('agents')}
       ${agentRow('meta_work', mw, { title: 'meta-work' })}
       ${agentRow('meta_advisor', conf.meta_advisor || {}, { title: 'meta-advisor' })}
       ${AGENTS.map(a => agentRow(`worker:${a}`, { agent: a, ...(wk[a] || {}) }, { title: 'worker', toggle: true, fixedAgent: true })).join('')}
       <div class="hint">The meta-work picks <code>--agent ${AGENTS.join('|')}</code> per worker; model and effort are always taken from here.</div></div>
-    <div class="k">rotate</div><div class="row"><span class="muted small">start a fresh meta-work session when its context exceeds</span>
-      <input type="text" data-rotate value="${esc(mw.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)" style="width:160px"></div>
-    <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'concurrent workers')}
-      ${num('max_worker_turns', b.max_worker_turns, 'worker turns')}${num('max_meta_turns', b.max_meta_turns, 'meta-work + advisor turns')}</div>
-    <div class="k">language</div><div class="row"><select data-lang style="width:160px">${['English', 'Vietnamese'].concat(
-        ['English', 'Vietnamese'].includes(conf.language || 'English') ? [] : [conf.language]).map(l => `<option ${l === (conf.language || 'English') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
-      <span class="hint">for plan, report, advice and chat replies to you; meta-work and workers talk to each other in English</span></div>
-    <div class="k">git</div><div class="row"><input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo/'s current branch" style="width:160px">
-      <span class="hint">base branch: the integration branch starts from it and the PR opened by push &amp; create PR targets it; empty = the branch repo/ has checked out when the goal starts</span></div>
+    <div class="cfg-side">
+      <div class="k" title="start a fresh meta-work session when its context exceeds this many tokens">rotate at</div>
+      <input type="text" data-rotate value="${esc(mw.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)" title="start a fresh meta-work session when its context exceeds this many tokens">
+      <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'workers', 'concurrent workers')}
+        ${num('max_worker_turns', b.max_worker_turns, 'worker turns', 'worker turns in total')}${num('max_meta_turns', b.max_meta_turns, 'meta turns', 'meta-work + advisor turns in total')}</div>
+      <div class="k">language</div><select data-lang title="for plan, report, advice and chat replies to you; meta-work and workers talk to each other in English">${['English', 'Vietnamese'].concat(
+        ['English', 'Vietnamese'].includes(lang) ? [] : [lang]).map(l => `<option ${l === lang ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+      <div class="k">base branch</div>
+      <input type="text" data-base value="${esc(conf.base_branch ?? '')}" placeholder="repo/'s current branch" title="the integration branch starts from it and the PR opened by push &amp; create PR targets it; empty = the branch repo/ has checked out when the goal starts">
+      <div></div><div class="row cfg-foot"><span class="hint">hover a field for details</span><span class="spacer"></span>${footer}</div>
+    </div>
   </div>`;
 }
 function readConfigForm(root) {
@@ -489,7 +574,12 @@ async function renderTab() {
   if (t === 'overview') renderOverview();
   else if (t === 'config') { $('#m-tab').innerHTML = '<div id="cfg-tab" style="margin-top:18px"></div>'; renderConfigTab(true); }
   else if (t === 'plan') {
-    $('#m-tab').innerHTML = planHtml();
+    // Refreshes come with every session event; repaint only when the plan or the advice changed
+    const html = planHtml();
+    if ($('#m-tab .plan-grid') && S.planHtml === html) return;
+    S.planHtml = html;
+    keepScroll(() => { $('#m-tab').innerHTML = html; });
+    fitTab();
     $$('#m-tab [data-log]').forEach(b => b.onclick = () => sessionModal(b.dataset.log));
   }
   else if (t === 'notes') renderNotes();
@@ -521,11 +611,11 @@ function renderOverview() {
       <div class="layer col"><div class="lt">worker-agents <span class="x faint" id="ov-wcount"></span></div>
         <div id="ov-workers" class="wlist"></div></div></div>`;
   renderStats(); renderMetaWork(); renderChat(); renderWorkers();
-  fitOverview();
+  fitTab();
 }
-// The overview fills the window; each pane scrolls on its own
-function fitOverview() {
-  const el = $('#ov-main');
+// The overview, and the panes of the config and plan tabs, fill the window; each pane scrolls on its own
+function fitTab() {
+  const el = $('#ov-main') || $('#m-tab .fit');
   if (el) el.style.height = window.innerWidth <= 1000 ? '' : Math.max(380, window.innerHeight - el.getBoundingClientRect().top - 17) + 'px';
 }
 function updateOverview(force) {
@@ -573,10 +663,12 @@ function renderReport() {
   if (!report) { el.innerHTML = ''; return; }
   if (el.dataset.report === report + review) return;
   el.dataset.report = report + review;
-  el.innerHTML = `<div class="box report"><div class="lt">report${review ? ' · awaiting your review' : ''}</div>
-    <div class="md">${md(report.replace(/^# Completion report\s*\n/, ''))}</div>
-    ${review ? `<div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn" id="nt-reopen">reopen with note</button>
-      <button class="btn primary" id="nt-accept">accept</button></div>` : ''}</div>`;
+  // Open while it awaits review; after that it folds to its first lines
+  el.innerHTML = docBox('report.md', `report${review ? ' · awaiting your review' : ''}`,
+    clamp('report', `<div class="md doc">${md(report.replace(/^# Completion report\s*\n/, ''))}</div>`, review), 'report',
+    review ? `<div class="row" style="margin-top:8px"><span class="spacer"></span><button class="btn" id="nt-reopen">reopen with note</button>
+      <button class="btn primary" id="nt-accept">accept</button></div>` : '');
+  fitClamps(el);
   if (review) { $('#nt-accept').onclick = () => goalAction('accept'); $('#nt-reopen').onclick = () => reopenModal(); }
 }
 function renderConfigTab(force) {
@@ -589,17 +681,21 @@ function renderConfigTab(force) {
   el.dataset.key = key;
   const doc = (name, title, hint) => {
     const editing = S.edit[name];
-    return box(`${title} ${editing ? '' : `<button class="btn small" data-edit="${name}">edit</button>`}`,
-      editing ? `<textarea class="editor" data-doc="${name}" spellcheck="false" style="min-height:220px">${esc(M.files[name + '.md'])}</textarea>
+    if (!editing) return docBox(`${name}.md`, `${title} <button class="btn small" data-edit="${name}">edit</button>`,
+      `<div class="md doc">${md(M.files[name + '.md'])}</div>`);
+    return box(title,
+      `<textarea class="editor wrap" data-doc="${name}" spellcheck="false" style="min-height:220px">${esc(M.files[name + '.md'])}</textarea>
         <div class="row" style="margin-top:6px"><span class="hint">${hint}</span><span class="spacer"></span>
-          <button class="btn small" data-cancel="${name}">cancel</button><button class="btn small primary" data-save-doc="${name}">save</button></div>`
-      : `<div class="md">${md(M.files[name + '.md'])}</div>`);
+          <button class="btn small" data-cancel="${name}">cancel</button><button class="btn small primary" data-save-doc="${name}">save</button></div>`);
   };
-  el.innerHTML = `<div class="grid cols-2">${doc('spec', 'spec', 'read-only for agents; a running meta-work is notified with the diff')}
-      ${doc('goal', 'goal','lines like - verify: `pytest -q` are executed by the platform')}</div>
-    <div style="margin-top:18px">${box('agents · budget · git <span class="dirty" id="cfg-dirty"></span>', `<div id="ov-cfg">${configForm(M.config)}</div>
-      <div class="row" style="margin-top:8px"><span class="hint">Applies from the next turn. Changing the meta-work agent starts a fresh meta-work session (the plan carries over).</span>
-        <span class="spacer"></span><button class="btn small primary" id="cfg-save">save config</button></div>`)}</div>`;
+  // The config form, edited most often, comes first; the documents scroll in their own boxes below it
+  // Save sits in the form's bottom-right corner, so it takes no extra row; spec and goal fill the rest of the window
+  const save = `<button class="btn small primary" id="cfg-save" title="Changing the meta-work agent starts a fresh meta-work session (the plan carries over).">save config</button>`;
+  keepScroll(() => { el.innerHTML = `${box(`agents · budget · git <span class="x">applies from the next turn</span><span class="dirty" id="cfg-dirty"></span>`,
+      `<div id="ov-cfg">${configForm(M.config, save)}</div>`)}
+    <div class="grid cols-2 fit" style="margin-top:18px">${doc('spec', 'spec', 'read-only for agents; a running meta-work is notified with the diff')}
+      ${doc('goal', 'goal','lines like - verify: `pytest -q` are executed by the platform')}</div>`; });
+  fitTab();
   S.cfgDirty = false;
   wireAgentRows($('#ov-cfg'), () => { S.cfgDirty = true; $('#cfg-dirty').textContent = 'unsaved'; });
   $('#cfg-save').onclick = () => act(async () => {
@@ -611,11 +707,8 @@ function renderConfigTab(force) {
   }, 'Configuration saved');
   $$('[data-edit]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.edit] = true; renderConfigTab(true); });
   $$('[data-cancel]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.cancel] = false; renderConfigTab(true); });
-  $$('[data-save-doc]', el).forEach(b => b.onclick = () => act(async () => {
-    const name = b.dataset.saveDoc, { ws, gid } = S.route;
-    await api(`/api/goals/${ws}/${gid}/files/${name}.md`, { method: 'PUT', body: { text: $(`[data-doc="${name}"]`, el).value } });
-    S.edit[name] = false; await loadGoal(); renderConfigTab(true);
-  }, `${b.dataset.saveDoc}.md saved`));
+  $$('[data-save-doc]', el).forEach(b => b.onclick = () => act(
+    () => saveDoc(b.dataset.saveDoc, $(`[data-doc="${b.dataset.saveDoc}"]`, el).value), `${b.dataset.saveDoc}.md saved`));
 }
 
 // ---------- live feeds: TUI-like stream of prompts, replies, tool calls; follows the bottom ----------
@@ -660,11 +753,14 @@ function foldTurns(evs, sid) {
   else out.push(...evs.slice(start));
   return { evs: out, done };
 }
-// Which sessions a pane shows, and how prompts/replies are labelled; the log window keeps every step
+// Which sessions a pane shows, and how prompts/replies are labelled; the log window keeps every step (the advisor's
+// excepted)
 function feedSource(key) {
   if (key === 'modal') {
+    // The advisor has no pane of its own, so its window folds finished turns like the panes do
     const s = S.goal?.sessions.find(x => x.id === S.modal.sid) || {};
-    return { evs: S.modal.evs, done: 0, sids: [S.modal.sid], sig: S.modal.sid, who: s.kind === 'worker'
+    const { evs, done } = s.kind === 'meta-advisor' ? foldTurns(S.modal.evs, s.id) : { evs: S.modal.evs, done: 0 };
+    return { evs, done, sids: [S.modal.sid], sig: S.modal.sid, who: s.kind === 'worker'
       ? { prompt: 'meta-work → worker', reply: cliName(s.agent) } : { prompt: `→ ${s.kind || 'session'}`, reply: s.kind || 'session' } };
   }
   if (key === 'meta-work') {
@@ -964,18 +1060,22 @@ async function sessionModal(sid) {
 }
 
 // ---------- plan, human report & notes, git ----------
-// Plan on top; below it, the final reply of each advisor consultation as the meta-work received it
+// Plan on the left; on the right, the final reply of each advisor consultation as the meta-work received it
 function planHtml() {
   const f = S.goal.files, advisors = S.goal.sessions.filter(s => s.kind === 'meta-advisor');
   const items = advisors.map((s, i) => {
     const a = S.goal.advice[s.id];
-    return `<div class="advice-item"><div class="row small"><b>consultation ${i + 1}</b>${pill(a ? a.status : s.status)}
+    // Each consultation folds to its header; the newest starts open, the human's choice wins
+    const key = `advice-${s.id}`, open = S.more[key] ?? i === advisors.length - 1;
+    return `<div class="advice-item ${open ? 'open' : ''}" data-fold-item="${key}"><div class="row small ai-head"><span class="fold">${open ? '▾' : '▸'}</span>
+        <b>consultation ${i + 1}</b>${pill(a ? a.status : s.status)}
         <span class="spacer"></span><span class="faint">${fmtTime(s.created)}</span><button class="btn small" data-log="${s.id}">expand</button></div>
-      ${a ? `<div class="md">${md(a.text)}</div>` : '<div class="faint small">no advice yet</div>'}</div>`;
+      ${a ? `<div class="ai-body md doc">${md(a.text)}</div>` : '<div class="ai-body faint small">no advice yet</div>'}</div>`;
   }).reverse().join('');
-  return `<div style="margin-top:18px">${box('plan.md <span class="x">current state, owned by the meta-work</span>', `<div class="md">${md(f['plan.md'])}</div>`)}</div>
-    <div style="margin-top:18px">${box('advice <span class="x">final replies of the meta-advisor to the meta-work, newest first</span>',
-      items || '<div class="empty">No consultations yet.</div>')}</div>`;
+  return `<div class="grid plan-grid fit" style="margin-top:18px">
+    ${docBox('plan.md', 'plan.md <span class="x">current state, owned by the meta-work</span>', `<div class="md doc">${md(f['plan.md'])}</div>`)}
+    ${box('advice <span class="x">meta-advisor replies, newest first</span>',
+      `<div class="list-scroll" data-scroll="advice">${items || '<div class="empty">No consultations yet.</div>'}</div>`)}</div>`;
 }
 function renderNotes(update = false) {
   const el = $('#m-tab'), notes = S.goal.notes, review = S.goal.row.status === 'awaiting_review';
@@ -988,8 +1088,12 @@ function renderNotes(update = false) {
         ${review ? `<button class="btn small primary" data-note="${n.id}" data-v="approve" data-reopen="1">approve & reopen goal</button>`
           : `<button class="btn small" data-note="${n.id}" data-v="approve" data-mode="queue">approve (queue)</button>
         <button class="btn small primary" data-note="${n.id}" data-v="approve" data-mode="now">approve & deliver now</button>`}</div>`
-      : `<div class="md" style="margin-top:4px">${md(n.text)}</div>`}</div>`).join('') : '<div class="empty">No notes yet.</div>';
-  if (update && $('#notes-list')) { $('#notes-list').innerHTML = list; renderReport(); return; }
+      : clamp(`note-${n.id}`, `<div class="md doc" style="margin-top:4px">${md(n.text)}</div>`, n === notes[0])}</div>`).join('')
+    : '<div class="empty">No notes yet.</div>';
+  if (update && $('#notes-list')) {
+    keepScroll(() => { $('#notes-list').innerHTML = list; });
+    fitClamps($('#notes-list')); renderReport(); return;
+  }
   el.innerHTML = `<div class="layer human" id="nt-human" hidden><div class="lt">human report</div><div id="nt-report"></div></div>
     <div class="grid cols-2" style="align-items:start;margin-top:18px">
     ${box('steer the meta-work', `<p class="hint">Notes override the meta-work's plan. They are appended to <code>notes.md</code> and delivered to the meta-work.</p>
@@ -998,7 +1102,8 @@ function renderNotes(update = false) {
         <label class="inline"><input type="radio" name="nmode" value="queue" checked> queue: deliver with the next event</label>
         <label class="inline"><input type="radio" name="nmode" value="now"> now: wake the meta-work</label>
         <span class="spacer"></span><button class="btn primary" id="note-add">${review ? 'add note & reopen' : 'add note'}</button></div>`)}
-    <div id="notes-list">${list}</div></div>`;
+    <div id="notes-list" class="list-scroll" data-scroll="notes">${list}</div></div>`;
+  fitClamps($('#notes-list'));
   renderReport();
   $('#note-add').onclick = () => act(async () => {
     const { ws, gid } = S.route;
@@ -1190,7 +1295,7 @@ function connect() {
 }
 window.addEventListener('resize', () => {
   if (S.route.view === 'infra') drawChart($('#infra-chart'), 600);
-  fitOverview(); renderSideInfra();
+  fitTab(); renderSideInfra();
 });
 
 (async function boot() {

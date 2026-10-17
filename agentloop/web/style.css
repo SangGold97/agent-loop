@@ -100,8 +100,8 @@ h3 { font-size: 13px; }
 .layer.human > .lt { color: var(--human); }
 .box > .lt { color: var(--muted); }
 .box > .lt .x { color: var(--faint); font-weight: 400; text-transform: none; letter-spacing: 0; }
-.advice-item { padding: 10px 0; border-top: 1px solid var(--border); }
-.lt + .advice-item { border-top: 0; padding-top: 4px; }
+.advice-item { padding: 6px 0; border-top: 1px solid var(--border); }
+.list-scroll > .advice-item:first-child { border-top: 0; padding-top: 4px; }
 .advice-item > .row { gap: 8px; margin-bottom: 4px; }
 .stat .label { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .stat .value { font-size: 14px; font-weight: 600; margin-top: 2px; }
@@ -131,6 +131,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 input[type=checkbox], input[type=radio] { accent-color: var(--accent); margin: 0; }
 textarea { resize: vertical; min-height: 80px; }
 .editor { min-height: 260px; white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 2; }
+/* prose documents (spec, goal) wrap at the box edge instead of scrolling sideways */
+.editor.wrap { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
+.doc-edit .editor { height: calc(92vh - 120px); }
 label.f { display: flex; flex-direction: column; gap: 2px; color: var(--faint); font-size: 12px; }
 label.inline { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
 
@@ -180,6 +183,43 @@ table.t { width: 100%; border-collapse: collapse; }
 .md table { border-collapse: collapse; margin: 6px 0; display: block; overflow-x: auto; }
 .md th, .md td { border: 1px solid var(--border); padding: 2px 6px; text-align: left; vertical-align: top; }
 .md blockquote { margin: 4px 0; padding-left: 10px; border-left: 2px solid var(--border-2); color: var(--muted); }
+.md .katex-display { margin: 8px 0; overflow-x: auto; overflow-y: hidden; }
+/* documents (spec, goal, plan, advice, report, notes) render as formatted markdown; agent feeds keep the TUI look */
+.md.doc { line-height: 1.6; }
+.md.doc h1, .md.doc h2, .md.doc h3, .md.doc h4 { color: var(--fg); font-weight: 700; margin: 16px 0 6px; line-height: 1.3; }
+.md.doc h1::before, .md.doc h2::before, .md.doc h3::before { content: none; }
+.md.doc h1 { font-size: 15px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.md.doc h2 { font-size: 13px; padding-bottom: 3px; border-bottom: 1px solid var(--border); }
+.md.doc h3 { font-size: 12.5px; color: var(--accent); }
+.md.doc h4 { font-size: 12px; color: var(--muted); }
+.md.doc p, .md.doc ul, .md.doc ol, .md.doc pre, .md.doc table, .md.doc blockquote { margin: 6px 0; }
+.md.doc li + li { margin-top: 3px; }
+.md.doc strong { color: var(--fg); font-weight: 700; }
+.md.doc :not(pre) > code { background: var(--panel-2); padding: 1px 4px; border-radius: 3px; }
+.md.doc pre code { color: var(--fg); }
+.md.doc hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+.md.doc th { background: var(--panel-2); }
+.md.doc li:has(> input[type=checkbox]) { list-style: none; margin-left: -18px; }
+.md.doc input[type=checkbox] { margin: 0 6px 0 0; vertical-align: -1px; }
+/* long documents and lists scroll inside their box, so a tab never grows past the window */
+.doc-scroll, .list-scroll { max-height: max(320px, calc(100vh - 230px)); overflow: auto; padding-right: 4px; }
+.plan-grid { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+/* a tab that fills the window (see fitTab): its boxes stretch to the bottom and their text scrolls inside */
+.fit { grid-template-rows: minmax(0, 1fr); }
+.fit > .box { display: flex; flex-direction: column; min-height: 0; }
+.fit .doc-scroll, .fit .list-scroll { max-height: none; flex: 1 1 auto; min-height: 0; }
+.fit textarea.editor { flex: 1 1 auto; }
+.ai-head { cursor: pointer; }
+.ai-head:hover { background: var(--panel-2); }
+.ai-head .fold { color: var(--faint); width: 10px; }
+.advice-item:not(.open) > .ai-body { display: none; }
+.clamp:not(.open) > .clamp-body { max-height: 6.4em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 55%, transparent); mask-image: linear-gradient(#000 55%, transparent); }
+.clamp:not(.long) > .clamp-body { -webkit-mask-image: none; mask-image: none; }
+.clamp > .more { display: none; background: none; border: 0; padding: 2px 0 0; color: var(--reply); cursor: pointer; font-size: 12px; }
+.clamp.long > .more { display: inline-block; }
+.doc-full { max-height: calc(92vh - 70px); overflow: auto; }
+.doc-full .clamp > .clamp-body { max-height: none; -webkit-mask-image: none; mask-image: none; }
+.doc-full .clamp > .more { display: none; }
 
 /* goal overview */
 /* status line: plan │ workers │ turns │ time │ infra */
@@ -205,16 +245,20 @@ table.t { width: 100%; border-collapse: collapse; }
 .box.chat.folded > .chat-bar { margin-bottom: 0; }
 .pane-head { margin-bottom: 4px; }
 .wlist { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
-.cfg { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 12px; align-items: center; }
-.cfg > .k { color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+/* config form: agents table on the left, short settings on the right; one column on narrow screens */
+.cfg { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(250px, 1fr); gap: 10px 28px; align-items: start; }
+.cfg .k { color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.cfg-agents > .hint { margin: 4px 0 0; }
+.cfg-side { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 12px; align-items: center; }
+.cfg-side { align-self: stretch; grid-template-rows: repeat(4, auto) 1fr; }
+.cfg-foot { align-self: end; flex-wrap: nowrap; }
+.cfg-foot .hint { margin: 0; }
 .agent-row { display: grid; grid-template-columns: 110px 90px minmax(160px, 1.4fr) 110px minmax(90px, 1fr); gap: 8px; align-items: center; margin: 3px 0; }
 .agent-row .name { color: var(--muted); }
 .agent-row.off select, .agent-row.off input[type=text] { opacity: .4; }
-.budget-row { display: grid; grid-template-columns: repeat(3, minmax(150px, max-content)); gap: 12px; }
-.budget-row label.f { white-space: nowrap; }
+.budget-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .report { border-color: var(--warn); }
 .report > .lt { color: var(--warn); }
-.report > .md { max-height: 420px; overflow: auto; }
 
 /* session feeds: meta/human prompts and agent replies in two frame colours */
 .feed { overflow: auto; max-height: 520px; padding-right: 4px; }
@@ -278,7 +322,9 @@ table.t { width: 100%; border-collapse: collapse; }
 .modal.wide { width: min(1180px, 100%); }
 .modal.full { width: min(1440px, 100%); }
 .modal-back:has(.modal.full) { padding: 4vh 16px; }
-.modal.full .modal-feed { height: calc(92vh - 110px); }
+/* a session window is exactly the window's height; the feed takes what the header lines leave (the advisor has one more) */
+.modal.full:has(> .modal-feed) { display: flex; flex-direction: column; height: 92vh; }
+.modal.full > .modal-feed { flex: 1 1 auto; min-height: 0; height: auto; }
 .modal.full .chat-pop { height: calc(92vh - 70px); }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .toasts { position: fixed; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 6px; z-index: 60; }
@@ -296,10 +342,14 @@ table.t { width: 100%; border-collapse: collapse; }
 .ws-cards .card { color: inherit; }
 .ws-cards .card:hover { border-color: var(--accent); text-decoration: none; }
 
+@media (max-width: 1300px) {
+  .cfg { grid-template-columns: 1fr; }
+}
 @media (max-width: 1000px) {
   .app, .app.side-off { grid-template-columns: 1fr; }
   .sidebar { display: none; }
-  .cols-2, .cols-4, .ov-main { grid-template-columns: 1fr; }
+  .cols-2, .cols-4, .ov-main, .plan-grid { grid-template-columns: 1fr; }
+  .fit .doc-scroll, .fit .list-scroll { max-height: 70vh; }
   .box.mw, .box.chat { min-height: 420px; }
   .wlist { overflow: visible; }
   .agent-row { grid-template-columns: 1fr 1fr; }
