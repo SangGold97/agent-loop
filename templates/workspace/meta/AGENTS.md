@@ -29,12 +29,12 @@ Never wait for or poll workers or the advisor; you are resumed when they report.
   packages there, not the project itself; test packaging in a throwaway venv in `$TMPDIR`.
 
 ### Commands
-- `loop spawn --agent claude|codex|agy --role R [--gpu] <<'EOF' ...prompt... EOF` starts a new worker
+- `loop spawn --agent claude|codex|agy --role R <<'EOF' ...prompt... EOF` starts a new worker
   (fresh context, own worktree and branch). You choose the CLI and name the role; the human fixed model and effort.
 - `loop send W <<'EOF' ... EOF` continues an idle worker, keeping its context
 - `loop advise <<'EOF' ...question... EOF` asks the advisor; its reply arrives as an `[Advice]` event
 - `loop ls`, `loop show W [--turn N] [--full] [--log]` (`--log`: the commands a worker ran), `loop stop W`,
-  `loop merge W`, `loop infra`, `loop budget`, `loop run --ram GB -- CMD`
+  `loop merge W`, `loop infra`, `loop budget`, `loop run --ram GB [--vram GB] -- CMD`
 - `loop done --status success|partial|blocked <<'EOF' ...report... EOF`
 - Always quote the heredoc delimiter (`<<'EOF'`): with a bare `<<EOF` the shell runs backticks and `$(...)` in your text.
 
@@ -69,8 +69,9 @@ while any of them fails.
 ### Resources
 Your turns and all workers share one RAM pool. A job that needs more than about 2 GB, yours or a worker's, runs
 through `loop run --ram <GB> -- <cmd>`, which waits while that RAM is held by other jobs; `loop infra` and the
-`[Infra]` line show what each job holds. A long job in your own turn holds back every event until it ends. Only
-workers spawned with `--gpu` see a GPU, and GPU slots are limited.
+`[Infra]` line show what each job holds. A long job in your own turn holds back every event until it ends. A GPU
+is visible only to a job run with `--vram <GB>` as well, which waits until that much VRAM is free on one GPU; any
+worker can run one, so GPU work needs no special spawn.
 
 ## MODE: META-CHAT
 

@@ -15,13 +15,23 @@ import psutil
 def gpus() -> list[dict]:
     if not shutil.which("nvidia-smi"):
         return []
-    out = subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.used,memory.total,utilization.gpu",
+    out = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu",
                           "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
     rows = []
     for line in out.stdout.strip().splitlines():
-        idx, name, used, total, util = [x.strip() for x in line.split(",")]
-        rows.append({"index": int(idx), "name": name, "mem_used_gb": round(float(used) / 1024, 1),
-                     "mem_total_gb": round(float(total) / 1024, 1), "util": float(util)})
+        idx, uuid, name, used, total, util = [x.strip() for x in line.split(",")]
+        rows.append({"index": int(idx), "uuid": uuid, "name": name, "mem_used_gb": round(float(used) / 1024, 1),
+                     "mem_total_gb": round(float(total) / 1024, 1), "util": float(util), "procs": {}})
+    # VRAM per process tells which `loop run` job holds what; WSL lists no processes, so `procs` stays empty there
+    apps = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory",
+                           "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
+    by_uuid = {g["uuid"]: g for g in rows}
+    for line in apps.stdout.strip().splitlines():
+        try:
+            uuid, pid, used = [x.strip() for x in line.split(",")]
+            by_uuid[uuid]["procs"][int(pid)] = round(float(used) / 1024, 2)
+        except (KeyError, ValueError):  # an unknown GPU or "[N/A]" memory
+            continue
     return rows
 
 

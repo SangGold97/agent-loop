@@ -25,8 +25,8 @@ HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   status  goal overview (meta-chat)
   note    propose a note to the human (meta-chat)  loop note "try X instead of Y"
   budget  budget usage
-  infra   host resources and the RAM pool (workers too)
-  run     run a RAM-heavy job with a RAM grant (workers too)   loop run --ram 10 -- python train.py"""
+  infra   host resources, the RAM pool and GPU VRAM (workers too)
+  run     run a RAM-heavy or GPU job with a grant (workers too)   loop run --ram 10 [--vram 8] -- python train.py"""
 
 
 def call(cmd: str, payload: dict, full: bool = False):
@@ -65,24 +65,26 @@ def text_arg(args, name: str) -> str:
     sys.exit(f"loop: provide the {name} via --{name}, --{name}-file or stdin")
 
 
-def run_job(gb: float, wait_min: float, cmd: list[str]) -> int:
-    """`loop run`: hold a RAM grant from the shared pool while `cmd` runs.
+def run_job(gb: float, vram: float, wait_min: float, cmd: list[str]) -> int:
+    """`loop run`: hold a RAM grant from the shared pool, and a VRAM grant on one GPU if asked, while `cmd` runs.
 
     The job runs in a scope of its own capped at its grant, so a job that outgrows its grant is killed by the
     kernel inside that scope and costs no other process. This helper and the job keep the default OOM score while
     the session's other processes go first, so a job that keeps to its grant is not killed for another's
-    overuse. The grant ends with the job; if this helper dies, the platform stops the job and frees the grant."""
+    overuse. Only a job granted VRAM sees a GPU; the platform stops it if it is over that grant while the GPU is
+    nearly full. The grant ends with the job; if this helper dies, the platform stops the job and frees the grant."""
     if not cmd:
         sys.exit("loop run: give the command after --, e.g. loop run --ram 10 -- python train.py")
-    grant = call("ram", {"gb": gb, "wait": wait_min * 60, "pid": os.getpid(), "cmd": shlex.join(cmd)}, full=True)
+    grant = call("ram", {"gb": gb, "vram": vram, "wait": wait_min * 60, "pid": os.getpid(), "cmd": shlex.join(cmd)},
+                 full=True)
     print(f"loop run: {grant['text']}", file=sys.stderr, flush=True)
     with contextlib.suppress(OSError):
         Path("/proc/self/oom_score_adj").write_text("0")
     # A SIGTERM (e.g. the shell running this being stopped) must still end the job and release the grant
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-    rc, child = 127, None
+    rc, child, released = 127, None, "released"
     try:
-        child = subprocess.Popen([*grant["argv"], *cmd])
+        child = subprocess.Popen([*grant["argv"], *cmd], env={**os.environ, **grant.get("env", {})})
         rc = child.wait()
     except OSError as exc:
         print(f"loop run: cannot start {cmd[0]}: {exc}", file=sys.stderr)
@@ -91,7 +93,10 @@ def run_job(gb: float, wait_min: float, cmd: list[str]) -> int:
             child.kill()
         # The platform stops whatever is left in the job's scope when the grant is released
         with contextlib.suppress(SystemExit):
-            call("ram-release", {"grant": grant["grant"], "killed": rc == -signal.SIGKILL})
+            released = call("ram-release", {"grant": grant["grant"], "killed": rc == -signal.SIGKILL})
+    if released != "released":  # the platform stopped the job for VRAM and says why
+        print(f"loop run: {released}", file=sys.stderr)
+        return 137
     if rc == -signal.SIGKILL:
         print(f"loop run: the job was killed (SIGKILL), most likely for outgrowing its {gb} GB grant; run it "
               "with a larger --ram or make it use less memory", file=sys.stderr)
@@ -106,7 +111,6 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("spawn", help="start a new worker")
     sp.add_argument("--agent", required=True, help="worker CLI (claude, codex or agy); model and effort are fixed by the human")
     sp.add_argument("--role", required=True, help="what the worker does, e.g. coder, reviewer, research")
-    sp.add_argument("--gpu", action="store_true")
     for name, sparser in (("spawn", sp), ("send", sub.add_parser("send", help="continue an idle worker")),
                           ("advise", sub.add_parser("advise", help="request advice asynchronously"))):
         if name == "send":
@@ -127,18 +131,20 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("note").add_argument("text")
     for name in ("ls", "status", "budget", "infra"):
         sub.add_parser(name)
-    run = sub.add_parser("run", help="run a RAM-heavy job with a RAM grant")
+    run = sub.add_parser("run", help="run a RAM-heavy or GPU job with a grant")
     run.add_argument("--ram", type=float, required=True, help="GB the job needs at its peak")
-    run.add_argument("--wait", type=float, default=30, help="minutes to wait for the RAM (max 30)")
+    run.add_argument("--vram", type=float, default=0, help="GB of GPU memory the job needs at its peak; "
+                     "only a job given --vram sees a GPU")
+    run.add_argument("--wait", type=float, default=30, help="minutes to wait for the RAM and VRAM (max 30)")
     run.add_argument("command", nargs=argparse.REMAINDER, help="-- command and its arguments")
     a = p.parse_args(argv)
 
     if a.cmd == "run":
-        sys.exit(run_job(a.ram, a.wait, a.command[1:] if a.command[:1] == ["--"] else a.command))
+        sys.exit(run_job(a.ram, a.vram, a.wait, a.command[1:] if a.command[:1] == ["--"] else a.command))
     if a.cmd in ("spawn", "send", "advise"):
         payload = {"prompt": text_arg(a, "prompt")}
         if a.cmd == "spawn":
-            payload.update({"agent": a.agent, "role": a.role, "gpu": a.gpu})
+            payload.update({"agent": a.agent, "role": a.role})
         elif a.cmd == "send":
             payload["sid"] = a.sid
     elif a.cmd in ("stop", "merge"):

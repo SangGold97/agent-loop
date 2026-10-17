@@ -30,7 +30,7 @@ infra:
   min_free_ram_gb: 2          # refuse to start workers while less RAM than this is left to grant
   pool_reserve_gb: 4          # host RAM kept out of the pool all sessions share (largest value of all workspaces)
   worker_memory_max_gb: null  # optional hard cap per session on top of the pool (null = pool only)
-  gpu_slots: 1
+  vram_reserve_gb: 1          # VRAM kept free on each GPU; jobs over their VRAM grant are stopped below it
 
 turn_timeout_min: 180
 

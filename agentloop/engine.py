@@ -32,6 +32,7 @@ log = logging.getLogger("agentloop")
 VERIFY_TIMEOUT_S = 900
 PREFIX = {"meta-work": "mw", "worker": "w", "meta-chat": "mc", "meta-advisor": "ma"}
 LIMIT_SLACK_S = 60  # retry this long after a vendor's announced usage-limit reset
+VRAM_SETTLE_S = 10  # a GPU is not policed again this long after a job on it was stopped, while its memory frees
 
 
 def clock(ts: float) -> str:
@@ -95,6 +96,11 @@ class Engine:
         self.ram_waiting: dict[int, dict] = {}
         self.turn_mem: dict[str, dict] = {}
         self.ram_wait_goals: dict[tuple[str, str], float] = {}  # goals refused a dispatch for RAM -> GB they need
+        # Per GPU index, the VRAM in use while none of its grants was active: where the driver lists no processes
+        # (WSL), what a GPU uses above it is its jobs'. Grants stopped for VRAM -> (session, what `loop run` reports)
+        self.vram_base: dict[int, float] = {}
+        self.vram_stopped: dict[int, tuple[str, str]] = {}
+        self.vram_settle: dict[int, float] = {}  # GPU index -> until when it is left alone after a stop
         self.bin_dir = state_dir() / "bin"
         self.bin_dir.mkdir(exist_ok=True)
         shim = self.bin_dir / "loop"
@@ -206,16 +212,15 @@ class Engine:
                          "AND status IN ('queued', 'running') ORDER BY created", ws, gid)
 
     def new_session(self, ws: str, gid: str, kind: str, role: str, conf: dict, cwd: Path,
-                    parent: str | None = None, branch: str | None = None, gpu: bool = False,
-                    sid: str | None = None) -> dict:
+                    parent: str | None = None, branch: str | None = None, sid: str | None = None) -> dict:
         sid = sid or f"{PREFIX[kind]}-{secrets.token_hex(3)}"
         now = time.time()
         self.db.x("INSERT INTO sessions(id, ws, goal, kind, parent, role, agent, model, effort, "
-                  "autocompact, cwd, branch, status, token, gpu, created, updated) "
-                  "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  "autocompact, cwd, branch, status, token, created, updated) "
+                  "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   sid, ws, gid, kind, parent, role, conf["agent"], conf.get("model"), conf.get("effort"),
                   None if conf.get("autocompact") is None else str(conf.get("autocompact")), str(cwd), branch,
-                  "idle", secrets.token_hex(16), int(gpu), now, now)
+                  "idle", secrets.token_hex(16), now, now)
         self.publish("session_status", ws=ws, goal=gid, session=sid, status="idle")
         return self.db.session(sid)
 
@@ -303,6 +308,8 @@ class Engine:
                     mem["peak"] = max(mem["peak"], rss + jobs)
                     snap["sessions"].append({"id": key, "kind": s["kind"], "ws": s["ws"], "goal": s["goal"],
                                              "role": s["role"], "rss_gb": round(rss + jobs, 2)})
+                self.sample_vram(snap)
+                self.police_vram(snap)
                 self.publish("infra", data=snap)
                 # A goal refused a dispatch for RAM hears once enough is free again, unless it ended meanwhile
                 for (ws, gid), need in list(self.ram_wait_goals.items()):
@@ -366,7 +373,7 @@ class Engine:
             "call `loop done --status partial` (or `success` if the goal is met) with a report.")})
         self.kick(ws, gid)
 
-    def check_dispatch(self, ws: str, gid: str, gpu: bool) -> None:
+    def check_dispatch(self, ws: str, gid: str) -> None:
         p = self.wsp(ws)
         cfg, m, b = workspace_config(p), self.goal_row(ws, gid), self.budget(ws, gid)
         if m["final_turn"] or self.exhausted(b):
@@ -378,14 +385,7 @@ class Engine:
                             ws)["c"]
         if total >= cfg["limits"]["max_workers_total"]:
             raise AgentError(f"workspace worker limit reached ({total}); wait for a report")
-        snap = self.infra.latest()
         self.check_ram(ws, gid, cfg["infra"]["min_free_ram_gb"])
-        if gpu:
-            if not snap["gpus"]:
-                raise AgentError("no GPU on this host")
-            used = self.db.one("SELECT COUNT(*) c FROM sessions WHERE gpu=1 AND status='running'")["c"]
-            if used >= cfg["infra"]["gpu_slots"]:
-                raise AgentError("all GPU slots are busy; wait for the GPU worker to finish")
 
     def check_ram(self, ws: str, gid: str, need: float) -> None:
         """Refuse a dispatch while less than `need` GB is left to grant. The goal then waits for RAM: it does not
@@ -415,36 +415,153 @@ class Engine:
 
     def ram_text(self) -> str:
         parts = [f"agent RAM pool {self.pool_gb()} GB, {self.ram_free()} GB left to grant"]
+        parts += [f"GPU{gpu['index']} VRAM {gpu['mem_total_gb']} GB, {self.vram_free(gpu)} GB left to grant"
+                  for gpu in self.infra.latest()["gpus"]]
+
+        def vram(g: dict) -> str:  # a waiting request has no GPU yet
+            if not g.get("vram"):
+                return ""
+            if "gpu" not in g:
+                return f" + {g['vram']} GB VRAM"
+            used = "?" if g["vram_used"] is None else f"{g['vram_used']:.1f}"
+            return f" + {g['vram']} GB VRAM on GPU{g['gpu']} ({used} in use)"
+
         if self.grants:
-            parts.append("granted: " + "; ".join(f"{g['sid']} {g['gb']} GB ({g['rss_gb']:.1f} in use) `{g['cmd']}`"
-                                                 for g in self.grants.values()))
+            parts.append("granted: " + "; ".join(f"{g['sid']} {g['gb']} GB ({g['rss_gb']:.1f} in use){vram(g)} "
+                                                 f"`{g['cmd']}`" for g in self.grants.values()))
         if self.ram_waiting:
-            parts.append("waiting: " + "; ".join(f"{w['sid']} {w['gb']} GB `{w['cmd']}`"
+            parts.append("waiting: " + "; ".join(f"{w['sid']} {w['gb']} GB{vram(w)} `{w['cmd']}`"
                                                  for w in self.ram_waiting.values()))
         return " · ".join(parts)
 
-    async def ram_grant(self, caller: dict, gb: float, wait_s: float, pid: int, cmd: str) -> dict:
-        """Grant `gb` of the pool to the `loop run` job `pid` once that much is free, waiting up to `wait_s`."""
+    # ---------- VRAM, granted per job on one GPU ----------
+    def vram_reserve(self) -> float:
+        """VRAM kept free on every GPU: the largest reserve any workspace asks for."""
+        return max([workspace_config(self.wsp(n))["infra"]["vram_reserve_gb"] for n in workspace.list_workspaces()]
+                   or [DEFAULTS["infra"]["vram_reserve_gb"]])
+
+    def vram_free(self, gpu: dict) -> float:
+        """GB of `gpu` a new job may still be granted. As in the RAM pool, every grant counts in full even while
+        its job is still loading, and memory used outside the platform's jobs (the desktop, other programs) is
+        taken off as well."""
+        granted = sum(g["vram"] for g in self.grants.values() if g.get("gpu") == gpu["index"])
+        unused = max(0.0, granted - gpu.get("jobs_gb", 0.0))
+        cap = gpu["mem_total_gb"] - self.vram_reserve()
+        return round(max(0.0, min(cap - granted, cap - gpu["mem_used_gb"] - unused)), 1)
+
+    def job_pids(self, g: dict) -> set[int]:
+        """Processes of a `loop run` job: the helper's process tree and whatever still runs in the job's scope."""
+        pids: set[int] = set()
+        with contextlib.suppress(psutil.Error):
+            proc = psutil.Process(g["pid"])
+            pids = {proc.pid, *(c.pid for c in proc.children(recursive=True))}
+        cg = self.turn_mem.get(g["sid"], {}).get("cgroup")
+        if g["unit"] and cg:
+            with contextlib.suppress(OSError):
+                pids |= {int(x) for x in (cg.parent / f"{g['unit']}.scope" / "cgroup.procs").read_text().split()}
+        return pids
+
+    def sample_vram(self, snap: dict) -> None:
+        """Measure what the jobs granted on each GPU use. Where the driver lists processes, a job counts its own;
+        where it does not (WSL), what the GPU uses above its last level without grants counts as its jobs', and as
+        one job's own only when that job holds the GPU's only grant."""
+        for gpu in snap["gpus"]:
+            mine = [g for g in self.grants.values() if g.get("gpu") == gpu["index"]]
+            if not mine:
+                self.vram_base[gpu["index"]] = gpu["mem_used_gb"]
+                continue
+            if gpu["procs"]:
+                for g in mine:
+                    pids = self.job_pids(g)
+                    g["vram_used"] = round(sum(gb for pid, gb in gpu["procs"].items() if pid in pids), 2)
+                jobs = sum(g["vram_used"] for g in mine)
+            else:
+                jobs = max(0.0, gpu["mem_used_gb"] - self.vram_base.get(gpu["index"], gpu["mem_used_gb"]))
+                for g in mine:
+                    g["vram_used"] = round(jobs, 2) if len(mine) == 1 else None
+            gpu["jobs_gb"] = round(jobs, 2)
+
+    def police_vram(self, snap: dict) -> None:
+        """VRAM has no hard per-job cap, so a job may use more than its grant while its GPU has room. Once less than
+        the reserve is free there, the job furthest over its grant is stopped, so a job that keeps to its grant
+        never pays for another's overuse; where jobs cannot be told apart (no process list and several grants),
+        the newest grant goes first. A GPU filled by memory outside the platform's jobs stops nothing."""
+        reserve = self.vram_reserve()
+        for gpu in snap["gpus"]:
+            mine = [(k, g) for k, g in self.grants.items() if g.get("gpu") == gpu["index"]]
+            if (not mine or gpu["mem_total_gb"] - gpu["mem_used_gb"] >= reserve
+                    or time.time() < self.vram_settle.get(gpu["index"], 0)):
+                continue
+            over = [(g["vram_used"] - g["vram"], k) for k, g in mine
+                    if g["vram_used"] is not None and g["vram_used"] > g["vram"]]
+            unattributed = all(g["vram_used"] is None for _, g in mine)
+            if over:
+                key = max(over)[1]
+            elif unattributed and gpu.get("jobs_gb", 0.0) > sum(g["vram"] for _, g in mine):
+                key = max(mine, key=lambda kg: kg[1]["started"])[0]
+            else:
+                continue
+            g = self.grants[key]
+            used = "more" if g["vram_used"] is None else f"{g['vram_used']:.1f} GB"
+            why = (f"stopped for using {used} VRAM against its {g['vram']} GB grant while GPU{gpu['index']} was "
+                   "nearly full; run it with a larger --vram or make it use less GPU memory")
+            if not g["unit"]:  # without systemd the job is a child of the helper
+                with contextlib.suppress(psutil.Error):
+                    for proc in psutil.Process(g["pid"]).children(recursive=True):
+                        proc.kill()
+            self.vram_stopped[key] = (g["sid"], f"the job was {why}")
+            self.vram_settle[gpu["index"]] = time.time() + VRAM_SETTLE_S
+            if g["sid"] in self.turn_mem:
+                self.turn_mem[g["sid"]]["over"].append(f"`{g['cmd']}`: {why}")
+            self.end_grant(key)
+
+    def pick_gpu(self, vram: float) -> int | None:
+        """The GPU with the least free VRAM that still fits `vram`, leaving larger holes for larger jobs."""
+        fits = [(free, gpu["index"]) for gpu in self.infra.latest()["gpus"] if (free := self.vram_free(gpu)) >= vram]
+        return min(fits)[1] if fits else None
+
+    async def ram_grant(self, caller: dict, gb: float, wait_s: float, pid: int, cmd: str, vram: float = 0.0) -> dict:
+        """Grant `gb` of the pool, and `vram` GB on one GPU when asked, to the `loop run` job `pid` once both are
+        free, waiting up to `wait_s`. Only a job granted VRAM sees a GPU, and only that one."""
         if caller["kind"] not in ("worker", "meta-work"):
             raise AgentError("`loop run` belongs to workers and the meta-work")
         pool = self.pool_gb()
         if not 0 < gb <= pool:
             raise AgentError(f"--ram must be more than 0 and at most the {pool} GB pool")
+        if vram:
+            gpus = self.infra.latest()["gpus"]
+            if not gpus:
+                raise AgentError("--vram: no GPU on this host")
+            most = round(max(g["mem_total_gb"] for g in gpus) - self.vram_reserve(), 1)
+            if not 0 < vram <= most:
+                raise AgentError(f"--vram must be more than 0 and at most {most} GB (the largest GPU minus the "
+                                 f"{self.vram_reserve()} GB kept free)")
         key, deadline = next(self.grant_ids), time.time() + min(wait_s, 1800)
-        self.ram_waiting[key] = {"sid": caller["id"], "gb": gb, "cmd": cmd[:120]}
+        self.ram_waiting[key] = {"sid": caller["id"], "gb": gb, "vram": vram, "cmd": cmd[:120]}
         try:
             while True:
-                free = self.ram_free()
+                free, gpu = self.ram_free(), self.pick_gpu(vram) if vram else None
                 # No await between the check and the grant, so concurrent requests are served one at a time
-                if gb <= free:
+                if gb <= free and (not vram or gpu is not None):
                     unit = f"{unit_prefix()}-{caller['id']}-job{key}-{int(time.time() * 1000)}" \
                         if systemd_available() else None
+                    text, env = f"granted {gb} GB ({round(free - gb, 1)} GB left to grant)", {}
+                    if vram:
+                        # The GPU's level without grants is what its jobs are measured against
+                        if not any(g.get("gpu") == gpu for g in self.grants.values()):
+                            self.vram_base[gpu] = next(g["mem_used_gb"] for g in self.infra.latest()["gpus"]
+                                                       if g["index"] == gpu)
+                        text += f" and {vram} GB VRAM on GPU{gpu}"
+                        # nvidia-smi numbers GPUs by PCI bus, CUDA by speed unless told otherwise
+                        env = {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": str(gpu),
+                               "LOOP_VRAM_GB": str(vram)}
                     self.grants[key] = {"sid": caller["id"], "gb": gb, "pid": pid, "cmd": cmd[:120], "unit": unit,
-                                        "rss_gb": 0.0, "oom": 0}
-                    return {"text": f"granted {gb} GB ({round(free - gb, 1)} GB left to grant)", "grant": key,
-                            "argv": job_scope_argv(unit, gb) if unit else []}
+                                        "rss_gb": 0.0, "oom": 0, "started": time.time(), "vram": vram,
+                                        **({"gpu": gpu, "vram_used": 0.0} if vram else {})}
+                    return {"text": text, "grant": key, "argv": job_scope_argv(unit, gb) if unit else [], "env": env}
                 if time.time() >= deadline:
-                    raise AgentError(f"{gb} GB not free after {wait_s / 60:.0f} min ({self.ram_text()}); run it "
+                    what = f"{gb} GB" + (f" and {vram} GB VRAM" if vram else "")
+                    raise AgentError(f"{what} not free after {wait_s / 60:.0f} min ({self.ram_text()}); run it "
                                      "later, with less memory, or ask for less")
                 await asyncio.sleep(1)
         finally:
@@ -454,6 +571,10 @@ class Engine:
         g = self.grants.get(key)
         if g and g["sid"] == caller["id"]:
             self.end_grant(key, killed)
+        # A job stopped for VRAM was killed by the platform, not for outgrowing its RAM grant; `loop run` says so
+        stopped = self.vram_stopped.get(key)
+        if stopped and stopped[0] == caller["id"]:
+            return self.vram_stopped.pop(key)[1]
         return "released"
 
     def end_grant(self, key: int, killed: bool = False) -> None:
@@ -535,12 +656,12 @@ class Engine:
                "LOOP_API": self.api_url, "LOOP_TOKEN": token,
                "LOOP_WS": p, "LOOP_GOAL": gid, "LOOP_GOAL_DIR": gdir, "LOOP_SESSION": sid,
                "LOOP_GUARD_PATTERNS": json.dumps(cfg["guard"]["deny_patterns"] or [])}
+        if sess["kind"] != "meta-chat":  # a GPU is handed to one job at a time, by `loop run --vram`
+            env["CUDA_VISIBLE_DEVICES"] = ""
         spec = RunSpec(agent=sess["agent"], kind="worker" if worker else "meta", cwd=Path(sess["cwd"]),
                        prompt=prompt, model=conf["model"], effort=conf["effort"], autocompact=conf["autocompact"],
                        resume_id=sess["vendor_id"], env=env)
         if worker:
-            if not sess["gpu"]:
-                env["CUDA_VISIBLE_DEVICES"] = ""
             if sess["agent"] == "codex":
                 spec.codex_home = workspace.codex_home(p, "worker")
             elif sess["agent"] == "agy":
@@ -549,8 +670,6 @@ class Engine:
                 spec.plugin_dir, spec.append_file = p / "worker" / "claude-plugin", p / "worker" / "AGENTS.md"
                 spec.settings_file, spec.add_dirs = workspace.claude_settings(p, "worker"), [gdir, p / "data"]
         else:
-            if sess["kind"] in ("meta-work", "meta-advisor"):  # GPUs are handed out only through `loop spawn --gpu`
-                env["CUDA_VISIBLE_DEVICES"] = ""
             spec.system_text = self.mode_text(sess)
             if sess["agent"] == "codex":
                 spec.codex_home = workspace.codex_home(p, "meta")
@@ -598,6 +717,8 @@ class Engine:
             jobs = [g["cmd"] for g in self.grants.values() if g["sid"] == sid]
             for key in [k for k, g in self.grants.items() if g["sid"] == sid]:
                 self.end_grant(key)
+            for key in [k for k, (owner, _) in self.vram_stopped.items() if owner == sid]:
+                self.vram_stopped.pop(key)
             res_mem = self.turn_mem.pop(sid, {})
         res.memory = self.mem_note(res_mem)
         # `loop run` jobs have scopes of their own, so the turn's scope did not list them among its leftovers
@@ -636,7 +757,7 @@ class Engine:
                 f"{gitops.int_branch(gid)} is checked out at {gitops.int_worktree(p, gid)}.\n"
                 f"- Worker agents (the human fixed model and effort; you pick the CLI and name the role):\n{agents}\n"
                 f"- Your turns and the workers share a {self.pool_gb()} GB RAM pool; jobs that need more than about "
-                "2 GB run through `loop run --ram <GB>`. Only workers spawned with --gpu see a GPU.\n"
+                "2 GB run through `loop run --ram <GB>`, and only jobs run with `--vram <GB>` as well see a GPU.\n"
                 f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.")
 
     async def start_goal(self, ws: str, gid: str) -> None:
@@ -1134,7 +1255,7 @@ class Engine:
             raise AgentError(f"goal is {m['status']}")
         return m
 
-    async def spawn_worker(self, caller: dict, agent: str, role: str, prompt: str, gpu: bool = False) -> str:
+    async def spawn_worker(self, caller: dict, agent: str, role: str, prompt: str) -> str:
         self.require_meta_work(caller)
         ws, gid = caller["ws"], caller["goal"]
         p = self.wsp(ws)
@@ -1148,14 +1269,14 @@ class Engine:
         role = gitops.slug(role)
         if not prompt.strip():
             raise AgentError("empty prompt")
-        self.check_dispatch(ws, gid, gpu)
+        self.check_dispatch(ws, gid)
         sid = f"w-{secrets.token_hex(3)}"
         # The worker branches from the integration branch, so it must start from the meta-work's own changes too
         async with self.int_lock(ws, gid):
             self.checkpoint(ws, gid, caller["id"], f"changes before spawning {sid}")
             wt, branch = gitops.add_worker_worktree(p, gid, sid, role)
         sess = self.new_session(ws, gid, "worker", role, {"agent": agent, **workers[agent]}, wt, parent=caller["id"],
-                                branch=branch, gpu=gpu, sid=sid)
+                                branch=branch, sid=sid)
         self.db.update("sessions", {"id": sid}, status="running")
         self._count_dispatch(ws, gid)
         self.spawn(self.worker_turn(sid, prompt), goal=(ws, gid))
@@ -1172,7 +1293,7 @@ class Engine:
         if not prompt.strip():
             raise AgentError("empty prompt")
         self.check_limit(w["agent"])
-        self.check_dispatch(caller["ws"], caller["goal"], bool(w["gpu"]))
+        self.check_dispatch(caller["ws"], caller["goal"])
         self.db.update("sessions", {"id": sid}, status="running")
         self._count_dispatch(caller["ws"], caller["goal"])
         self.spawn(self.worker_turn(sid, prompt), goal=(caller["ws"], caller["goal"]))

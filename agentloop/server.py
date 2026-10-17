@@ -285,8 +285,7 @@ def create_app(api_url: str) -> FastAPI:
         if cmd in ("spawn", "send", "stop", "merge", "done", "advise") and caller["kind"] != "meta-work":
             raise AgentError(f"`loop {cmd}` belongs to the meta-work; propose a note with `loop note` instead")
         if cmd == "spawn":
-            text = await engine.spawn_worker(caller, b.get("agent", ""), b.get("role", ""), b.get("prompt", ""),
-                                             bool(b.get("gpu")))
+            text = await engine.spawn_worker(caller, b.get("agent", ""), b.get("role", ""), b.get("prompt", ""))
         elif cmd == "advise":
             text = engine.advise(caller, b.get("prompt", ""))
         elif cmd == "send":
@@ -315,7 +314,7 @@ def create_app(api_url: str) -> FastAPI:
             text = engine.infra_text()
         elif cmd == "ram":
             return await engine.ram_grant(caller, float(b.get("gb") or 0), float(b.get("wait") or 0),
-                                          int(b.get("pid") or 0), str(b.get("cmd", "")))
+                                          int(b.get("pid") or 0), str(b.get("cmd", "")), float(b.get("vram") or 0))
         elif cmd == "ram-release":
             text = engine.ram_release(caller, int(b.get("grant") or 0), bool(b.get("killed")))
         else:
