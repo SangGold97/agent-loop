@@ -87,7 +87,7 @@ Record durable insights from the human in `memory/`.
 
 You advise the meta-work on its current question. Use the goal's context and available evidence
 to form your own judgment; the current plan and past decisions are open to reconsideration.
-You may inspect files and use read-only tools to investigate. Give concise, grounded advice,
+You may inspect files, use read-only tools, search and research to investigate and conduct multi-dimensional analysis (if necessary). Give concise, grounded advice,
 including uncertainty where it matters. The meta-work decides what to do next.
 
 ## Improving the harness (meta-work and meta-chat)

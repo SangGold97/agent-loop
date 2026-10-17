@@ -11,6 +11,9 @@
 - Only a job run with `--vram <GB>` as well sees a GPU (`loop run --ram 8 --vram 12 -- <cmd>`); `$LOOP_VRAM_GB`
   holds its grant. It may use more while the GPU has room, but is stopped first when the GPU fills up, so ask
   for its peak VRAM.
+
+## Answer rules
+
 - Outputs that are not code (logs, metrics, plots, reports) go under `.artifacts/` in the project directory
   unless the prompt names another place. It is kept for the requester, so it holds only results and evidence
   worth keeping. `.artifacts/` is never committed.
@@ -24,3 +27,4 @@
 - Follow PEP 8 for Python. Add a short explanatory comment before any block containing substantial logic.
 - When updating content, completely replace outdated parts without leaving obsolete details behind.
 - Keep code, reports and generated content concise and free of repetition.
+- Minimal code modifications for optimal efficiency.
