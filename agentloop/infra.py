@@ -1,6 +1,8 @@
 """Host resource sampling (CPU, RAM, disk, GPU) and admission checks for new workers."""
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 import time
@@ -77,20 +79,48 @@ def scope_memory(path: Path) -> tuple[int, int] | None:
         return None
 
 
+def wsl_host_mount() -> str | None:
+    """The Windows drive (as its /mnt path) that holds this WSL distro's virtual disk, or None outside WSL.
+
+    The distro's ext4.vhdx reports its maximum size (1 TB by default), but it can only grow as far as the free
+    space of the Windows drive it lives on, so that drive bounds the real free space."""
+    distro = os.environ.get("WSL_DISTRO_NAME")
+    if not distro or not shutil.which("reg.exe"):
+        return None
+    try:
+        out = subprocess.run(["reg.exe", "query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss", "/s"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # One registry key per distro; pick the BasePath of the key whose DistributionName is ours.
+    for block in re.split(r"\r?\n(?=HKEY_)", out):
+        values = dict(re.findall(r"^\s+(\w+)\s+REG_\w+\s+(.*?)\s*$", block, re.M))
+        drive = re.match(r"(?:\\\\\?\\)?([A-Za-z]):", values.get("BasePath", ""))
+        if values.get("DistributionName") == distro and drive:
+            mount = f"/mnt/{drive.group(1).lower()}"
+            return mount if os.path.ismount(mount) else None
+    return None
+
+
 class Infra:
     def __init__(self, disk_path: str):
         self.disk_path = disk_path
+        self.host_mount = wsl_host_mount()
         self.history: deque = deque(maxlen=600)
         psutil.cpu_percent()
 
     def sample(self) -> dict:
         vm, disk = psutil.virtual_memory(), psutil.disk_usage(self.disk_path)
+        free, total = disk.free, disk.total
+        if self.host_mount:  # WSL: the virtual disk can grow only into the host drive's free space
+            free = min(free, psutil.disk_usage(self.host_mount).free)
+            total = min(total, disk.used + free)
         snap = {
             "ts": time.time(), "cpu_pct": psutil.cpu_percent(), "cpus": psutil.cpu_count(),
             "load": [round(x, 2) for x in psutil.getloadavg()],
             "ram_total_gb": round(vm.total / 2**30, 1), "ram_free_gb": round(vm.available / 2**30, 1),
             "ram_pct": vm.percent, "swap_pct": psutil.swap_memory().percent,
-            "disk_total_gb": round(disk.total / 2**30), "disk_free_gb": round(disk.free / 2**30),
+            "disk_total_gb": round(total / 2**30), "disk_free_gb": round(free / 2**30),
             "gpus": gpus(),
         }
         self.history.append(snap)
