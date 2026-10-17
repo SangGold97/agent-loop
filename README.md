@@ -87,7 +87,9 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   the job that GPU alone. VRAM has no hard cap, so a job may use more than its grant while the GPU has room; once
   less than `vram_reserve_gb` is free there, the job furthest over its grant is stopped, and a job that keeps to
   its grant is never stopped for another's overuse. Where the driver lists no processes (WSL), a GPU's jobs are
-  measured by what it uses above its level without grants, and with several grants the newest goes first.
+  measured by what it uses above its level without grants, and with several grants the newest goes first. GPUs are
+  read on their own thread; while `nvidia-smi` hangs, the infra page marks the last reading stale and no job is
+  stopped on it.
 - Events handed to a meta-work turn stay "in flight" until it completes; a crash, restart or stop puts them back.
 - The advisor is read-only like a meta-chat: the guard blocks its edits, its `loop` token permits read commands
   only, and a turn that still changes `repo/` or the integration worktree raises an alert. A stopped or

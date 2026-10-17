@@ -648,10 +648,10 @@ function planBar(c) {
 function renderSideInfra() {
   const s = S.infra;
   if (!s) return;
-  const gpu = s.gpus[0];
+  const gpu = s.gpus[0], stale = gpuStale(s);
   $('#si-ts').textContent = hhmm(s.ts);
   $('#si-vals').innerHTML = `<span class="c-cpu">cpu ${s.cpu_pct.toFixed(0)}%</span><span class="c-ram">ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb}G</span>`
-    + (gpu ? `<span class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G · util ${gpu.util.toFixed(0)}%</span>` : '');
+    + (gpu ? `<span class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G · util ${gpu.util.toFixed(0)}%${stale ? ` · ${stale}` : ''}</span>` : '');
   $('#nav-infra').title = `${s.sessions?.length || 0} agent sessions using ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB · open the infra page`;
   drawChart($('#side-chart'), 120, true);
 }
@@ -1139,6 +1139,11 @@ async function renderGit() {
 }
 
 // ---------- infra ----------
+// The GPU is read on its own thread; while nvidia-smi hangs the sample carries its last reading, labelled here
+function gpuStale(s) {
+  const age = s.gpus_ts ? s.ts - s.gpus_ts : 0;
+  return age > 5 ? `stale ${Math.round(age)}s` : '';
+}
 function renderInfra() {
   const s = S.infra;
   if (!s) { main.innerHTML = '<div class="page"><div class="empty">Waiting for the first sample…</div></div>'; return; }
@@ -1149,7 +1154,7 @@ function renderInfra() {
       <div class="card stat"><div class="label">cpu</div><div class="value">${s.cpu_pct.toFixed(0)}%</div>${meter(s.cpu_pct, 100)}<div class="sub">${s.cpus} cores · load ${s.load.join(' / ')}</div></div>
       <div class="card stat"><div class="label">ram</div><div class="value">${usedRam} / ${s.ram_total_gb} GB</div>${meter(s.ram_pct, 100)}<div class="sub">${s.ram_free_gb} GB available · swap ${s.swap_pct}%</div></div>
       <div class="card stat"><div class="label">disk</div><div class="value">${s.disk_free_gb} GB free</div>${meter(s.disk_total_gb - s.disk_free_gb, s.disk_total_gb)}<div class="sub">of ${s.disk_total_gb} GB</div></div>
-      <div class="card stat"><div class="label">gpu</div>${s.gpus.length ? s.gpus.map(g => `<div class="value">${esc(g.name)}</div>${meter(g.mem_used_gb, g.mem_total_gb)}<div class="sub">VRAM ${g.mem_used_gb}/${g.mem_total_gb} GB · util ${g.util}%</div>`).join('')
+      <div class="card stat"><div class="label">gpu</div>${s.gpus.length ? s.gpus.map(g => `<div class="value">${esc(g.name)}</div>${meter(g.mem_used_gb, g.mem_total_gb)}<div class="sub">VRAM ${g.mem_used_gb}/${g.mem_total_gb} GB · util ${g.util}%${gpuStale(s) ? ` · ${gpuStale(s)} (nvidia-smi not answering)` : ''}</div>`).join('')
         : '<div class="value">none</div><div class="sub">jobs run CPU-only; loop run --vram is refused</div>'}</div>
     </div>
     <div style="margin-top:22px">${box('last 10 minutes', `<div class="legend"><span><i style="background:var(--accent)"></i>cpu %</span><span><i style="background:var(--reply)"></i>ram %</span>${s.gpus.length ? '<span><i style="background:var(--warn)"></i>vram %</span>' : ''}</div>

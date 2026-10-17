@@ -24,7 +24,7 @@ from .adapters import RunSpec
 from .adapters.base import to_tokens
 from .config import DEFAULTS, PYTHON, home, goal_config, state_dir, workspace_config
 from .db import DB
-from .infra import Infra, cgroup_dir, mark_oom_first, scope_memory, tree_rss
+from .infra import GPU_STALE_S, Infra, cgroup_dir, mark_oom_first, scope_memory, tree_rss
 from .runner import (Runner, child_env, job_scope_argv, kill_unit, scratch_root, systemd_available,
                      unit_prefix)
 
@@ -485,7 +485,10 @@ class Engine:
         """VRAM has no hard per-job cap, so a job may use more than its grant while its GPU has room. Once less than
         the reserve is free there, the job furthest over its grant is stopped, so a job that keeps to its grant
         never pays for another's overuse; where jobs cannot be told apart (no process list and several grants),
-        the newest grant goes first. A GPU filled by memory outside the platform's jobs stops nothing."""
+        the newest grant goes first. A GPU filled by memory outside the platform's jobs stops nothing, and neither
+        does a stale reading (nvidia-smi hanging), which may predate a job that already stopped."""
+        if snap["ts"] - snap.get("gpus_ts", snap["ts"]) > GPU_STALE_S:
+            return
         reserve = self.vram_reserve()
         for gpu in snap["gpus"]:
             mine = [(k, g) for k, g in self.grants.items() if g.get("gpu") == gpu["index"]]

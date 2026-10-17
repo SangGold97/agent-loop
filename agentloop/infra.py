@@ -1,15 +1,22 @@
 """Host resource sampling (CPU, RAM, disk, GPU) and admission checks for new workers."""
 from __future__ import annotations
 
+import copy
+import logging
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from collections import deque
 from pathlib import Path
 
 import psutil
+
+log = logging.getLogger("agentloop")
+
+GPU_STALE_S = 5  # a GPU reading older than this is shown as stale and stops no job
 
 
 def gpus() -> list[dict]:
@@ -118,6 +125,24 @@ class Infra:
         self.host_mount = wsl_host_mount()
         self.history: deque = deque(maxlen=600)
         psutil.cpu_percent()
+        # nvidia-smi can hang for a minute when WSL's GPU channel stalls; it is polled on its own thread so the
+        # 1 s CPU/RAM/disk sample never waits on it and carries the last GPU reading with its time instead
+        self.gpu_reading: tuple[float, list[dict]] = (0.0, [])
+        self.poll_gpus()
+        if shutil.which("nvidia-smi"):
+            threading.Thread(target=self.gpu_loop, name="gpu-poll", daemon=True).start()
+
+    def poll_gpus(self) -> None:
+        try:
+            self.gpu_reading = (time.time(), gpus())
+        except (OSError, subprocess.SubprocessError, ValueError):
+            log.warning("nvidia-smi failed; keeping the GPU reading from %.0f s ago",
+                        time.time() - self.gpu_reading[0], exc_info=True)
+
+    def gpu_loop(self) -> None:
+        while True:
+            self.poll_gpus()
+            time.sleep(1)
 
     def sample(self) -> dict:
         vm, disk = psutil.virtual_memory(), psutil.disk_usage(self.disk_path)
@@ -131,7 +156,8 @@ class Infra:
             "ram_total_gb": round(vm.total / 2**30, 1), "ram_free_gb": round(vm.available / 2**30, 1),
             "ram_pct": vm.percent, "swap_pct": psutil.swap_memory().percent,
             "disk_total_gb": round(total / 2**30), "disk_free_gb": round(free / 2**30),
-            "gpus": gpus(),
+            # Each sample gets its own copy: the engine adds per-sample fields (jobs_gb) to these dicts
+            "gpus": copy.deepcopy(self.gpu_reading[1]), "gpus_ts": self.gpu_reading[0],
         }
         self.history.append(snap)
         return snap
