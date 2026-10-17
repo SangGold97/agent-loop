@@ -37,7 +37,7 @@ def test_codex_argv_meta_resume(tmp_path):
                 system_text="MODE", last_message_file=tmp_path / "l.txt")
     a = CodexAdapter().argv(s)
     assert a[:4] == ["codex", "exec", "resume", "t1"] and a[-1] == "-"
-    assert 'model_reasoning_effort="max"' in a and "-C" not in a
+    assert 'model_reasoning_effort="max"' in a and 'model_reasoning_summary="auto"' in a and "-C" not in a
     assert "--dangerously-bypass-approvals-and-sandbox" in a and not any("sandbox_mode" in x for x in a)
     assert "project_root_markers=[]" in a
     assert "project_root_markers=[]" not in CodexAdapter().argv(RunSpec(agent="codex", kind="worker", cwd=tmp_path,
@@ -49,11 +49,13 @@ def test_codex_parse_stream():
     lines = [{"type": "thread.started", "thread_id": "T"},
              {"type": "item.started", "item": {"type": "command_execution", "command": "ls"}},
              {"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": "a", "exit_code": 0}},
+             {"type": "item.completed", "item": {"type": "reasoning", "text": "**Checking output**\n\nIt lists a."}},
              {"type": "item.completed", "item": {"type": "agent_message", "text": "DONE"}},
              {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 5}}]
     events = [e for obj in lines for e in ad.parse(obj, st)]
     assert st.vendor_id == "T" and st.last_text == "DONE" and st.tokens == 45
-    assert [e["type"] for e in events] == ["init", "tool", "tool_result", "text", "usage"]
+    assert [e["type"] for e in events] == ["init", "tool", "tool_result", "thinking", "text", "usage"]
+    assert events[3]["text"] == "Checking output\n\nIt lists a."
 
 
 

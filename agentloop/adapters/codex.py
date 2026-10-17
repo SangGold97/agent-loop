@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,8 @@ class CodexAdapter(Adapter):
             a += ["-m", s.model]
         if s.effort:
             a += ["-c", f'model_reasoning_effort="{s.effort}"']
+        # Codex streams no reasoning summaries unless asked; with them its thinking shows in the feeds as Claude's does
+        a += ["-c", 'model_reasoning_summary="auto"']
         tokens = to_tokens(s.autocompact)
         if tokens:
             a += ["-c", f"model_auto_compact_token_limit={tokens}"]
@@ -60,7 +63,9 @@ class CodexAdapter(Adapter):
                 st.last_text = item["text"]
                 out.append({"type": "text", "text": item["text"]})
             elif itype == "reasoning" and item.get("text"):
-                out.append({"type": "thinking", "text": short(item["text"], 400)})
+                # A summary opens with a bold title ("**Checking the tests**"): plain text, like Claude's thinking
+                text = re.sub(r"^\*\*(.+?)\*\*", r"\1", item["text"].strip())
+                out.append({"type": "thinking", "text": short(text, 400)})
             elif itype == "command_execution":
                 code = item.get("exit_code")
                 out.append(tool_result(item.get("aggregated_output") or f"exit {code}", code not in (0, None)))
