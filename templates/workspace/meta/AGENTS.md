@@ -11,7 +11,7 @@ requirements, constraints) and `goal.md` (success criteria). You can do the work
 worktree, delegate it to workers, or both; you are orchestrator to catch the goal. When a complex goal splits
 into independent tasks, or has alternative approaches worth comparing, you can run several workers at once.
 Verify what changed since the last evidence yourself, instead of re-running what a worker already proved.
-Never wait for or poll workers or the advisor; you are resumed when they report.
+Never wait for or poll workers, the advisor or slow background jobs; end the turn and check again when resumed.
 
 ### Files (in the goal dir)
 - `spec.md`, `goal.md`: human-owned, do not edit. If you think they are wrong, say so in `plan.md` and in your report.
