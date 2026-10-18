@@ -31,6 +31,8 @@ def main():
     role, gdir = os.environ.get("LOOP_ROLE"), Path(os.environ.get("LOOP_GOAL_DIR", "."))
     wt = Path(os.environ.get("LOOP_WS", ".")) / "wt" / os.environ.get("LOOP_GOAL", "")  # integration worktree
     emit({"type": "system", "subtype": "init", "session_id": sid})
+    emit({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "unifiedWindows": {
+        "five_hour": {"utilization": 0.25, "resetsAt": int(time.time()) + 3600}}}})
     # Every session runs in the workspace's shared venv
     venv = Path(os.environ["LOOP_WS"]) / ".venv"
     assert os.environ["VIRTUAL_ENV"] == str(venv) and str(venv / "bin") in os.environ["PATH"].split(os.pathsep)
@@ -89,8 +91,8 @@ def main():
                 adj = " ".join(Path(f"/proc/{pid}/oom_score_adj").read_text().strip() for pid in (os.getpid(), tool.pid))
                 tool.kill()
                 ok = loop("run", "--ram", "0.5", "--", sys.executable, "-c",
-                          "import os; print('job ran, adj', open('/proc/self/oom_score_adj').read().strip(), "
-                          "'cuda', repr(os.environ.get('CUDA_VISIBLE_DEVICES')))")
+                          "import os, time; print('job ran, adj', open('/proc/self/oom_score_adj').read().strip(), "
+                          "'cuda', repr(os.environ.get('CUDA_VISIBLE_DEVICES'))); time.sleep(2.5)")
                 # Only a job granted VRAM sees a GPU (refused on a host without one)
                 gpu = loop("run", "--ram", "0.1", "--vram", "0.5", "--", sys.executable, "-c",
                            "import os; print('gpu job', os.environ.get('CUDA_VISIBLE_DEVICES'), "

@@ -10,6 +10,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 
@@ -45,6 +46,16 @@ class ParseState:
     started: float = field(default_factory=time.time)        # when the turn started
     call_usage: list[dict] = field(default_factory=list)     # usage of each model call so far in this turn
     steps: dict = field(default_factory=dict)                # per-step scratch of adapters that stream steps
+    # The plan's usage-limit windows as the CLI last reported them: {name, used (0-1), resets_at (epoch)}
+    quota: list[dict] | None = None
+
+
+def epoch(stamp) -> float:
+    """An ISO timestamp ('2026-10-06T09:45:19.356Z') as epoch seconds; 0 when missing or malformed."""
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return 0.0
 
 
 def billed_tokens(usage: dict) -> int:

@@ -3,18 +3,21 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
 from pathlib import Path
 
-from .base import Adapter, ParseState, RunSpec, billed_tokens, short, to_tokens, tool_result
+from .base import Adapter, ParseState, RunSpec, billed_tokens, epoch, short, to_tokens, tool_result
 
 
-def epoch(stamp) -> float:
-    """A rollout timestamp ('2026-10-06T09:45:19.356Z') as epoch seconds; 0 when missing or malformed."""
-    try:
-        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
-    except (AttributeError, ValueError):
-        return 0.0
+def quota_windows(limits: dict) -> list[dict]:
+    """A rollout's `rate_limits` (primary: the 5-hour window, secondary: the weekly one) as quota windows."""
+    out = []
+    for key in ("primary", "secondary"):
+        w = limits.get(key)
+        if isinstance(w, dict) and w.get("used_percent") is not None:
+            mins = w.get("window_minutes") or 0
+            name = f"{mins // 1440}d" if mins and mins % 1440 == 0 else f"{round(mins / 60)}h"
+            out.append({"name": name, "used": w["used_percent"] / 100, "resets_at": w.get("resets_at")})
+    return out
 
 
 class CodexAdapter(Adapter):
@@ -101,7 +104,7 @@ class CodexAdapter(Adapter):
         files = sorted(Path(s.codex_home, "sessions").rglob(f"rollout-*{vendor_id}.jsonl"))
         # The rollout logs the thread's running total after every model call, also for a turn stopped before
         # turn.completed: this turn's tokens are its growth since this run's first task started. The TUI's context
-        # figure is the last call's size.
+        # figure is the last call's size. Usage limits come only from the rollout too, with each token count.
         total = before = last = None
         in_turn = False
         for line in files[-1].read_text().splitlines() if files else []:
@@ -114,9 +117,11 @@ class CodexAdapter(Adapter):
             payload = o.get("payload") or {}
             if payload.get("type") == "task_started" and not in_turn and epoch(o.get("timestamp")) >= st.started:
                 in_turn, before = True, total
-            elif payload.get("type") == "token_count" and payload.get("info"):
-                total = payload["info"].get("total_token_usage") or total
-                last = payload["info"].get("last_token_usage") or last
+            elif payload.get("type") == "token_count":
+                if payload.get("info"):
+                    total = payload["info"].get("total_token_usage") or total
+                    last = payload["info"].get("last_token_usage") or last
+                st.quota = quota_windows(payload.get("rate_limits") or {}) or st.quota
         if last:
             st.context = last.get("total_tokens") or st.context
         if in_turn and total:

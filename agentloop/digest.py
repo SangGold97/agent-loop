@@ -38,7 +38,15 @@ def budget_line(b: dict) -> str:
             f"meta turns {b['meta_turns']}/{lim(b['max_meta_turns'])} · active {b['hours']:.1f} h")
 
 
-def envelope(items: list[dict], budget: str, infra: str) -> str:
+BUDGET_LOW = 0.8  # share of a turn budget past which every meta-work turn carries the [Budget] line
+
+
+def budget_low(b: dict) -> bool:
+    """Whether worker or meta turns are mostly spent, so the meta-work should see the budget with every turn."""
+    return any(b.get(f"max_{k}") and b[k] >= BUDGET_LOW * b[f"max_{k}"] for k in ("worker_turns", "meta_turns"))
+
+
+def envelope(items: list[dict], budget: str | None = None) -> str:
     parts = []
     for it in items:
         p = json.loads(it["payload"])
@@ -49,8 +57,9 @@ def envelope(items: list[dict], budget: str, infra: str) -> str:
             parts.append(f"[Human note #{p['id']}] {p['text']}")
         elif kind == "file_changed":
             parts.append(f"[{p['name']} changed by the human]\n```diff\n{p['diff'][-4000:]}\n```")
-    parts += [budget, f"[Infra] {infra}"]
-    return "\n\n".join(parts)
+    if budget:
+        parts.append(budget)
+    return "\n\n".join(parts) or "[System] No new events."
 
 
 def verify_commands(goal: str) -> list[str]:

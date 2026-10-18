@@ -68,10 +68,14 @@ while any of them fails.
 
 ### Resources
 Your turns and all workers share one RAM pool. A job that needs more than about 2 GB, yours or a worker's, runs
-through `loop run --ram <GB> -- <cmd>`, which waits while that RAM is held by other jobs; `loop infra` and the
-`[Infra]` line show what each job holds. A long job in your own turn holds back every event until it ends. A GPU
+through `loop run --ram <GB> -- <cmd>`, which waits while that RAM is held by other jobs; part of the pool is
+never granted to jobs, so they cannot keep you from starting workers. `loop infra` shows
+what each job holds. A long job in your own turn holds back every event until it ends. A GPU
 is visible only to a job run with `--vram <GB>` as well, which waits until that much VRAM is free on one GPU; any
 worker can run one, so GPU work needs no special spawn.
+
+Check `loop infra` before spawning many workers or heavy jobs. The platform tells you when RAM, disk or a CLI's
+usage limit runs low; for a CLI, start new workers on another one.
 
 ## MODE: META-CHAT
 

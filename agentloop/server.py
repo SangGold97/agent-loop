@@ -234,7 +234,8 @@ def create_app(api_url: str) -> FastAPI:
 
     @app.get("/api/agents")
     async def agents_info():
-        return {"versions": await agents.versions(), "ops": engine.agent_ops, "models": agents.load_models()}
+        return {"versions": await agents.versions(), "ops": engine.agent_ops, "models": agents.load_models(),
+                "quotas": engine.quotas}
 
     @app.get("/api/models")
     def models():
@@ -316,7 +317,7 @@ def create_app(api_url: str) -> FastAPI:
             return await engine.ram_grant(caller, float(b.get("gb") or 0), float(b.get("wait") or 0),
                                           int(b.get("pid") or 0), str(b.get("cmd", "")), float(b.get("vram") or 0))
         elif cmd == "ram-release":
-            text = engine.ram_release(caller, int(b.get("grant") or 0), bool(b.get("killed")))
+            return engine.ram_release(caller, int(b.get("grant") or 0), bool(b.get("killed")))
         else:
             raise HTTPException(404, f"unknown command {cmd}")
         return {"text": text}

@@ -33,6 +33,9 @@ VERIFY_TIMEOUT_S = 900
 PREFIX = {"meta-work": "mw", "worker": "w", "meta-chat": "mc", "meta-advisor": "ma"}
 LIMIT_SLACK_S = 60  # retry this long after a vendor's announced usage-limit reset
 VRAM_SETTLE_S = 10  # a GPU is not policed again this long after a job on it was stopped, while its memory frees
+RAM_SETTLE_S = 5  # likewise for the RAM pool
+QUOTA_WARN = 0.9  # share of a CLI's usage window past which running goals hear it is running out
+DISK_WARN_GB = 10  # free disk below which running goals hear it is running out (again once back above twice that)
 
 
 def clock(ts: float) -> str:
@@ -85,6 +88,14 @@ class Engine:
         self.meta_active: set[tuple[str, str]] = set()
         self.vendor_limits: dict[str, float] = {}  # agent CLI -> when its usage limit resets
         self.waking: set[tuple[str, str]] = set()  # goals whose meta-work waits for a usage-limit reset
+        # Each CLI's usage-limit windows as its last turn reported them, kept across restarts; the windows over
+        # QUOTA_WARN that running goals were already told about
+        try:
+            self.quotas: dict[str, dict] = json.loads((state_dir() / "quotas.json").read_text())
+        except (OSError, ValueError):
+            self.quotas = {}
+        self.quota_warned: set[tuple[str, str]] = set()
+        self.disk_warned = False
         self.int_locks: dict[tuple[str, str], threading.Lock] = {}  # one per goal's integration worktree
         self.tasks: set[asyncio.Task] = set()
         self.task_goal: dict[asyncio.Task, tuple[str, str]] = {}  # tasks working on a goal, awaited by deletes
@@ -97,10 +108,12 @@ class Engine:
         self.turn_mem: dict[str, dict] = {}
         self.ram_wait_goals: dict[tuple[str, str], float] = {}  # goals refused a dispatch for RAM -> GB they need
         # Per GPU index, the VRAM in use while none of its grants was active: where the driver lists no processes
-        # (WSL), what a GPU uses above it is its jobs'. Grants stopped for VRAM -> (session, what `loop run` reports)
+        # (WSL), what a GPU uses above it is its jobs'. Grants stopped for RAM or VRAM -> (session, what `loop run`
+        # reports)
         self.vram_base: dict[int, float] = {}
-        self.vram_stopped: dict[int, tuple[str, str]] = {}
+        self.stopped: dict[int, tuple[str, str]] = {}
         self.vram_settle: dict[int, float] = {}  # GPU index -> until when it is left alone after a stop
+        self.ram_settle = 0.0  # until when the RAM pool is left alone after a stop
         self.bin_dir = state_dir() / "bin"
         self.bin_dir.mkdir(exist_ok=True)
         shim = self.bin_dir / "loop"
@@ -130,6 +143,56 @@ class Engine:
             return until
         self.vendor_limits.pop(agent, None)
         return None
+
+    def set_quota(self, agent: str, windows: list[dict]) -> None:
+        """Keep a CLI's latest usage-limit windows. When one passes QUOTA_WARN, every running goal hears it once
+        (deferred, so no meta turn is spent on it) and can move new workers to another CLI before this one refuses
+        them; it hears again only after the window has dropped below QUOTA_WARN."""
+        self.quotas[agent] = {"ts": time.time(), "windows": windows}
+        with contextlib.suppress(OSError):
+            (state_dir() / "quotas.json").write_text(json.dumps(self.quotas))
+        self.publish("quota", agent=agent, **self.quotas[agent])
+        for w in windows:
+            key = (agent, w["name"])
+            if w["used"] < QUOTA_WARN:
+                self.quota_warned.discard(key)
+                continue
+            if key in self.quota_warned:
+                continue
+            self.quota_warned.add(key)
+            reset = f", which resets at {clock(w['resets_at'])}" if w.get("resets_at") else ""
+            text = (f"{agent} has used {w['used']:.0%} of its {w['name']} usage window{reset}; prefer another CLI "
+                    "for new workers and sends until then.")
+            for g in self.db.q("SELECT ws, id FROM goals WHERE status='running'"):
+                self.db.push_inbox(g["ws"], g["id"], "system", {"text": f"[System] {text}"}, deferred=True)
+                self.publish("alert", ws=g["ws"], goal=g["id"], text=text)
+
+    def check_disk(self, free_gb: float) -> None:
+        """Wake every running goal's meta-work once when free disk falls below DISK_WARN_GB, since builds, jobs
+        and commits start failing soon after; it hears again only after free disk has recovered."""
+        if free_gb >= 2 * DISK_WARN_GB:
+            self.disk_warned = False
+        if free_gb >= DISK_WARN_GB or self.disk_warned:
+            return
+        self.disk_warned = True
+        text = (f"Only {free_gb} GB of disk is free; delete large outputs you no longer need and avoid jobs that "
+                "write a lot until there is more.")
+        for g in self.db.q("SELECT ws, id FROM goals WHERE status='running'"):
+            self.db.push_inbox(g["ws"], g["id"], "system", {"text": f"[System] {text}"})
+            self.kick(g["ws"], g["id"])
+            self.publish("alert", ws=g["ws"], goal=g["id"], text=text)
+
+    def quota_text(self) -> str:
+        """Each CLI's usage-limit windows as last reported; a window whose reset has passed counts as unused."""
+        now, parts = time.time(), []
+        for agent, q in sorted(self.quotas.items()):
+            windows = []
+            for w in q["windows"]:
+                reset = w.get("resets_at")
+                used = 0.0 if reset and reset <= now else w["used"]
+                windows.append(f"{w['name']} {used:.0%}" + (f" until {clock(reset)}" if used >= 0.5 and reset else ""))
+            parts.append(f"{agent} {', '.join(windows)} (as of {clock(q['ts'])})")
+        return "CLI usage limits: " + "; ".join(parts) if parts else ""
 
     def wake_at(self, ws: str, gid: str, until: float) -> None:
         """Resume a goal's meta-work once its CLI's usage limit resets. The task is not tied to the goal, so a
@@ -292,6 +355,10 @@ class Engine:
                         g["oom"] = used[1]
                     # Without systemd the job is a child of the helper
                     g["rss_gb"] = round((used[0] if used else 0 if g["unit"] else tree_rss(g["pid"])) / 2**30, 2)
+                    # Peak of the per-second samples, which `loop run` prints when the job ends; a job too short to
+                    # be sampled has none
+                    if used or not g["unit"]:
+                        g["peak_gb"] = max(g.get("peak_gb") or 0.0, g["rss_gb"])
                 for key, (proc, _) in list(self.runner.procs.items()):
                     s = self.db.session(key) or {"kind": "smoke", "ws": "", "goal": "", "role": ""}
                     # The turn's scope counts detached jobs too; without systemd only the CLI's process tree
@@ -300,6 +367,11 @@ class Engine:
                     # Until systemd-run has moved the CLI into its scope, the cgroup is still the server's
                     used = scope_memory(cg) if cg and cg.name.startswith(unit_prefix()) else None
                     helpers = {g["pid"] for g in self.grants.values() if g["sid"] == key}
+                    # A helper's `systemd-run` sits in the turn's scope until it has moved into the job's scope;
+                    # marked there, it would hand the job the OOM-first score, so the helpers' children are kept
+                    for pid in list(helpers):
+                        with contextlib.suppress(psutil.Error):
+                            helpers |= {c.pid for c in psutil.Process(pid).children(recursive=True)}
                     if used:
                         mem["cgroup"], mem["oom"] = cg, used[1]
                         mark_oom_first(cg, {proc.pid, *helpers})
@@ -307,9 +379,19 @@ class Engine:
                     jobs = sum(g["rss_gb"] for g in self.grants.values() if g["sid"] == key and g["unit"])
                     mem["peak"] = max(mem["peak"], rss + jobs)
                     snap["sessions"].append({"id": key, "kind": s["kind"], "ws": s["ws"], "goal": s["goal"],
-                                             "role": s["role"], "rss_gb": round(rss + jobs, 2)})
+                                             "role": s["role"], "agent": s.get("agent") or "",
+                                             "rss_gb": round(rss + jobs, 2),
+                                             # What the session's `loop run` jobs hold (and use of their GPU),
+                                             # and still wait for; their RAM use is in rss_gb already
+                                             "grants": [{"gb": g["gb"], "vram": g["vram"], "gpu": g.get("gpu"),
+                                                         "vram_used": g.get("vram_used")}
+                                                        for g in self.grants.values() if g["sid"] == key],
+                                             "waiting": [{"gb": w["gb"], "vram": w["vram"], "since": w["since"]}
+                                                         for w in self.ram_waiting.values() if w["sid"] == key]})
+                self.police_ram()
                 self.sample_vram(snap)
                 self.police_vram(snap)
+                self.check_disk(snap["disk_free_gb"])
                 self.publish("infra", data=snap)
                 # A goal refused a dispatch for RAM hears once enough is free again, unless it ended meanwhile
                 for (ws, gid), need in list(self.ram_wait_goals.items()):
@@ -319,7 +401,7 @@ class Engine:
                     elif (free := self.ram_free()) >= need:
                         self.ram_wait_goals.pop((ws, gid), None)
                         self.db.push_inbox(ws, gid, "system", {"text": (
-                            f"[System] RAM is free again ({free} GB left to grant); spawn or send what was "
+                            f"[System] RAM is free again ({free} GB free); spawn or send what was "
                             "refused if it is still needed.")})
                         self.kick(ws, gid)
             except Exception:
@@ -388,33 +470,47 @@ class Engine:
         self.check_ram(ws, gid, cfg["infra"]["min_free_ram_gb"])
 
     def check_ram(self, ws: str, gid: str, need: float) -> None:
-        """Refuse a dispatch while less than `need` GB is left to grant. The goal then waits for RAM: it does not
+        """Refuse a dispatch while less than `need` GB is free. The goal then waits for RAM: it does not
         count as idle, and the sampler sends it an event once enough is free again."""
         free = self.ram_free()
         if free >= need:
             self.ram_wait_goals.pop((ws, gid), None)
         else:
             self.ram_wait_goals[(ws, gid)] = need
-            raise AgentError(f"only {free} GB RAM left to grant (min {need}; {self.ram_text()}); an event "
+            raise AgentError(f"only {free} GB RAM free (min {need}; {self.ram_text()}); an event "
                              "follows when enough is free again, so do other work or end your turn meanwhile")
 
     # ---------- RAM pool shared by all sessions ----------
+    def infra_max(self, key: str) -> float:
+        """A host-wide infra setting: the largest value any workspace asks for."""
+        return max([workspace_config(self.wsp(n))["infra"][key] for n in workspace.list_workspaces()]
+                   or [DEFAULTS["infra"][key]])
+
     def pool_gb(self) -> float:
         """RAM all sessions share: the host's RAM minus the largest reserve any workspace keeps for the rest."""
-        reserve = max([workspace_config(self.wsp(n))["infra"]["pool_reserve_gb"] for n in workspace.list_workspaces()]
-                      or [DEFAULTS["infra"]["pool_reserve_gb"]])
-        return max(1.0, round(self.infra.latest()["ram_total_gb"] - reserve, 1))
+        return max(1.0, round(self.infra.latest()["ram_total_gb"] - self.infra_max("pool_reserve_gb"), 1))
 
     def ram_free(self) -> float:
-        """GB a new job may still be granted: what the pool and the host have left, with every grant counted in
-        full even while its job is still loading, so two requests never both see the same free RAM."""
+        """GB still free for new sessions and jobs: what the pool and the host have left, with every grant counted
+        in full even while its job is still loading, so two requests never both see the same free RAM."""
         snap = self.infra.latest()
         used = sum(s["rss_gb"] for s in snap.get("sessions", []))
         unused = sum(max(0.0, g["gb"] - g["rss_gb"]) for g in self.grants.values())
         return round(max(0.0, min(self.pool_gb() - used, snap["ram_free_gb"]) - unused), 1)
 
+    def jobs_max_gb(self) -> float:
+        """The most all grants together may hold: the pool minus the part kept for agent sessions, so jobs never
+        hold the RAM the meta-work needs to start workers."""
+        return round(max(0.0, self.pool_gb() - self.infra_max("session_reserve_gb")), 1)
+
+    def job_free(self) -> float:
+        """GB a new job may still be granted: what is free, but no more than the grants' share has left."""
+        granted = sum(g["gb"] for g in self.grants.values())
+        return round(max(0.0, min(self.ram_free(), self.jobs_max_gb() - granted)), 1)
+
     def ram_text(self) -> str:
-        parts = [f"agent RAM pool {self.pool_gb()} GB, {self.ram_free()} GB left to grant"]
+        parts = [f"agent RAM pool {self.pool_gb()} GB, {self.ram_free()} GB free, {self.job_free()} GB left to "
+                 f"grant to jobs (at most {self.jobs_max_gb()} GB in all)"]
         parts += [f"GPU{gpu['index']} VRAM {gpu['mem_total_gb']} GB, {self.vram_free(gpu)} GB left to grant"
                   for gpu in self.infra.latest()["gpus"]]
 
@@ -434,11 +530,37 @@ class Engine:
                                                  for w in self.ram_waiting.values()))
         return " · ".join(parts)
 
+    def police_ram(self) -> None:
+        """A job may use more than its RAM grant, up to its scope's cap, while the pool has room. Once less than
+        min_free_ram_gb is free, the job furthest over its grant is stopped, so borrowed RAM goes back to the
+        grants and sessions it belongs to, and a job that keeps to its grant never pays for another's overuse."""
+        if time.time() < self.ram_settle or self.ram_free() >= self.infra_max("min_free_ram_gb"):
+            return
+        over = [(g["rss_gb"] - g["gb"], k) for k, g in self.grants.items() if g["rss_gb"] > g["gb"]]
+        if not over:
+            return
+        key = max(over)[1]
+        g = self.grants[key]
+        self.ram_settle = time.time() + RAM_SETTLE_S
+        self.stop_job(key, f"stopped for using {g['rss_gb']:.1f} GB RAM against its {g['gb']} GB grant while the "
+                           "RAM pool was nearly full; run it with a larger --ram or make it use less memory")
+
+    def stop_job(self, key: int, why: str) -> None:
+        """Stop a job the platform polices and free its grant; its `loop run` and the turn's memory note say why."""
+        g = self.grants[key]
+        if not g["unit"]:  # without systemd the job is a child of the helper
+            with contextlib.suppress(psutil.Error):
+                for proc in psutil.Process(g["pid"]).children(recursive=True):
+                    proc.kill()
+        self.stopped[key] = (g["sid"], f"the job was {why}")
+        if g["sid"] in self.turn_mem:
+            self.turn_mem[g["sid"]]["over"].append(f"`{g['cmd']}`: {why}")
+        self.end_grant(key)
+
     # ---------- VRAM, granted per job on one GPU ----------
     def vram_reserve(self) -> float:
         """VRAM kept free on every GPU: the largest reserve any workspace asks for."""
-        return max([workspace_config(self.wsp(n))["infra"]["vram_reserve_gb"] for n in workspace.list_workspaces()]
-                   or [DEFAULTS["infra"]["vram_reserve_gb"]])
+        return self.infra_max("vram_reserve_gb")
 
     def vram_free(self, gpu: dict) -> float:
         """GB of `gpu` a new job may still be granted. As in the RAM pool, every grant counts in full even while
@@ -506,17 +628,10 @@ class Engine:
                 continue
             g = self.grants[key]
             used = "more" if g["vram_used"] is None else f"{g['vram_used']:.1f} GB"
-            why = (f"stopped for using {used} VRAM against its {g['vram']} GB grant while GPU{gpu['index']} was "
-                   "nearly full; run it with a larger --vram or make it use less GPU memory")
-            if not g["unit"]:  # without systemd the job is a child of the helper
-                with contextlib.suppress(psutil.Error):
-                    for proc in psutil.Process(g["pid"]).children(recursive=True):
-                        proc.kill()
-            self.vram_stopped[key] = (g["sid"], f"the job was {why}")
             self.vram_settle[gpu["index"]] = time.time() + VRAM_SETTLE_S
-            if g["sid"] in self.turn_mem:
-                self.turn_mem[g["sid"]]["over"].append(f"`{g['cmd']}`: {why}")
-            self.end_grant(key)
+            self.stop_job(key, f"stopped for using {used} VRAM against its {g['vram']} GB grant while "
+                               f"GPU{gpu['index']} was nearly full; run it with a larger --vram or make it use less "
+                               "GPU memory")
 
     def pick_gpu(self, vram: float) -> int | None:
         """The GPU with the least free VRAM that still fits `vram`, leaving larger holes for larger jobs."""
@@ -525,12 +640,18 @@ class Engine:
 
     async def ram_grant(self, caller: dict, gb: float, wait_s: float, pid: int, cmd: str, vram: float = 0.0) -> dict:
         """Grant `gb` of the pool, and `vram` GB on one GPU when asked, to the `loop run` job `pid` once both are
-        free, waiting up to `wait_s`. Only a job granted VRAM sees a GPU, and only that one."""
+        free, waiting up to `wait_s`. Only a job granted VRAM sees a GPU, and only that one. The grant is what the
+        job reserves; its scope is capped at job_memory_max_factor times that, so it can borrow free pool RAM and
+        is stopped first when the pool fills up (`police_ram`)."""
         if caller["kind"] not in ("worker", "meta-work"):
             raise AgentError("`loop run` belongs to workers and the meta-work")
-        pool = self.pool_gb()
-        if not 0 < gb <= pool:
-            raise AgentError(f"--ram must be more than 0 and at most the {pool} GB pool")
+        most = self.jobs_max_gb()
+        if not 0 < gb <= most:
+            raise AgentError(f"--ram must be more than 0 and at most {most} GB (the {self.pool_gb()} GB pool minus "
+                             f"the {self.infra_max('session_reserve_gb')} GB kept for agent sessions)")
+        factor = workspace_config(self.wsp(caller["ws"]))["infra"]["job_memory_max_factor"] if caller.get("ws") \
+            else DEFAULTS["infra"]["job_memory_max_factor"]
+        max_gb = round(gb * max(1.0, factor), 2)
         if vram:
             gpus = self.infra.latest()["gpus"]
             if not gpus:
@@ -540,15 +661,17 @@ class Engine:
                 raise AgentError(f"--vram must be more than 0 and at most {most} GB (the largest GPU minus the "
                                  f"{self.vram_reserve()} GB kept free)")
         key, deadline = next(self.grant_ids), time.time() + min(wait_s, 1800)
-        self.ram_waiting[key] = {"sid": caller["id"], "gb": gb, "vram": vram, "cmd": cmd[:120]}
+        self.ram_waiting[key] = {"sid": caller["id"], "gb": gb, "vram": vram, "cmd": cmd[:120], "since": time.time()}
         try:
             while True:
-                free, gpu = self.ram_free(), self.pick_gpu(vram) if vram else None
+                free, gpu = self.job_free(), self.pick_gpu(vram) if vram else None
                 # No await between the check and the grant, so concurrent requests are served one at a time
                 if gb <= free and (not vram or gpu is not None):
                     unit = f"{unit_prefix()}-{caller['id']}-job{key}-{int(time.time() * 1000)}" \
                         if systemd_available() else None
                     text, env = f"granted {gb} GB ({round(free - gb, 1)} GB left to grant)", {}
+                    if max_gb > gb:
+                        text += f", usable up to {max_gb} GB while the pool has room"
                     if vram:
                         # The GPU's level without grants is what its jobs are measured against
                         if not any(g.get("gpu") == gpu for g in self.grants.values()):
@@ -558,10 +681,12 @@ class Engine:
                         # nvidia-smi numbers GPUs by PCI bus, CUDA by speed unless told otherwise
                         env = {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": str(gpu),
                                "LOOP_VRAM_GB": str(vram)}
-                    self.grants[key] = {"sid": caller["id"], "gb": gb, "pid": pid, "cmd": cmd[:120], "unit": unit,
-                                        "rss_gb": 0.0, "oom": 0, "started": time.time(), "vram": vram,
+                    self.grants[key] = {"sid": caller["id"], "gb": gb, "max_gb": max_gb, "pid": pid,
+                                        "cmd": cmd[:120], "unit": unit, "rss_gb": 0.0, "oom": 0,
+                                        "started": time.time(), "vram": vram,
                                         **({"gpu": gpu, "vram_used": 0.0} if vram else {})}
-                    return {"text": text, "grant": key, "argv": job_scope_argv(unit, gb) if unit else [], "env": env}
+                    return {"text": text, "grant": key, "max_gb": max_gb,
+                            "argv": job_scope_argv(unit, max_gb) if unit else [], "env": env}
                 if time.time() >= deadline:
                     what = f"{gb} GB" + (f" and {vram} GB VRAM" if vram else "")
                     raise AgentError(f"{what} not free after {wait_s / 60:.0f} min ({self.ram_text()}); run it "
@@ -570,19 +695,19 @@ class Engine:
         finally:
             self.ram_waiting.pop(key, None)
 
-    def ram_release(self, caller: dict, key: int, killed: bool = False) -> str:
-        g = self.grants.get(key)
+    def ram_release(self, caller: dict, key: int, killed: bool = False) -> dict:
+        g, peak = self.grants.get(key), None
         if g and g["sid"] == caller["id"]:
+            peak = g.get("peak_gb")
             self.end_grant(key, killed)
-        # A job stopped for VRAM was killed by the platform, not for outgrowing its RAM grant; `loop run` says so
-        stopped = self.vram_stopped.get(key)
-        if stopped and stopped[0] == caller["id"]:
-            return self.vram_stopped.pop(key)[1]
-        return "released"
+        # A job stopped by the platform was not killed by the kernel at its cap; `loop run` says why
+        stopped = self.stopped.get(key)
+        text = self.stopped.pop(key)[1] if stopped and stopped[0] == caller["id"] else "released"
+        return {"text": text, "peak_gb": peak}
 
     def end_grant(self, key: int, killed: bool = False) -> None:
         """Free a grant and stop whatever still runs in its job's scope, so no job outlives its grant. A job killed
-        at its grant (seen by the sampler, or as a SIGKILL exit by `loop run`, since a scope emptied by the kill
+        at its cap (seen by the sampler, or as a SIGKILL exit by `loop run`, since a scope emptied by the kill
         may vanish before the next sample) goes into the turn's memory note."""
         g = self.grants.pop(key, None)
         if not g:
@@ -591,8 +716,8 @@ class Engine:
             kill_unit(g["unit"])
         if (g["oom"] or killed) and g["sid"] in self.turn_mem:
             what = f"{g['oom']} of its processes were killed" if g["oom"] else "it was killed (SIGKILL)"
-            self.turn_mem[g["sid"]]["over"].append(f"`{g['cmd']}`: {what}, most likely for outgrowing its "
-                                                   f"{g['gb']} GB grant")
+            self.turn_mem[g["sid"]]["over"].append(f"`{g['cmd']}`: {what}, most likely for reaching its "
+                                                   f"{g['max_gb']} GB cap ({g['gb']} GB grant)")
 
     @staticmethod
     def mem_note(mem: dict) -> str:
@@ -720,10 +845,12 @@ class Engine:
             jobs = [g["cmd"] for g in self.grants.values() if g["sid"] == sid]
             for key in [k for k, g in self.grants.items() if g["sid"] == sid]:
                 self.end_grant(key)
-            for key in [k for k, (owner, _) in self.vram_stopped.items() if owner == sid]:
-                self.vram_stopped.pop(key)
+            for key in [k for k, (owner, _) in self.stopped.items() if owner == sid]:
+                self.stopped.pop(key)
             res_mem = self.turn_mem.pop(sid, {})
         res.memory = self.mem_note(res_mem)
+        if res.quota:
+            self.set_quota(sess["agent"], res.quota)
         # `loop run` jobs have scopes of their own, so the turn's scope did not list them among its leftovers
         if not res.stopped:
             res.leftover = (*res.leftover, *(c for c in jobs if c not in res.leftover))
@@ -871,8 +998,10 @@ class Engine:
         # A running agent's pending edit to a human-owned file is not the human's: its own turn end reverts it
         busy = self.db.one("SELECT 1 FROM sessions WHERE ws=? AND status='running'", ws)
         workspace.commit_external(p, protected=not busy)
-        text = digest.envelope(items, digest.budget_line(self.budget(ws, gid)),
-                               f"{self.infra.summary()} · {self.ram_text()}")
+        # The turn carries its events; resources and budget come only when they matter (the budget once mostly
+        # spent; RAM, disk and usage limits as events when they run low), and `loop infra` / `loop budget` on demand
+        b = self.budget(ws, gid)
+        text = digest.envelope(items, digest.budget_line(b) if digest.budget_low(b) else None)
         wt = gitops.int_worktree(p, gid)
         start = gitops.head(wt) if wt.exists() else None
         repo_before = self.checkout_state(p / "repo")
@@ -1513,6 +1642,8 @@ class Engine:
         lines = [self.infra.summary(), self.ram_text()]
         for s in self.infra.latest().get("sessions", []):
             lines.append(f"- {s['id']} ({s['kind']} {s['role']}): {s['rss_gb']:.2f} GB in use")
+        if quota := self.quota_text():
+            lines.append(quota)
         return "\n".join(lines)
 
     def session_events(self, sid: str, limit: int = 400, types: set[str] | None = None) -> list[dict]:

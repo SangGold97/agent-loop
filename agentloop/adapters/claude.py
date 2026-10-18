@@ -9,6 +9,7 @@ from .base import Adapter, ParseState, RunSpec, billed_tokens, short, to_tokens,
 USER_SETTINGS = Path.home() / ".claude" / "settings.json"
 
 TOOL_KEYS = ("command", "file_path", "pattern", "path", "url", "query", "description", "prompt")
+WINDOW_NAMES = (("five_hour", "5h"), ("seven_day", "7d"))
 
 
 def user_autocompact() -> int | None:
@@ -62,6 +63,18 @@ class ClaudeAdapter(Adapter):
         if kind == "system" and o.get("subtype") == "init":
             st.vendor_id = o.get("session_id") or st.vendor_id
             out.append({"type": "init", "vendor_id": st.vendor_id, "model": o.get("model")})
+        elif kind == "rate_limit_event":
+            # The plan's usage windows, utilization as a fraction: five_hour, seven_day and per-model ones
+            windows = (o.get("rate_limit_info") or {}).get("unifiedWindows") or {}
+            quota = []
+            for key, w in windows.items():
+                if isinstance(w, dict) and w.get("utilization") is not None:
+                    name = key
+                    for long, brief in WINDOW_NAMES:
+                        name = name.replace(long, brief)
+                    quota.append({"name": name.replace("_", " "), "used": float(w["utilization"]),
+                                  "resets_at": w.get("resetsAt")})
+            st.quota = quota or st.quota
         elif kind == "stream_event":
             # Token deltas of the main agent's reply: live preview only (the full message follows)
             ev = o.get("event") or {}

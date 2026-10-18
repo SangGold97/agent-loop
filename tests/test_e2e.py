@@ -489,6 +489,7 @@ def test_loop_run_grants_ram_and_stops_a_job_over_its_grant(server):
     out = (ws / "goals" / gid / "runs" / sid / "artifacts" / "ram.txt").read_text().split("\n---\n")
     adj, ok, over, spawn, orphan, gpu = out
     assert "granted 0.5 GB" in ok and "job ran, adj 0 cuda ''" in ok and "done (exit 0)" in ok
+    assert "peak RAM" in ok and "of 0.5 GB" in ok  # the job lives long enough to be sampled
     if engine.infra.latest()["gpus"]:
         assert "0.5 GB VRAM on GPU" in gpu and "gpu job" in gpu and " 0.5" in gpu
     else:
@@ -497,9 +498,42 @@ def test_loop_run_grants_ram_and_stops_a_job_over_its_grant(server):
     assert not engine.grants and not engine.ram_waiting
     if systemd_available():  # the pool, the job scopes and the OOM order need systemd
         assert adj == "0 1000"
-        assert "outgrowing its 0.1 GB grant" in over and orphan == "job stopped"
+        assert "reaching its 0.15 GB cap (0.1 GB grant)" in over and orphan == "job stopped"
         digest = engine.db.one("SELECT payload FROM inbox WHERE ws='ram' AND kind='worker_done'")["payload"]
-        assert "Memory in this worker's turn" in digest and "outgrowing its 0.1 GB grant" in digest
+        assert "Memory in this worker's turn" in digest and "reaching its 0.15 GB cap" in digest
+
+
+def test_cli_usage_limits_are_kept_shown_and_warned(server, monkeypatch):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "usage"})
+    gid = client.post("/api/workspaces/usage/goals", json={
+        "title": "Usage", "spec": "Create hello.py", "goal": "- hello.py exists", "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/usage/{gid}/start")
+    wait_for(lambda: client.get(f"/api/goals/usage/{gid}").json()["row"]["status"] == "awaiting_review")
+    # Every turn's report is kept per CLI and shown to agents and the UI
+    assert [w["name"] for w in engine.quotas["fake"]["windows"]] == ["5h"]
+    assert "CLI usage limits: fake 5h 25%" in engine.infra_text()
+    assert client.get("/api/agents").json()["quotas"]["fake"]["windows"][0]["used"] == 0.25
+    # Past QUOTA_WARN, running goals hear it once, deferred, until the window drops below it again
+    engine.db.x("UPDATE goals SET status='running' WHERE ws='usage' AND id=?", gid)
+    try:
+        high = [{"name": "5h", "used": 0.95, "resets_at": time.time() + 3600}]
+        for windows in (high, high, [{**high[0], "used": 0.2}], high):
+            engine.set_quota("fake", windows)
+        warned = engine.db.q("SELECT deferred FROM inbox WHERE ws='usage' AND payload LIKE '%fake has used 95%'")
+        assert [r["deferred"] for r in warned] == [1, 1]
+        # Low disk wakes the meta-work once, and again only after free disk has recovered
+        kicked = []
+        monkeypatch.setattr(engine, "kick", lambda ws, g: kicked.append(ws))
+        for free in (50, 8, 5, 15, 8, 25, 9):
+            engine.check_disk(free)
+        disk = engine.db.q("SELECT deferred FROM inbox WHERE ws='usage' AND payload LIKE '%of disk is free%'")
+        assert [r["deferred"] for r in disk] == [0, 0] and kicked == ["usage", "usage"]
+    finally:
+        engine.db.x("UPDATE goals SET status='awaiting_review' WHERE ws='usage' AND id=?", gid)
+        engine.db.x("UPDATE inbox SET consumed=1 WHERE ws='usage'")
+        engine.set_quota("fake", [{"name": "5h", "used": 0.25, "resets_at": time.time() + 3600}])
+        engine.check_disk(100)
 
 
 def test_goal_refused_for_ram_waits_instead_of_pausing(server, monkeypatch):
@@ -529,9 +563,10 @@ def test_ram_grant_counts_grants_in_full(server):
     worker = {"id": "w-ramtest", "kind": "worker"}
     with pytest.raises(AgentError, match="belongs to workers"):
         asyncio.run(engine.ram_grant({"id": "mc-x", "kind": "meta-chat"}, 1, 0, os.getpid(), "x"))
-    with pytest.raises(AgentError, match="at most"):
-        asyncio.run(engine.ram_grant(worker, engine.pool_gb() + 1, 0, os.getpid(), "x"))
-    free = engine.ram_free()
+    # Part of the pool is never granted to jobs; it stays for agent sessions
+    with pytest.raises(AgentError, match="kept for agent sessions"):
+        asyncio.run(engine.ram_grant(worker, engine.jobs_max_gb() + 0.5, 0, os.getpid(), "x"))
+    free = engine.job_free()
     first = asyncio.run(engine.ram_grant(worker, round(free * 0.6, 1), 0, os.getpid(), "python big.py"))
     # The first grant still counts in full although its job uses nothing yet, so a second one cannot see that RAM
     with pytest.raises(AgentError, match="not free") as refused:
@@ -546,12 +581,48 @@ def test_ram_grant_counts_grants_in_full(server):
     wait_for(lambda: not engine.grants, timeout=10)
 
 
+def test_ram_jobs_borrow_and_the_one_furthest_over_is_stopped(server, monkeypatch):
+    _, engine = server
+    worker = {"id": "w-rampolice", "kind": "worker"}
+    # The sampling loop must not measure the fake jobs over what the test sets
+    monkeypatch.setattr(engine.infra, "sample", lambda: (_ for _ in ()).throw(RuntimeError("paused by the test")))
+    helpers = [subprocess.Popen(["sleep", "60"]) for _ in range(2)]
+    try:
+        a, b = (asyncio.run(engine.ram_grant(worker, 0.2, 0, h.pid, f"job{i}")) for i, h in enumerate(helpers))
+        # The scope's cap is above the grant, so the job can borrow free pool RAM
+        assert a["max_gb"] == 0.3 and "usable up to 0.3 GB" in a["text"]
+        engine.grants[a["grant"]]["rss_gb"], engine.grants[b["grant"]]["rss_gb"] = 0.25, 0.28
+        # While the pool has room, borrowing is fine
+        engine.police_ram()
+        assert a["grant"] in engine.grants and b["grant"] in engine.grants
+        # Once it is nearly full, the job furthest over its grant goes first, and only it
+        monkeypatch.setattr(engine, "ram_free", lambda: 0.5)
+        engine.police_ram()
+        assert a["grant"] in engine.grants and b["grant"] not in engine.grants
+        assert "0.3 GB RAM against its 0.2 GB grant" in engine.ram_release(worker, b["grant"])["text"]
+        # While the stopped job's memory frees, the other is left alone, and a job within its grant never goes
+        engine.police_ram()
+        assert a["grant"] in engine.grants
+        engine.ram_settle = 0.0
+        engine.grants[a["grant"]]["rss_gb"] = 0.2
+        engine.police_ram()
+        assert a["grant"] in engine.grants
+    finally:
+        for key in [k for k, g in engine.grants.items() if g["sid"] == worker["id"]]:
+            engine.ram_release(worker, key)
+        for h in helpers:
+            h.kill()
+            h.wait()
+
+
 def test_vram_grants_fit_gpus_and_stop_the_job_furthest_over(server, monkeypatch):
     _, engine = server
     worker = {"id": "w-vramtest", "kind": "worker"}
     gpus = [{"index": 0, "name": "big", "mem_used_gb": 2.0, "mem_total_gb": 24.0, "util": 0.0, "procs": {}},
             {"index": 1, "name": "small", "mem_used_gb": 0.0, "mem_total_gb": 12.0, "util": 0.0, "procs": {}}]
     snap = {**engine.infra.latest(), "gpus": gpus, "sessions": []}
+    snap["gpus_ts"] = snap["ts"]  # a slow real nvidia-smi must not make the fake reading stale
+
     # The sampling loop sees the same two fake GPUs, so it measures and polices them too
     monkeypatch.setattr(engine.infra, "latest", lambda: snap)
     monkeypatch.setattr(engine.infra, "sample", lambda: snap)
@@ -578,14 +649,14 @@ def test_vram_grants_fit_gpus_and_stop_the_job_furthest_over(server, monkeypatch
         engine.sample_vram(snap)
         engine.police_vram(snap)
         assert b["grant"] in engine.grants and d["grant"] not in engine.grants
-        assert "7.0 GB VRAM against its 5 GB grant while GPU0" in engine.ram_release(worker, d["grant"])
+        assert "7.0 GB VRAM against its 5 GB grant while GPU0" in engine.ram_release(worker, d["grant"])["text"]
         # Without one (WSL), what the GPU uses above its level without grants is its only job's
         engine.vram_settle.clear()
         gpus[1]["mem_used_gb"] = 11.5
         engine.sample_vram(snap)
         engine.police_vram(snap)
         assert a["grant"] not in engine.grants
-        assert "11.5 GB VRAM against its 10 GB grant" in engine.ram_release(worker, a["grant"])
+        assert "11.5 GB VRAM against its 10 GB grant" in engine.ram_release(worker, a["grant"])["text"]
         # Several grants without a process list: the GPU's jobs together are over, so the newest goes first
         gpus[1]["mem_used_gb"] = 0.0
         engine.sample_vram(snap)
@@ -596,7 +667,7 @@ def test_vram_grants_fit_gpus_and_stop_the_job_furthest_over(server, monkeypatch
         engine.sample_vram(snap)
         engine.police_vram(snap)
         assert e["grant"] in engine.grants and f["grant"] not in engine.grants
-        assert "using more VRAM" in engine.ram_release(worker, f["grant"])
+        assert "using more VRAM" in engine.ram_release(worker, f["grant"])["text"]
         # While the stopped job's memory frees, the job left on that GPU is not blamed for it
         engine.sample_vram(snap)
         engine.police_vram(snap)

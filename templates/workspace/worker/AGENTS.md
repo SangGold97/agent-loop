@@ -6,8 +6,10 @@
   there; to test packaging, use a throwaway venv in `$TMPDIR`.
 - Scratch work goes in `$TMPDIR`, which is emptied when your turn ends.
 - RAM on this machine is shared. Run any job that may need more than about 2 GB (training, fine-tuning, large
-  data loads) as `loop run --ram <GB> -- <cmd>`: it waits until that RAM is free, and a job that outgrows it is
-  killed, so ask for its peak plus a margin. `loop infra` shows what is free.
+  data loads) as `loop run --ram <GB> -- <cmd>`: it waits until that RAM is free. Ask for the job's expected
+  peak, without a large margin: it may use more while the machine has room, up to the cap shown when it is
+  granted, but is stopped first when RAM runs short. `loop run` prints the job's peak when it ends; `loop infra`
+  shows what is free.
 - Only a job run with `--vram <GB>` as well sees a GPU (`loop run --ram 8 --vram 12 -- <cmd>`); `$LOOP_VRAM_GB`
   holds its grant. It may use more while the GPU has room, but is stopped first when the GPU fills up, so ask
   for its peak VRAM.

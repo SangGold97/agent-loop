@@ -1144,6 +1144,22 @@ function gpuStale(s) {
   const age = s.gpus_ts ? s.ts - s.gpus_ts : 0;
   return age > 5 ? `stale ${Math.round(age)}s` : '';
 }
+// VRAM a session's `loop run` jobs use, per GPU (sessions themselves see no GPU); `?` where a GPU's jobs cannot
+// be told apart (WSL with several grants)
+function gpuCell(x) {
+  const used = {};
+  for (const g of (x.grants || []).filter(g => g.vram)) {
+    used[g.gpu] = used[g.gpu] === null || g.vram_used == null ? null : (used[g.gpu] || 0) + g.vram_used;
+  }
+  return Object.entries(used).map(([i, gb]) => `GPU${i} ${gb === null ? '?' : gb.toFixed(1)} GB`).join('<br>');
+}
+// A session's `loop run` jobs: granted RAM (and VRAM), then requests still waiting for theirs
+function grantCell(x) {
+  const held = (x.grants || []).map(g => `RAM ${g.gb} GB` + (g.vram ? ` · VRAM ${g.vram} GB` : ''));
+  const waiting = (x.waiting || []).map(w => `<span style="color:var(--warn)">${w.gb}G${w.vram ? ` + ${w.vram}G VRAM` : ''} `
+    + `wait ${Math.floor((S.infra.ts - w.since) / 60)} mins</span>`);
+  return [...held, ...waiting].join('<br>');
+}
 function renderInfra() {
   const s = S.infra;
   if (!s) { main.innerHTML = '<div class="page"><div class="empty">Waiting for the first sample…</div></div>'; return; }
@@ -1151,7 +1167,7 @@ function renderInfra() {
   main.innerHTML = `<div class="page"><div class="page-head"><div><div class="crumbs">host</div><h1>infrastructure</h1></div>
       <span class="faint small">updated ${hhmm(s.ts)}</span></div>
     <div class="grid cols-4">
-      <div class="card stat"><div class="label">cpu</div><div class="value">${s.cpu_pct.toFixed(0)}%</div>${meter(s.cpu_pct, 100)}<div class="sub">${s.cpus} cores · load ${s.load.join(' / ')}</div></div>
+      <div class="card stat"><div class="label">cpu</div><div class="value">${s.cpu_pct.toFixed(0)}%</div>${meter(s.cpu_pct, 100)}<div class="sub">${s.cpus} cores</div></div>
       <div class="card stat"><div class="label">ram</div><div class="value">${usedRam} / ${s.ram_total_gb} GB</div>${meter(s.ram_pct, 100)}<div class="sub">${s.ram_free_gb} GB available · swap ${s.swap_pct}%</div></div>
       <div class="card stat"><div class="label">disk</div><div class="value">${s.disk_free_gb} GB free</div>${meter(s.disk_total_gb - s.disk_free_gb, s.disk_total_gb)}<div class="sub">of ${s.disk_total_gb} GB</div></div>
       <div class="card stat"><div class="label">gpu</div>${s.gpus.length ? s.gpus.map(g => `<div class="value">${esc(g.name)}</div>${meter(g.mem_used_gb, g.mem_total_gb)}<div class="sub">VRAM ${g.mem_used_gb}/${g.mem_total_gb} GB · util ${g.util}%${gpuStale(s) ? ` · ${gpuStale(s)} (nvidia-smi not answering)` : ''}</div>`).join('')
@@ -1159,10 +1175,9 @@ function renderInfra() {
     </div>
     <div style="margin-top:22px">${box('last 10 minutes', `<div class="legend"><span><i style="background:var(--accent)"></i>cpu %</span><span><i style="background:var(--reply)"></i>ram %</span>${s.gpus.length ? '<span><i style="background:var(--warn)"></i>vram %</span>' : ''}</div>
       <canvas class="chart" id="infra-chart"></canvas>`)}</div>
-    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>goal</th><th>memory</th></tr>
-      ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)} ${esc(x.role || '')}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td></tr>`).join('')}</table>`
-        : '<div class="empty">No agent sessions running.</div>'}
-      <p class="hint">All sessions share one RAM pool: host RAM minus infra.pool_reserve_gb (loop.yaml). Jobs over about 2 GB hold a grant through <code>loop run --ram</code>; new workers are refused while less than min_free_ram_gb is left to grant. A GPU is visible only to jobs run with <code>loop run --vram</code>, granted per GPU with infra.vram_reserve_gb kept free.</p>`)}</div></div>`;
+    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>role</th><th>CLI</th><th>goal</th><th>memory</th><th>gpu</th><th>grants</th></tr>
+      ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)}</td><td>${esc(x.role || '')}</td><td>${esc(cliName(x.agent || ''))}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td><td>${gpuCell(x)}</td><td>${grantCell(x)}</td></tr>`).join('')}</table>`
+        : '<div class="empty">No agent sessions running.</div>'}`)}</div></div>`;
   drawChart($('#infra-chart'), 600);
 }
 // Line chart of cpu/ram(/vram) %; `pct` labels the grid lines as 0%…100% (sidebar)
@@ -1192,15 +1207,21 @@ function drawChart(c, points, pct = false) {
 }
 
 // ---------- agent CLIs: versions, smoke test, update, available models ----------
-async function renderAgents() {
-  S.agents = await api('/api/agents');
+// `fresh` false re-renders from what the page holds, e.g. after a live usage-limit report
+async function renderAgents(fresh = true) {
+  if (fresh || !S.agents) S.agents = await api('/api/agents');
   S.models = S.agents.models || {};
   const card = name => {
     const op = S.agents.ops[name], res = op?.result;
     const smoke = res?.smoke || (op?.op === 'smoke' ? res : null);
-    const models = modelList(name);
+    const models = modelList(name), quota = S.agents.quotas?.[name];
+    // A window whose reset has passed is unused again, whatever the last report said
+    const used = w => w.resets_at && w.resets_at * 1000 <= Date.now() ? 0 : w.used;
     return box(cliName(name), `<div class="row"><span>${esc(S.agents.versions[name])}</span><span class="spacer"></span>
         ${op?.state === 'running' ? `<span class="thinking">${op.op} running</span>` : ''}</div>
+      ${quota ? `<div class="row" style="margin-top:14px"><b>usage limits</b><span class="faint small">as of ${fmtTime(quota.ts)}</span></div>
+        <table class="t" style="margin-top:4px">${quota.windows.map(w => `<tr><td>${esc(w.name)}</td><td style="width:35%">${meter(used(w), 1)}</td>
+          <td class="small">${Math.round(used(w) * 100)}%</td><td class="small faint">${w.resets_at && used(w) ? `resets ${fmtTime(w.resets_at)}` : ''}</td></tr>`).join('')}</table>` : ''}
       <div class="row" style="margin-top:8px"><button class="btn" data-op="${name}/smoke" ${op?.state === 'running' ? 'disabled' : ''}>smoke test</button>
         <button class="btn primary" data-op="${name}/update" ${op?.state === 'running' ? 'disabled' : ''}>update to latest</button></div>
       ${smoke ? `<div style="margin-top:10px">${pill(smoke.ok ? 'ok' : 'failed', smoke.ok ? 'smoke test passed' : 'smoke test failed')}
@@ -1281,6 +1302,9 @@ function handle(evt) {
       break;
     case 'agents':
       if (r.view === 'agents') renderAgents();
+      break;
+    case 'quota':
+      if (r.view === 'agents' && S.agents) { (S.agents.quotas ||= {})[evt.agent] = evt; renderAgents(false); }
       break;
     case 'models':
       loadModels().then(() => { if (r.view === 'agents') renderAgents(); });

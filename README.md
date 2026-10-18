@@ -68,6 +68,12 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   after each turn; after three turns in a row that leave the integration branch unchanged, the goal pauses.
 - A CLI's usage limit is not a failure: the meta-work waits for the announced reset while workers on the other
   CLI keep running, a refused worker turn is not counted, and spawns on that CLI are refused until the reset.
+  After each turn the platform records how much of the CLI's usage windows is used (Claude's `rate_limit_event`,
+  Codex's rollout, `agy -p /usage`) and shows it on the Agent CLIs page and in `loop infra`; once a window passes
+  90%, every running goal's meta-work is told so with its next turn.
+- A meta-work turn carries its events and nothing else: the `[Budget]` line joins only once 80% of the worker or
+  meta turns are spent, and resources reach it as events when they run low (RAM refusals, free disk under 10 GB,
+  usage limits); `loop infra` and `loop budget` show the rest on demand.
 - Every turn runs in its own `systemd-run --user --scope`. Processes still running when the CLI exits (a job the
   agent backgrounded) are stopped and named in the digest; orphans are stopped on restart. Each turn also gets its
   own `TMPDIR`, removed when the turn ends, so scratch files never pile up in `/tmp`. GPUs are hidden from every
@@ -75,12 +81,16 @@ To run it on another machine and use the UI from this one, see [remote/README.md
 - RAM is one pool for all sessions: their scopes share a slice capped at host RAM minus `pool_reserve_gb`, so an
   out-of-memory kill stays among agent processes. A job that needs more than about 2 GB runs through
   `loop run --ram <GB> -- <cmd>`, which waits until that much is left to grant and holds it until the job ends.
-  The job runs in a scope of its own capped at its grant, so a job that outgrows it is killed there and costs no
-  other process; if the helper dies, the platform stops the job with it. Within a second of starting, every other
+  Grants together never exceed the pool minus `session_reserve_gb`, so jobs cannot keep the meta-work from
+  starting workers. The grant is a reservation: the job runs in a scope of its own capped at the grant times
+  `job_memory_max_factor`, borrowing free pool RAM above its grant; a job that outgrows the cap is killed there and
+  costs no other process. As with VRAM, once less than `min_free_ram_gb` is free the job furthest over its grant
+  is stopped, so a job that keeps to its grant is never stopped for another's overuse. If the helper dies, the
+  platform stops the job with it. Within a second of starting, every other
   process of a turn but the CLI is marked first in line for the OOM killer, so when the pool runs out the kernel
   kills a tool process without a grant, not an agent or a job that keeps to its grant. Processes outside the
   platform can still exhaust the host's reserve. Spawns, sends and advice are refused while less than
-  `min_free_ram_gb` is left to grant; the refused goal then waits without counting as idle and gets an event once
+  `min_free_ram_gb` is free; the refused goal then waits without counting as idle and gets an event once
   enough is free again. The digest reports a turn's memory peak and kills.
 - VRAM is granted per job too: `loop run --ram <GB> --vram <GB> -- <cmd>` waits until one GPU has that much left
   to grant (its total minus `vram_reserve_gb`, minus every grant in full and what other programs use), then shows

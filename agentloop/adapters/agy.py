@@ -4,8 +4,9 @@ conversation id. Sessions run agy's default agent as the TUI does; the guard rea
 from __future__ import annotations
 
 import json
+import subprocess
 
-from .base import Adapter, ParseState, RunSpec, short, tool_result
+from .base import Adapter, ParseState, RunSpec, epoch, short, tool_result
 
 TOOL_KEYS = ("CommandLine", "TargetFile", "AbsolutePath", "Url", "Query", "SearchPath", "DirectoryPath", "toolSummary")
 
@@ -82,3 +83,16 @@ class AgyAdapter(Adapter):
                 st.error = short(r.get("error") or str(r.get("status") or "error"), 400)
                 out.append({"type": "error", "text": st.error})
         return out
+
+    def finish(self, st: ParseState, s: RunSpec) -> None:
+        # agy streams no usage limits; its /usage command reports them without a model call. A bucket at 0 left
+        # omits remaining_fraction (protobuf JSON), so a missing one is fully used.
+        try:
+            out = subprocess.run(["agy", "-p", "/usage", "--output-format", "json"], cwd=s.cwd, capture_output=True,
+                                 text=True, timeout=30).stdout
+            groups = json.loads(out)["command"]["data"]["groups"]
+            st.quota = [{"name": f"{g['name']} {b['window']}", "used": 1 - float(b.get("remaining_fraction") or 0),
+                         "resets_at": epoch(b.get("reset_time")) or None}
+                        for g in groups for b in g.get("buckets") or []] or st.quota
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+            pass

@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -125,6 +126,31 @@ def test_claude_parse_result():
 
 
 
+def test_claude_quota_from_rate_limit_event():
+    st = ParseState()
+    ClaudeAdapter().parse({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "unifiedWindows": {
+        "five_hour": {"utilization": 0.06, "resetsAt": 1792314000},
+        "seven_day_opus": {"utilization": 0.5, "resetsAt": 1792886400}}}}, st)
+    assert st.quota == [{"name": "5h", "used": 0.06, "resets_at": 1792314000},
+                        {"name": "7d opus", "used": 0.5, "resets_at": 1792886400}]
+
+
+def test_agy_quota_from_usage_command(tmp_path, monkeypatch):
+    data = {"groups": [{"name": "Claude and GPT models", "buckets": [
+        {"window": "weekly", "remaining_fraction": 0.25, "reset_time": "2026-10-25T08:25:12Z"},
+        {"window": "5h", "reset_time": "2026-10-18T13:25:12Z"}]}]}  # nothing left: the field is omitted
+    out = json.dumps({"status": "SUCCESS", "command": {"name": "usage", "data": data}})
+    calls = []
+    monkeypatch.setattr("agentloop.adapters.agy.subprocess.run",
+                        lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, out, ""))
+    st = ParseState()
+    AgyAdapter().finish(st, RunSpec(agent="agy", kind="worker", cwd=tmp_path, prompt="x"))
+    assert calls == [["agy", "-p", "/usage", "--output-format", "json"]]
+    assert [(w["name"], w["used"]) for w in st.quota] == [("Claude and GPT models weekly", 0.75),
+                                                          ("Claude and GPT models 5h", 1.0)]
+    assert st.quota[1]["resets_at"] == datetime(2026, 10, 18, 13, 25, 12, tzinfo=timezone.utc).timestamp()
+
+
 def test_claude_stream_deltas():
     st, ad = ParseState(), ClaudeAdapter()
     delta = lambda d, parent=None: {"type": "stream_event", "parent_tool_use_id": parent,
@@ -138,6 +164,16 @@ def test_verify_and_checklist():
     goal = "- tests pass\n- verify: `make test`\nverify: python -c 'print(1)'\n"
     assert digest.verify_commands(goal) == ["make test", "python -c 'print(1)'"]
     assert digest.checklist("- [x] a\n- [ ] b\n* [X] c") == (2, 3)
+
+
+def test_envelope_carries_events_and_budget_only_when_low():
+    items = [{"kind": "worker_done", "payload": json.dumps({"text": "[Worker w-1] done"})}]
+    b = {"max_worker_turns": 10, "worker_turns": 7, "max_meta_turns": 0, "meta_turns": 50}
+    assert not digest.budget_low(b)
+    assert digest.envelope(items, None) == "[Worker w-1] done"
+    assert digest.budget_low({**b, "worker_turns": 8})
+    assert digest.envelope([], "[Budget] x") == "[Budget] x"
+    assert digest.envelope([]) == "[System] No new events."
 
 
 def test_worker_digest_is_the_reply_as_is():
@@ -547,6 +583,19 @@ def test_codex_turn_tokens_from_rollout(tmp_path):
     st = ParseState(vendor_id="T1", started=start + 10)  # stopped before its task started
     CodexAdapter().finish(st, spec)
     assert st.tokens == 0
+
+
+def test_codex_quota_from_rollout(tmp_path):
+    day = tmp_path / "sessions/2026/10/17"
+    day.mkdir(parents=True)
+    limits = {"primary": {"used_percent": 1.0, "window_minutes": 300, "resets_at": 1792226188},
+              "secondary": {"used_percent": 17.0, "window_minutes": 10080, "resets_at": 1792655184}}
+    (day / "rollout-2026-10-17T11-14-22-T1.jsonl").write_text(json.dumps(
+        {"type": "event_msg", "payload": {"type": "token_count", "info": None, "rate_limits": limits}}) + "\n")
+    st = ParseState(vendor_id="T1")
+    CodexAdapter().finish(st, RunSpec(agent="codex", kind="worker", cwd=tmp_path, prompt="x", codex_home=tmp_path))
+    assert st.quota == [{"name": "5h", "used": 0.01, "resets_at": 1792226188},
+                        {"name": "7d", "used": 0.17, "resets_at": 1792655184}]
 
 
 def test_claude_stopped_turn_counts_its_calls():

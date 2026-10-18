@@ -68,11 +68,14 @@ def text_arg(args, name: str) -> str:
 def run_job(gb: float, vram: float, wait_min: float, cmd: list[str]) -> int:
     """`loop run`: hold a RAM grant from the shared pool, and a VRAM grant on one GPU if asked, while `cmd` runs.
 
-    The job runs in a scope of its own capped at its grant, so a job that outgrows its grant is killed by the
-    kernel inside that scope and costs no other process. This helper and the job keep the default OOM score while
-    the session's other processes go first, so a job that keeps to its grant is not killed for another's
-    overuse. Only a job granted VRAM sees a GPU; the platform stops it if it is over that grant while the GPU is
-    nearly full. The grant ends with the job; if this helper dies, the platform stops the job and frees the grant."""
+    The job runs in a scope of its own capped at its grant times job_memory_max_factor, so a job that outgrows
+    that cap is killed by the kernel inside the scope and costs no other process. Between grant and cap it borrows
+    free pool RAM, and the platform stops it if it is over its grant while the pool is nearly full. This helper and
+    the job keep the default OOM score while the session's other processes go first, so a job that keeps to its
+    grant is not killed for another's overuse. Only a job granted VRAM sees a GPU; the platform stops it likewise
+    if it is over that grant while the GPU is nearly full. The grant ends with the job; if this helper dies, the
+    platform stops the job and frees the grant. A job that ends on its own gets its peak RAM (sampled each second)
+    printed, to size the next grant."""
     if not cmd:
         sys.exit("loop run: give the command after --, e.g. loop run --ram 10 -- python train.py")
     grant = call("ram", {"gb": gb, "vram": vram, "wait": wait_min * 60, "pid": os.getpid(), "cmd": shlex.join(cmd)},
@@ -82,7 +85,7 @@ def run_job(gb: float, vram: float, wait_min: float, cmd: list[str]) -> int:
         Path("/proc/self/oom_score_adj").write_text("0")
     # A SIGTERM (e.g. the shell running this being stopped) must still end the job and release the grant
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-    rc, child, released = 127, None, "released"
+    rc, child, released = 127, None, {"text": "released"}
     try:
         child = subprocess.Popen([*grant["argv"], *cmd], env={**os.environ, **grant.get("env", {})})
         rc = child.wait()
@@ -93,15 +96,17 @@ def run_job(gb: float, vram: float, wait_min: float, cmd: list[str]) -> int:
             child.kill()
         # The platform stops whatever is left in the job's scope when the grant is released
         with contextlib.suppress(SystemExit):
-            released = call("ram-release", {"grant": grant["grant"], "killed": rc == -signal.SIGKILL})
-    if released != "released":  # the platform stopped the job for VRAM and says why
-        print(f"loop run: {released}", file=sys.stderr)
+            released = call("ram-release", {"grant": grant["grant"], "killed": rc == -signal.SIGKILL}, full=True)
+    if released["text"] != "released":  # the platform stopped the job for RAM or VRAM and says why
+        print(f"loop run: {released['text']}", file=sys.stderr)
         return 137
     if rc == -signal.SIGKILL:
-        print(f"loop run: the job was killed (SIGKILL), most likely for outgrowing its {gb} GB grant; run it "
-              "with a larger --ram or make it use less memory", file=sys.stderr)
+        print(f"loop run: the job was killed (SIGKILL), most likely for reaching its {grant.get('max_gb', gb)} GB "
+              f"cap ({gb} GB grant); run it with a larger --ram or make it use less memory", file=sys.stderr)
         return 137
-    print(f"loop run: done (exit {rc})", file=sys.stderr)
+    peak = released.get("peak_gb")
+    print(f"loop run: done (exit {rc})" + (f"; peak RAM {peak:.1f} of {gb} GB" if peak is not None else ""),
+          file=sys.stderr)
     return rc
 
 

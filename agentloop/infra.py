@@ -101,19 +101,27 @@ def wsl_host_mount() -> str | None:
 
     The distro's ext4.vhdx reports its maximum size (1 TB by default), but it can only grow as far as the free
     space of the Windows drive it lives on, so that drive bounds the real free space."""
+    if "microsoft" not in os.uname().release.lower():
+        return None
+    # A server started as a service or from a stripped environment may lack WSL_DISTRO_NAME, and Windows' dirs in
+    # PATH (also when WSL's appendWindowsPath is off); it then takes the default distro, the usual one to run in
     distro = os.environ.get("WSL_DISTRO_NAME")
-    if not distro or not shutil.which("reg.exe"):
+    reg = shutil.which("reg.exe") or shutil.which("reg.exe", path="/mnt/c/Windows/System32")
+    if not reg:
         return None
     try:
-        out = subprocess.run(["reg.exe", "query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss", "/s"],
+        out = subprocess.run([reg, "query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss", "/s"],
                              capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return None
+    default = re.search(r"DefaultDistribution\s+REG_SZ\s+(\{[^}]+\})", out)
     # One registry key per distro; pick the BasePath of the key whose DistributionName is ours.
     for block in re.split(r"\r?\n(?=HKEY_)", out):
         values = dict(re.findall(r"^\s+(\w+)\s+REG_\w+\s+(.*?)\s*$", block, re.M))
         drive = re.match(r"(?:\\\\\?\\)?([A-Za-z]):", values.get("BasePath", ""))
-        if values.get("DistributionName") == distro and drive:
+        ours = values.get("DistributionName") == distro if distro else \
+            bool(default) and block.split("\n", 1)[0].rstrip().endswith(default.group(1))
+        if ours and drive:
             mount = f"/mnt/{drive.group(1).lower()}"
             return mount if os.path.ismount(mount) else None
     return None
@@ -152,7 +160,6 @@ class Infra:
             total = min(total, disk.used + free)
         snap = {
             "ts": time.time(), "cpu_pct": psutil.cpu_percent(), "cpus": psutil.cpu_count(),
-            "load": [round(x, 2) for x in psutil.getloadavg()],
             "ram_total_gb": round(vm.total / 2**30, 1), "ram_free_gb": round(vm.available / 2**30, 1),
             "ram_pct": vm.percent, "swap_pct": psutil.swap_memory().percent,
             "disk_total_gb": round(total / 2**30), "disk_free_gb": round(free / 2**30),
@@ -169,5 +176,5 @@ class Infra:
         s = self.latest()
         gpu = "; ".join(f"GPU{g['index']} {g['name']} {g['mem_used_gb']}/{g['mem_total_gb']} GB, {g['util']:.0f}%"
                         for g in s["gpus"]) or "none"
-        return (f"CPU {s['cpu_pct']:.0f}% of {s['cpus']} cores (load {s['load'][0]}) · "
+        return (f"CPU {s['cpu_pct']:.0f}% of {s['cpus']} cores · "
                 f"RAM {s['ram_free_gb']}/{s['ram_total_gb']} GB free · disk {s['disk_free_gb']} GB free · GPU {gpu}")

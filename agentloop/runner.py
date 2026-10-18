@@ -54,6 +54,7 @@ class TurnResult:
     leftover: tuple[str, ...] = ()  # commands still running in the scope when the CLI exited (now stopped)
     limited_until: float | None = None  # the vendor refused the turn for a usage limit that resets then
     memory: str = ""  # the engine's note on the turn's memory peak and kills; empty when unremarkable
+    quota: list[dict] | None = None  # the CLI's usage-limit windows, when it reported them (ParseState.quota)
 
 
 def systemd_available() -> bool:
@@ -230,10 +231,12 @@ class Runner:
             error = "stopped"
         elif rc and not error:
             error = f"exit {rc}: " + "".join(stderr_tail)[-800:].strip()
-        adapter.finish(st, spec)
+        # In a thread: agy's finish asks its CLI for the usage limits, which takes a network round trip
+        await asyncio.to_thread(adapter.finish, st, spec)
         final = adapter.final_text(st, spec) or ""
         limited = usage_limit_until(f"{error}\n{final}") if error and not (stopped or timed_out) else None
-        return TurnResult(st.vendor_id, final, st.tokens, st.context, rc, error, stopped, leftover, limited)
+        return TurnResult(st.vendor_id, final, st.tokens, st.context, rc, error, stopped, leftover, limited,
+                          quota=st.quota)
 
     def running(self, key: str) -> bool:
         return key in self.procs
