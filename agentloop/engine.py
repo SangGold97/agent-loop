@@ -24,7 +24,7 @@ from .adapters import RunSpec
 from .adapters.base import to_tokens
 from .config import DEFAULTS, PYTHON, home, goal_config, state_dir, workspace_config
 from .db import DB
-from .infra import GPU_STALE_S, Infra, cgroup_dir, mark_oom_first, scope_memory, tree_rss
+from .infra import GPU_STALE_S, SAMPLE_S, Infra, cgroup_dir, mark_oom_first, scope_memory, tree_rss
 from .runner import (Runner, child_env, job_scope_argv, kill_unit, scratch_root, systemd_available,
                      unit_prefix)
 
@@ -406,7 +406,7 @@ class Engine:
                         self.kick(ws, gid)
             except Exception:
                 log.exception("infra sample failed")
-            await asyncio.sleep(1)
+            await asyncio.sleep(SAMPLE_S)
 
     async def shutdown(self) -> None:
         for key in list(self.runner.procs):

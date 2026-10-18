@@ -86,7 +86,7 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   `job_memory_max_factor`, borrowing free pool RAM above its grant; a job that outgrows the cap is killed there and
   costs no other process. As with VRAM, once less than `min_free_ram_gb` is free the job furthest over its grant
   is stopped, so a job that keeps to its grant is never stopped for another's overuse. If the helper dies, the
-  platform stops the job with it. Within a second of starting, every other
+  platform stops the job with it. Within two seconds of starting, every other
   process of a turn but the CLI is marked first in line for the OOM killer, so when the pool runs out the kernel
   kills a tool process without a grant, not an agent or a job that keeps to its grant. Processes outside the
   platform can still exhaust the host's reserve. Spawns, sends and advice are refused while less than
@@ -98,7 +98,7 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   less than `vram_reserve_gb` is free there, the job furthest over its grant is stopped, and a job that keeps to
   its grant is never stopped for another's overuse. Where the driver lists no processes (WSL), a GPU's jobs are
   measured by what it uses above its level without grants, and with several grants the newest goes first. GPUs are
-  read on their own thread; while `nvidia-smi` hangs, the infra page marks the last reading stale and no job is
+  read every 10 s on their own thread (CPU, RAM and disk every 2 s); while `nvidia-smi` hangs, the infra page marks the last reading stale and no job is
   stopped on it.
 - Events handed to a meta-work turn stay "in flight" until it completes; a crash, restart or stop puts them back.
 - The advisor is read-only like a meta-chat: the guard blocks its edits, its `loop` token permits read commands

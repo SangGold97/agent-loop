@@ -16,7 +16,11 @@ import psutil
 
 log = logging.getLogger("agentloop")
 
-GPU_STALE_S = 5  # a GPU reading older than this is shown as stale and stops no job
+SAMPLE_S = 2  # CPU/RAM/disk sample period, which is also how often RAM and VRAM grants are policed
+# Each nvidia-smi call is a round trip to the Windows GPU driver under WSL; polled every second, the calls piled
+# up as stalls while CUDA jobs ran on the GPU that also drives the display, so the GPU is read less often
+GPU_POLL_S = 10
+GPU_STALE_S = 2 * GPU_POLL_S + 5  # a GPU reading older than this is shown as stale and stops no job
 
 
 def gpus() -> list[dict]:
@@ -131,10 +135,10 @@ class Infra:
     def __init__(self, disk_path: str):
         self.disk_path = disk_path
         self.host_mount = wsl_host_mount()
-        self.history: deque = deque(maxlen=600)
+        self.history: deque = deque(maxlen=600 // SAMPLE_S)  # the last 10 minutes
         psutil.cpu_percent()
         # nvidia-smi can hang for a minute when WSL's GPU channel stalls; it is polled on its own thread so the
-        # 1 s CPU/RAM/disk sample never waits on it and carries the last GPU reading with its time instead
+        # 2 s CPU/RAM/disk sample never waits on it and carries the last GPU reading with its time instead
         self.gpu_reading: tuple[float, list[dict]] = (0.0, [])
         self.poll_gpus()
         if shutil.which("nvidia-smi"):
@@ -150,7 +154,7 @@ class Infra:
     def gpu_loop(self) -> None:
         while True:
             self.poll_gpus()
-            time.sleep(1)
+            time.sleep(GPU_POLL_S)
 
     def sample(self) -> dict:
         vm, disk = psutil.virtual_memory(), psutil.disk_usage(self.disk_path)

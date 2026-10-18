@@ -74,7 +74,7 @@ def run_job(gb: float, vram: float, wait_min: float, cmd: list[str]) -> int:
     the job keep the default OOM score while the session's other processes go first, so a job that keeps to its
     grant is not killed for another's overuse. Only a job granted VRAM sees a GPU; the platform stops it likewise
     if it is over that grant while the GPU is nearly full. The grant ends with the job; if this helper dies, the
-    platform stops the job and frees the grant. A job that ends on its own gets its peak RAM (sampled each second)
+    platform stops the job and frees the grant. A job that ends on its own gets its peak RAM (sampled every 2 s)
     printed, to size the next grant."""
     if not cmd:
         sys.exit("loop run: give the command after --, e.g. loop run --ram 10 -- python train.py")

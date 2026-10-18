@@ -1,6 +1,8 @@
 'use strict';
 /* agent-loop web UI: vanilla JS, hash routing, live updates over SSE. */
 
+// Match SAMPLE_S and GPU_STALE_S in infra.py
+const INFRA_SAMPLE_S = 2, GPU_STALE_S = 25;
 const S = { workspaces: [], route: {}, goal: null, feeds: {}, infra: null, history: [], agents: null, models: {},
   chat: { sid: null, messages: [], busy: false, liveEvs: [], creating: false }, edit: {}, cfgDirty: false,
   partial: {}, modal: null, open: {}, more: {}, chatOut: false };
@@ -644,7 +646,7 @@ function planBar(c) {
   const cells = [...Array(c.total)].map((_, i) => `<i class="${i < c.done ? 'done' : ''}"></i>`).join('');
   return `<span class="planbar" style="width:${Math.min(c.total * 12, 160)}px">${cells}</span>`;
 }
-// Sidebar INFRA: the host's last two minutes, redrawn with every 1 s sample; click for the infra page
+// Sidebar INFRA: the host's last two minutes, redrawn with every 2 s sample; click for the infra page
 function renderSideInfra() {
   const s = S.infra;
   if (!s) return;
@@ -653,7 +655,7 @@ function renderSideInfra() {
   $('#si-vals').innerHTML = `<span class="c-cpu">cpu ${s.cpu_pct.toFixed(0)}%</span><span class="c-ram">ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb}G</span>`
     + (gpu ? `<span class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G · util ${gpu.util.toFixed(0)}%${stale ? ` · ${stale}` : ''}</span>` : '');
   $('#nav-infra').title = `${s.sessions?.length || 0} agent sessions using ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB · open the infra page`;
-  drawChart($('#side-chart'), 120, true);
+  drawChart($('#side-chart'), 120 / INFRA_SAMPLE_S, true);
 }
 function renderReport() {
   const M = S.goal, report = M.files['report.md'], el = $('#nt-report');
@@ -1142,7 +1144,7 @@ async function renderGit() {
 // The GPU is read on its own thread; while nvidia-smi hangs the sample carries its last reading, labelled here
 function gpuStale(s) {
   const age = s.gpus_ts ? s.ts - s.gpus_ts : 0;
-  return age > 5 ? `stale ${Math.round(age)}s` : '';
+  return age > GPU_STALE_S ? `stale ${Math.round(age)}s` : '';
 }
 // VRAM a session's `loop run` jobs use, per GPU (sessions themselves see no GPU); `?` where a GPU's jobs cannot
 // be told apart (WSL with several grants)
@@ -1178,7 +1180,7 @@ function renderInfra() {
     <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>role</th><th>CLI</th><th>goal</th><th>memory</th><th>gpu</th><th>grants</th></tr>
       ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)}</td><td>${esc(x.role || '')}</td><td>${esc(cliName(x.agent || ''))}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td><td>${gpuCell(x)}</td><td>${grantCell(x)}</td></tr>`).join('')}</table>`
         : '<div class="empty">No agent sessions running.</div>'}`)}</div></div>`;
-  drawChart($('#infra-chart'), 600);
+  drawChart($('#infra-chart'), 600 / INFRA_SAMPLE_S);
 }
 // Line chart of cpu/ram(/vram) %; `pct` labels the grid lines as 0%…100% (sidebar)
 function drawChart(c, points, pct = false) {
@@ -1249,7 +1251,7 @@ function handle(evt) {
   const inGoal = r.view === 'goal' && evt.ws === r.ws && evt.goal === r.gid;
   switch (evt.type) {
     case 'infra':
-      S.infra = evt.data; S.history.push(evt.data); if (S.history.length > 600) S.history.shift();
+      S.infra = evt.data; S.history.push(evt.data); if (S.history.length > 600 / INFRA_SAMPLE_S) S.history.shift();
       if (r.view === 'infra') renderInfra();
       renderSideInfra();
       break;
@@ -1323,7 +1325,7 @@ function connect() {
   es.onmessage = e => { try { handle(JSON.parse(e.data)); } catch (err) { console.error(err); } };
 }
 window.addEventListener('resize', () => {
-  if (S.route.view === 'infra') drawChart($('#infra-chart'), 600);
+  if (S.route.view === 'infra') drawChart($('#infra-chart'), 600 / INFRA_SAMPLE_S);
   fitTab(); renderSideInfra();
 });
 
