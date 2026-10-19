@@ -3,6 +3,7 @@
 ```bash
 make setup                                   # .venv + editable install with dev extras (pytest, httpx)
 make serve                                   # control plane + web UI on http://127.0.0.1:8765
+make start / stop / logs                     # same, as the agentloop user service (installed by remote/server-finish.sh)
 make test                                    # all tests; a scripted fake agent stands in for the CLIs (no API cost)
 .venv/bin/python -m pytest -q tests/test_units.py::test_guard_rules   # a single test
 .venv/bin/agentloop init <name> [--repo URL] # create a workspace; `agentloop smoke` runs one tiny turn per CLI
@@ -22,9 +23,9 @@ sessions, merges their work and closes the goal; the human steers from the web U
 - **Event loop per goal**: everything for the meta-work (kickoff, worker digests, advice, notes, budget, system messages)
   goes into the goal's `inbox` table. `Engine.meta_loop` drains it into one meta-work turn; items stay in flight
   (`consumed=2`) until the turn ends and go back to the queue on crash or restart.
-- **Advisor**: `loop advise` queues a question in the same inbox; the engine dispatches a new `meta-advisor`
-  session for one turn and returns its final text as `[Advice]`. Consultations share `max_meta_turns` and are
-  read-only like a meta-chat (guard, `loop` API, change report after the turn).
+- **Advisor**: `loop advise` queues a question in the same inbox and at once dispatches a new `meta-advisor`
+  session for one turn, alongside the asking meta-work turn; its final text returns as `[Advice]`. Consultations
+  share `max_meta_turns` and are read-only like a meta-chat (guard, `loop` API, change report after the turn).
 - **Worker turn**: runs in its own worktree on `loop/<goal>/<role>-<sid>`, is snapshot-committed, and its final
   reply becomes a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
   `loop/<goal>/integration`, checked out at `wt/<goal>` (`gitops.py`). The meta-work may also change code

@@ -99,6 +99,7 @@ class Engine:
         self.int_locks: dict[tuple[str, str], threading.Lock] = {}  # one per goal's integration worktree
         self.tasks: set[asyncio.Task] = set()
         self.task_goal: dict[asyncio.Task, tuple[str, str]] = {}  # tasks working on a goal, awaited by deletes
+        self.chat_tasks: dict[str, asyncio.Task] = {}  # meta-chat -> its running turn, awaited by its delete
         self.agent_ops: dict[str, dict] = {}
         # RAM held by `loop run` jobs, the requests still waiting for it, and each running turn's memory record;
         # all of it lives only as long as the turns, so a restart starts empty
@@ -302,6 +303,8 @@ class Engine:
                 self.db.update("turns", {"id": t["id"]}, status="interrupted", ended=time.time())
             self.db.update("sessions", {"id": s["id"]}, status="interrupted", turns=s["turns"] + len(cut))
         self.recover_advice()
+        # A meta-chat is kept only once the human wrote in it; drop chats created empty by older versions
+        self.db.x("DELETE FROM sessions WHERE kind='meta-chat' AND id NOT IN (SELECT session FROM messages)")
         # Integration worktrees used to live at wt/_int-<gid>; nothing runs yet, so they move to wt/<gid> now
         for m in self.db.q("SELECT ws, id FROM goals"):
             try:
@@ -951,6 +954,7 @@ class Engine:
                 if m["status"] != "running":
                     return
                 # Advice requests use the same durable inbox, but are delivered to the advisor, not meta-work.
+                # `loop advise` dispatches its own at once; this picks up those left queued by a restart
                 self.dispatch_advice(ws, gid)
                 if not self.db.one("SELECT id FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0",
                                    ws, gid):
@@ -1295,8 +1299,9 @@ class Engine:
         self.db.push_inbox(ws, gid, "advice_request", {"sid": sess["id"], "question": prompt.strip()})
         self.db.x("UPDATE goals SET meta_turns=meta_turns+1, idle_streak=0 WHERE ws=? AND id=?", ws, gid)
         self.publish("session_status", ws=ws, goal=gid, session=sess["id"], status="queued")
-        self.kick(ws, gid)
-        return f"Consultation {sess['id']} queued; the advice arrives as an [Advice] event."
+        # The advisor only reads the project, so it starts now, alongside the turn that asked
+        self.dispatch_advice(ws, gid)
+        return f"Consultation {sess['id']} started; the advice arrives as an [Advice] event."
 
     def dispatch_advice(self, ws: str, gid: str) -> None:
         for item in self.db.q("SELECT * FROM inbox WHERE ws=? AND goal=? AND kind='advice_request' AND consumed=0 "
@@ -1338,7 +1343,7 @@ class Engine:
                 self.db.update("sessions", {"id": sid}, status="stopped", updated=time.time())
                 self.advice_result(sess, "stopped", "The goal stopped before the consultation started.")
                 return
-            prompt = f"{self.mode_text(sess)}\n\n[Consultation]\n{question}"
+            prompt = f"[Consultation]\n{question}"  # the mode text goes in as system text (build_spec)
             changed = self.watch_project(ws, gid)
             res, _ = await self.run_turn(sess, prompt)
             if hit := changed():
@@ -1661,8 +1666,11 @@ class Engine:
             return [json.loads(x) for x in deque((x for x in fh if x.startswith(keys, 1)), maxlen=limit)]
 
     # ---------- meta-chats ----------
-    def create_meta_chat(self, ws: str, gid: str, overrides: dict | None = None) -> dict:
+    def create_meta_chat(self, ws: str, gid: str, overrides: dict | None = None, text: str = "") -> dict:
+        """Start a meta-chat with its first message, so no chat is stored before the human says something."""
         self.goal_row(ws, gid)
+        if not text.strip():
+            raise AgentError("empty message")
         # Chosen per chat by the human; unset fields fall back to the goal's meta-work settings
         mc = goal_config(self.wsp(ws), gid)["goal"]
         conf = {k: v for k, v in (overrides or {}).items() if k in ("agent", "model", "effort") and v}
@@ -1673,7 +1681,9 @@ class Engine:
         reason = agents.check_agent_conf(conf["agent"], conf, agents.load_models())
         if reason:
             raise AgentError(reason)
-        return self.new_session(ws, gid, "meta-chat", "meta-chat", conf, self.wsp(ws) / "meta")
+        s = self.new_session(ws, gid, "meta-chat", "meta-chat", conf, self.wsp(ws) / "meta")
+        self.meta_chat_send(s["id"], text)
+        return s
 
     def meta_chat_send(self, sid: str, text: str) -> None:
         s = self.db.session(sid)
@@ -1686,12 +1696,30 @@ class Engine:
         self.db.update("sessions", {"id": sid}, status="running")  # claimed before the CLI starts
         self.db.x("INSERT INTO messages(session, ts, role, text) VALUES(?,?,?,?)", sid, time.time(), "user", text)
         self.publish("meta_chat_message", session=sid, ws=s["ws"], goal=s["goal"])
-        self.spawn(self._meta_chat_turn(sid, text), goal=(s["ws"], s["goal"]))
+        task = self.chat_tasks[sid] = self.spawn(self._meta_chat_turn(sid, text), goal=(s["ws"], s["goal"]))
+        task.add_done_callback(lambda t: self.chat_tasks.pop(sid, None) if self.chat_tasks.get(sid) is t else None)
+
+    async def delete_meta_chat(self, sid: str) -> None:
+        """Remove a meta-chat with its messages, turns and logs; a turn still answering is killed first."""
+        s = self.db.session(sid)
+        if not s or s["kind"] != "meta-chat":
+            raise AgentError("unknown meta-chat session")
+        await self.runner.kill(sid, stopped=True)
+        # The killed turn still records its answer; wait for it so no row outlives the delete
+        if task := self.chat_tasks.get(sid):
+            await asyncio.wait([task], timeout=60)
+            if not task.done():
+                raise AgentError("the meta-chat is still finishing its turn; try the delete again shortly")
+        for table, col in (("messages", "session"), ("turns", "session"), ("sessions", "id")):
+            self.db.x(f"DELETE FROM {table} WHERE {col}=?", sid)
+        for path in self.logs(s["ws"], sid):
+            path.unlink(missing_ok=True)
+        self.publish("session_deleted", ws=s["ws"], goal=s["goal"], session=sid)
 
     async def _meta_chat_turn(self, sid: str, text: str) -> None:
         s = self.db.session(sid)
         p = self.wsp(s["ws"])
-        prompt = text if s["turns"] else f"{self.mode_text(s)}\n\nHuman: {text}"
+        prompt = text  # the mode text goes in as system text every turn (build_spec)
         changed = self.watch_project(s["ws"], s["goal"])
         try:
             res, n = await self.run_turn(s, prompt)

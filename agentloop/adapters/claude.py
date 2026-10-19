@@ -65,7 +65,10 @@ class ClaudeAdapter(Adapter):
             out.append({"type": "init", "vendor_id": st.vendor_id, "model": o.get("model")})
         elif kind == "rate_limit_event":
             # The plan's usage windows, utilization as a fraction: five_hour, seven_day and per-model ones
-            windows = (o.get("rate_limit_info") or {}).get("unifiedWindows") or {}
+            info = o.get("rate_limit_info") or {}
+            if info.get("status") == "rejected" and info.get("resetsAt"):
+                st.limit_reset = float(info["resetsAt"])
+            windows = info.get("unifiedWindows") or {}
             quota = []
             for key, w in windows.items():
                 if isinstance(w, dict) and w.get("utilization") is not None:
@@ -121,5 +124,8 @@ class ClaudeAdapter(Adapter):
             st.is_error = bool(o.get("is_error")) or o.get("subtype") not in (None, "success")
             if st.is_error:
                 st.error = str(o.get("subtype") or "error")
+                # The refusal's wording changes between CLI versions; its error code and reset time do not
+                if o.get("api_error") == "usage_limit_reached":
+                    st.error = "usage limit reached" + (f"|{int(st.limit_reset)}" if st.limit_reset else "")
                 out.append({"type": "error", "text": f"{st.error}: {short(st.final or '', 300)}"})
         return out

@@ -234,11 +234,12 @@ table.t { width: 100%; border-collapse: collapse; }
 .planbar i { flex: 1; background: var(--muted); } .planbar i.done { background: var(--accent); }
 .c-cpu { color: var(--accent); } .c-ram { color: var(--reply); } .c-gpu { color: var(--warn); }
 .ov-main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 12px; }
-.layer.col { margin-top: 0; padding: 12px 8px 8px; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.layer.col { margin-top: 0; padding: 12px 8px 8px; border-color: var(--border-2); display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 /* smaller pane titles in the overview leave the height to the feeds */
 .layer.col > .lt { font-size: 11px; top: -8px; line-height: 14px; }
-.box.mw > .lt, .box.chat > .lt { font-size: 10.5px; top: -8px; line-height: 14px; }
-.box.mw, .box.chat { display: flex; flex-direction: column; min-height: 0; padding: 10px 8px 6px; }
+.box.mw > .lt, .box.chat > .lt { font-size: 10.5px; top: -8px; line-height: 14px; background: linear-gradient(var(--bg) 50%, var(--panel) 50%); }
+/* overview panes: a stronger frame on a raised background sets each one apart from its column */
+.box.mw, .box.chat { display: flex; flex-direction: column; min-height: 0; padding: 10px 8px 6px; border-color: var(--border-2); background: var(--panel); }
 .box.mw { flex: 3 1 0; } .box.chat { flex: 2 1 0; }
 .box.chat.folded { flex: none; min-height: 0; }
 .box.chat.folded > :not(.lt):not(.chat-bar) { display: none; }
@@ -284,12 +285,11 @@ table.t { width: 100%; border-collapse: collapse; }
 .fr.reply { border-color: color-mix(in srgb, var(--reply) 55%, transparent); }
 .fr.reply > .fl { color: var(--reply); }
 .fr pre { max-height: 320px; overflow: auto; }
-.feed .fr.prompt pre { max-height: 110px; }
 .fe { color: var(--faint); font-size: 12px; margin: 2px 0; }
 .fe.err { color: var(--bad); }
 .fe.tools::before { content: '· '; }
 /* workers share the column: running ones get twice the room, the list scrolls once they hit their minimum */
-.worker { display: flex; flex-direction: column; border: 1px solid var(--border); flex: 1 0 150px; min-height: 0; }
+.worker { display: flex; flex-direction: column; border: 1px solid var(--border-2); background: var(--panel); flex: 1 0 150px; min-height: 0; }
 .worker.running { flex: 2 0 300px; }
 .worker:not(.open) { flex: none; }
 .worker:not(.open) > .feed-wrap { display: none; }
@@ -302,7 +302,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .worker .wh .role, .worker .wh .wmeta { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .worker .wh > :not(.role):not(.wmeta):not(.spacer) { flex: none; }
 .worker .feed-wrap > .feed { padding: 0 8px; }
-.worker.running { border-color: color-mix(in srgb, var(--run) 50%, var(--border)); }
+.worker.running { border-color: color-mix(in srgb, var(--run) 60%, var(--border-2)); }
 .chat-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
 .chat-bar select { width: auto; flex: 1; }
 .composer { display: flex; gap: 6px; margin-top: 6px; }

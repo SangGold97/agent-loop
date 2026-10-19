@@ -102,6 +102,17 @@ def test_agy_parse_stream():
     assert not st.is_error
 
 
+def test_claude_usage_limit_reads_the_error_code_and_reset():
+    # As Claude Code 2.1 refuses a turn: a rejected rate-limit event, then an error result with its code
+    st, reset = ParseState(), 1792404000
+    ad = ClaudeAdapter()
+    ad.parse({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": reset,
+                                                              "rateLimitType": "five_hour"}}, st)
+    ad.parse({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,
+              "api_error": "usage_limit_reached", "result": "Some new wording · try later"}, st)
+    assert st.is_error and usage_limit_until(f"{st.error}\n{st.final}") == float(reset)
+
+
 def test_agy_failed_result():
     st = ParseState()
     out = AgyAdapter().parse({"event": "result", "result": {"conversation_id": "", "status": "ERROR", "response": "",
@@ -520,6 +531,11 @@ def test_claude_settings_exclude_instructions_above_the_agent(tmp_path):
         assert not any(x.startswith((str(ws / "meta"), str(ws / "wt" / "w-1"))) for x in doc["claudeMdExcludes"])
     assert str(ws / "wt" / "AGENTS.md") in worker["claudeMdExcludes"]
     assert workspace.claude_settings(ws, "worker").read_text().startswith("{")
+    # No MCP server unless loop.yaml allows it, claude.ai connectors included
+    assert meta["allowedMcpServers"] == []
+    (ws / "loop.yaml").write_text("mcp_servers: [https://pubmed.mcp.claude.com/mcp]\n")
+    assert workspace.claude_settings_doc(ws, "meta")["allowedMcpServers"] == [
+        {"serverUrl": "https://pubmed.mcp.claude.com/mcp"}]
 
 
 def test_sync_harness_keeps_human_edits(tmp_path, monkeypatch):
@@ -641,4 +657,6 @@ def test_usage_limit_until_reads_the_reset():
     assert time.localtime(at)[3:5] == (21, 45) and at > now
     morning = usage_limit_until("You've hit your limit · resets 3am (Asia/Saigon)", now)
     assert time.localtime(morning)[2:5] == (7, 3, 0)
+    assert time.localtime(usage_limit_until("You've hit your session limit · resets 5pm (Asia/Bangkok)", now))[2:5] \
+        == (7, 17, 0)
     assert usage_limit_until("usage limit reached", now) == now + 3600

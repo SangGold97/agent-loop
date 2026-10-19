@@ -19,6 +19,7 @@ Human ──► UI (goals, live sessions, notes, meta-chat, infra)
 ```bash
 make setup          # venv + editable install (needs git, and logged-in `claude` / `codex` / `agy` CLIs)
 make serve          # http://127.0.0.1:8765
+make start          # same, as the background service (make stop / make logs); needs remote/server-finish.sh
 make test           # unit + end-to-end tests (scripted fake agent, no API cost)
 ```
 
@@ -33,8 +34,8 @@ To run it on another machine and use the UI from this one, see [remote/README.md
 | **Workspace** (`workspaces/<name>/`, own git) | One project: `repo/` (the project, cloned or empty), `meta/` + `worker/` harnesses, `goals/`, `data/`, `wt/` worktrees, and `.venv/`, the Python virtualenv every session of the workspace runs in. Every change is committed with its actor (`human`, `meta-work(<sid>)`, `control-plane`, `meta-chat(<sid>)`). |
 | **Goal** (`goals/<slug>/`) | `spec.md`, `goal.md`, `goal.yaml` (human-owned), `plan.md` (meta-work: the current state, including what was ruled out), `notes.md`, `report.md`, `runs/<worker>/` evidence. The slug of the title is the goal id, also used in its branches `loop/<slug>/*` and its integration worktree `wt/<slug>/`, so a title whose slug is already taken in the workspace is refused. |
 | **Meta-work** | One meta session per goal, driven by events (kickoff, worker finished, note, goal changed, budget). It does simple work itself in the integration worktree, where the platform commits its changes as `meta-work(<sid>)` (before a spawn, merge or `loop done` and after each turn), and delegates the rest to workers. |
-| **Meta-chat** | Prompt-by-prompt chat bound to a goal (agent/model/effort chosen per chat); runs commands and tools freely but does not change project code, and steers the goal only through notes you approve. |
-| **Meta-advisor** | Consulted through `loop advise`, with agent/model/effort from `goal.yaml → meta_advisor`. Each question starts a new read-only session for one turn. Its final text returns to the meta-work inbox as `[Advice]`; the Advisor button beside META-WORK opens its session log, without a chat composer. |
+| **Meta-chat** | Prompt-by-prompt chat bound to a goal (agent/model/effort chosen per chat); runs commands and tools freely but does not change project code, and steers the goal only through notes you approve. A chat is stored once you send its first message and can be deleted from its bar. |
+| **Meta-advisor** | Consulted through `loop advise`, with agent/model/effort from `goal.yaml → meta_advisor`. Each question starts a new read-only session for one turn right away, while the meta-work turn that asked goes on. Its final text returns to the meta-work inbox as `[Advice]`; the Advisor button beside META-WORK opens its session log, without a chat composer. |
 | **Worker** | A Claude Code, Codex or agy session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<role>-<sid>`; accepted work is merged into `loop/<goal>/integration`. It receives the meta-work's prompt as is and a generic `worker/AGENTS.md`, nothing about the platform; `.venv/` and `.artifacts/` stay out of git, and `.artifacts/` is kept in `runs/<sid>/artifacts/`. |
 | **Digest** | What a finished worker turn sends to the meta-work: a line naming the worker, role and turn, then its final reply as is (kept in `runs/<sid>/t<n>.out.md`). Its changes and the commands it ran are pulled on demand, with git and `loop show W --log`. |
 | **goal.md** | Success criteria, free text. Lines `- verify: \`cmd\`` are run on the committed integration branch before a `success` close (a run that edits tracked files is rejected and its edits and new files are undone); everything else is judged by the meta-work. |
@@ -45,6 +46,7 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   workers confined to their worktree and `data/`, meta-work project changes confined to its goal's integration
   worktree, none from meta-chats, extra regexes from `loop.yaml → guard`. A meta turn that still changes `repo/`
   (or a meta-chat turn that changes the integration worktree) raises an alert.
+- Claude sessions connect only the MCP servers in `loop.yaml → mcp_servers` (URLs; default none).
 - Git hooks in the project repo block agent commits to protected branches and any agent push.
 - The platform never touches the base branch. Accepting a goal removes its worktrees and keeps
   `loop/<goal>/integration`; **push** on the goal page then pushes that branch to `origin` and opens a pull request

@@ -171,7 +171,7 @@ def create_app(api_url: str) -> FastAPI:
         elif action == "notes":
             return {"id": engine.add_note(ws, gid, b.get("text", ""), mode=b.get("mode", "queue"))}
         elif action == "meta-chats":
-            s = engine.create_meta_chat(ws, gid, b)
+            s = engine.create_meta_chat(ws, gid, b, b.get("text", ""))
             return {"id": s["id"]}
         else:
             raise HTTPException(404, "unknown action")
@@ -218,6 +218,11 @@ def create_app(api_url: str) -> FastAPI:
     @app.post("/api/meta-chats/{sid}/messages")
     async def meta_chat_send(sid: str, req: Request):
         engine.meta_chat_send(sid, (await body(req)).get("text", ""))
+        return {"ok": True}
+
+    @app.delete("/api/meta-chats/{sid}")
+    async def meta_chat_delete(sid: str):
+        await engine.delete_meta_chat(sid)
         return {"ok": True}
 
     @app.get("/api/runs/{ws}/{gid}/{sid}/{name}")

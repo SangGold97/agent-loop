@@ -47,7 +47,7 @@ def main():
             emit({"type": "result", "subtype": "error", "is_error": True, "result": "advisor failed on purpose"})
             return
         if "ADVICE_WRITE" in _spec(gdir):  # a shell write the guard does not see; the platform must report it
-            (wt / "advisor.txt").write_text("x\n")
+            (Path(os.environ["LOOP_WS"]) / "repo" / "advisor.txt").write_text("x\n")
         for cmd in ("advise", "note", "spawn", "send", "merge", "done", "stop"):
             # Hit the API directly, so CLI argument parsing cannot mask an authorization failure.
             from agentloop.cli import call

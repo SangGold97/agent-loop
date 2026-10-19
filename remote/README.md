@@ -40,8 +40,8 @@ user name and the same repo path as the client, because worktrees, hooks and ven
 ## Daily use
 
 Nothing starts by itself on either side:
-- **Server**: `systemctl --user start agentloop` (or `make serve`) when the platform should run, and `stop` it
-  when it should not; never both at once. Keep the server on the tailnet: after a `tailscale down` there, only
+- **Server**: `make start` (or `make serve`) when the platform should run, and `make stop` when it should not
+  (`make logs` follows the log); never both at once. Keep the server on the tailnet: after a `tailscale down` there, only
   someone at the server can bring it back.
 - **Client**: `sudo tailscale up` (if you left the tailnet), then `systemctl --user start agentloop-tunnel` and open
   http://127.0.0.1:18765. `systemctl --user stop agentloop-tunnel` closes the tunnel, and `sudo tailscale down`

@@ -70,13 +70,19 @@ def test_full_goal(server):
     assert subprocess.run(["git", "log", "-1", "--format=%an"], cwd=ws, capture_output=True,
                           text=True).stdout.strip() == "human"
 
-    # Meta-chat proposes a note; the human approves it
-    adv = client.post(f"/api/goals/demo/{gid}/meta-chats", json={}).json()["id"]
-    client.post(f"/api/meta-chats/{adv}/messages", json={"text": "How is it going?"})
+    # Meta-chat proposes a note; the human approves it. A chat is stored only with its first message
+    assert client.post(f"/api/goals/demo/{gid}/meta-chats", json={"text": " "}).status_code == 400
+    adv = client.post(f"/api/goals/demo/{gid}/meta-chats", json={"text": "How is it going?"}).json()["id"]
     msgs = wait_for(lambda: len(m := client.get(f"/api/meta-chats/{adv}/messages").json()["messages"]) == 2 and m)
     assert "Proposed note" in msgs[1]["text"]
     pending = [n for n in client.get(f"/api/goals/demo/{gid}").json()["notes"] if n["status"] == "pending"]
     assert pending and client.post(f"/api/notes/{pending[0]['id']}/approve", json={"mode": "queue"}).status_code == 200
+    assert "Consider adding a test" in (ws / "goals" / gid / "notes.md").read_text()
+    # Deleting the chat drops its session, messages and logs; the note it proposed stays
+    assert client.delete(f"/api/meta-chats/{adv}").status_code == 200
+    assert not any(s["id"] == adv for s in client.get(f"/api/goals/demo/{gid}").json()["sessions"])
+    assert not engine.db.q("SELECT id FROM messages WHERE session=?", adv)
+    assert not any(p.exists() for p in engine.logs("demo", adv))
     assert "Consider adding a test" in (ws / "goals" / gid / "notes.md").read_text()
 
     # Accept: worktrees removed, integration branch kept
@@ -449,8 +455,7 @@ def test_meta_chat_change_to_project_is_reported(server, monkeypatch):
     alerts, publish = [], engine.publish
     monkeypatch.setattr(engine, "publish", lambda kind, **d: (alerts.append(d) if kind == "alert" else None,
                                                                publish(kind, **d)))
-    chat = client.post(f"/api/goals/chatw/{gid}/meta-chats", json={}).json()["id"]
-    client.post(f"/api/meta-chats/{chat}/messages", json={"text": "CHATWRITE please"})
+    client.post(f"/api/goals/chatw/{gid}/meta-chats", json={"text": "CHATWRITE please"})
     wait_for(lambda: any("integration worktree" in a.get("text", "") for a in alerts))
 
 

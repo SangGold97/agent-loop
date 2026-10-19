@@ -33,6 +33,7 @@ DEFAULTS: dict = {
               "worker_memory_max_gb": None, "vram_reserve_gb": 1},
     "turn_timeout_min": 180,
     "guard": {"deny_patterns": []},
+    "mcp_servers": [],  # MCP server URLs Claude sessions may use; all others blocked
 }
 
 # Goal-level keys that override workspace defaults

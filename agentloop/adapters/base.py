@@ -48,6 +48,7 @@ class ParseState:
     steps: dict = field(default_factory=dict)                # per-step scratch of adapters that stream steps
     # The plan's usage-limit windows as the CLI last reported them: {name, used (0-1), resets_at (epoch)}
     quota: list[dict] | None = None
+    limit_reset: float | None = None  # when a usage limit that refused this turn resets, as the CLI reported it
 
 
 def epoch(stamp) -> float:
@@ -91,9 +92,9 @@ class Adapter:
 
 
 # Plan/quota exhaustion as the CLIs word it ("You've hit your usage limit ... try again at 9:45 PM",
-# "Claude AI usage limit reached|<epoch>", "You've hit your limit · resets 9pm", "You have exhausted your quota on
-# this model."); a plain 429 rate limit is not one
-USAGE_LIMIT_RE = re.compile(r"usage limit|hit your (?:usage )?limit|limit reached|exhausted your quota", re.I)
+# "Claude AI usage limit reached|<epoch>", "You've hit your limit · resets 9pm", "You've hit your session limit ·
+# resets 5pm", "You have exhausted your quota on this model."); a plain 429 rate limit is not one
+USAGE_LIMIT_RE = re.compile(r"usage limit|hit your (?:usage |session )?limit|limit reached|exhausted your quota", re.I)
 
 
 def usage_limit_until(text: str, now: float | None = None) -> float | None:

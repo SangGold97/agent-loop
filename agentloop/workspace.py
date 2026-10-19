@@ -342,16 +342,18 @@ CLAUDE_MEMORY_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLA
 
 
 def claude_settings_doc(ws: Path, layer: str) -> dict:
-    """The layer's hooks.json plus claudeMdExcludes for every directory above the agent's own cwd.
+    """The layer's hooks.json, claudeMdExcludes for every directory above the agent's own cwd, and the MCP allowlist.
 
     Claude Code walks up to / for CLAUDE.md/AGENTS.md, and workspaces usually live inside the platform repo,
     so without this an agent would read the platform's developer docs. Only meta/ and the worktree count:
-    the workspace root, wt/ and all their parents are excluded."""
+    the workspace root, wt/ and all their parents are excluded. Each resumed turn re-adds every connected MCP
+    server's instructions to the conversation, so only loop.yaml's mcp_servers connect."""
     doc = json.loads((ws / layer / "hooks.json").read_text())
     dirs = {ws / "wt"} if layer == "worker" else set()
     for base in {ws.absolute(), ws.resolve()}:
         dirs |= {base, *base.parents}
     doc["claudeMdExcludes"] = sorted(str(d / name) for d in dirs for name in CLAUDE_MEMORY_NAMES)
+    doc["allowedMcpServers"] = [{"serverUrl": url} for url in workspace_config(ws)["mcp_servers"] or []]
     return doc
 
 

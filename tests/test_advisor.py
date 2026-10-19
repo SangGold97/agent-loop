@@ -41,7 +41,9 @@ def test_advice_round_trip_is_fresh_readonly_and_accounted(server):
         assert engine.build_spec(s, "question", 1).resume_id is None
         assert client.post(f"/api/meta-chats/{s['id']}/messages", json={"text": "hello"}).status_code == 400
         events = client.get(f"/api/sessions/{s['id']}/events").json()["events"]
-        assert any("MODE: META-ADVISOR" in e.get("prompt", "") for e in events)
+        # The mode text reaches the CLI once, as system text, not again in the message
+        assert "MODE: META-ADVISOR" in engine.build_spec(s, "question", 1).system_text
+        assert not any("MODE:" in e.get("prompt", "") for e in events)
     inbox = engine.db.q("SELECT * FROM inbox WHERE ws='advice-full' AND kind IN ('advice', 'advice_request')")
     assert len(inbox) == 4 and all(i["consumed"] == 1 for i in inbox)
     assert all("[Advice]" in json.loads(i["payload"])["text"] for i in inbox if i["kind"] == "advice")
@@ -108,7 +110,8 @@ def test_advisor_quota_is_refunded_and_reported(server, monkeypatch):
 
 
 def test_advisor_change_to_project_is_reported(server, monkeypatch):
-    # Like a meta-chat, the advisor only reads the project; a write the guard missed is reported, not reverted
+    # Like a meta-chat, the advisor only reads the project; a write the guard missed is reported, not reverted.
+    # It runs alongside the meta-work turn that asked, so only repo/ is watched (see Engine.watch_project)
     client, engine = server
     gid = advice_goal(server, "advice-write", spec="ADVICE_WRITE")
     alerts, publish = [], engine.publish
@@ -116,8 +119,8 @@ def test_advisor_change_to_project_is_reported(server, monkeypatch):
                                                                publish(kind, **d)))
     client.post(f"/api/goals/advice-write/{gid}/start")
     finished(client, "advice-write", gid)
-    assert [a for a in alerts if a.get("text", "").startswith("Advisor ") and "integration worktree" in a["text"]]
-    assert (engine.wsp("advice-write") / "wt" / gid / "advisor.txt").exists()
+    assert [a for a in alerts if a.get("text", "").startswith("Advisor ") and "repo/" in a["text"]]
+    assert (engine.wsp("advice-write") / "repo" / "advisor.txt").exists()
 
 
 def test_advisor_guard_and_configuration(tmp_path, monkeypatch):
@@ -142,7 +145,7 @@ def test_advisor_recovery_delivers_saved_results_once_and_keeps_queued_requests(
     meta = engine.new_session("advice-recovery", gid, "meta-work", "meta-work", conf,
                               engine.wsp("advice-recovery") / "meta")
     engine.set_goal("advice-recovery", gid, status="running", meta_work=meta["id"])
-    monkeypatch.setattr(engine, "kick", lambda *_: None)
+    monkeypatch.setattr(engine, "dispatch_advice", lambda *_: None)  # as if the server restarted before dispatch
     for question in ("queued question", "interrupted question", "completed question"):
         engine.advise(meta, question)
     queued, interrupted, complete = engine.advisors("advice-recovery", gid)

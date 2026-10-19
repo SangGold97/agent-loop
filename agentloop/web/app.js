@@ -4,7 +4,7 @@
 // Match SAMPLE_S and GPU_STALE_S in infra.py
 const INFRA_SAMPLE_S = 2, GPU_STALE_S = 25;
 const S = { workspaces: [], route: {}, goal: null, feeds: {}, infra: null, history: [], agents: null, models: {},
-  chat: { sid: null, messages: [], busy: false, liveEvs: [], creating: false }, edit: {}, cfgDirty: false,
+  chat: { sid: null, draft: null, messages: [], busy: false, liveEvs: [], creating: false }, edit: {}, cfgDirty: false,
   partial: {}, modal: null, open: {}, more: {}, chatOut: false };
 const main = document.getElementById('main');
 const AGENTS = ['claude', 'codex', 'agy'];
@@ -339,7 +339,7 @@ async function render() {
   S.route = parseHash();
   if (prev.gid !== S.route.gid) {
     S.feeds = {}; S.edit = {}; S.cfgDirty = false;
-    S.chat = { sid: null, messages: [], busy: false, live: '', creating: false };
+    S.chat = { sid: null, draft: null, messages: [], busy: false, liveEvs: [], creating: false };
   }
   renderSidebar();
   try {
@@ -719,7 +719,7 @@ const cliName = a => a === 'claude' ? 'claude code' : a;
 const firstLines = (s, n) => String(s || '').split('\n').filter(l => l.trim()).slice(0, n).join('\n').slice(0, 400);
 function tuiEvent(e, who) {
   switch (e.type) {
-    case 'turn': return `<div class="fr prompt"><div class="fl"><span>▶ ${esc(who.prompt)}</span><span class="faint">turn ${e.n} · ${hhmm(e.ts)}</span></div><pre>${esc(e.prompt)}</pre></div>`;
+    case 'turn': return `<div class="fr prompt"><div class="fl"><span>▶ ${esc(who.prompt)}</span><span class="faint">turn ${e.n} · ${hhmm(e.ts)}</span></div><div class="md">${md(e.prompt)}</div></div>`;
     case 'text': return `<div class="fr reply"><div class="fl">◀ ${esc(e.sub ? 'subagent' : who.reply)}</div><div class="md">${md(e.text)}</div></div>`;
     case 'tool': return `<div class="tl"><span class="dotc">⏺</span><b>${esc(e.name)}</b> ${esc(e.detail || '')}</div>`;
     case 'tool_result': return e.text ? `<div class="tres ${e.error ? 'err' : ''}">⎿ ${esc(firstLines(e.text, 3))}</div>` : '';
@@ -755,14 +755,11 @@ function foldTurns(evs, sid) {
   else out.push(...evs.slice(start));
   return { evs: out, done };
 }
-// Which sessions a pane shows, and how prompts/replies are labelled; the log window keeps every step (the advisor's
-// excepted)
+// Which sessions a pane shows, and how prompts/replies are labelled; the log window folds finished turns like the panes
 function feedSource(key) {
   if (key === 'modal') {
-    // The advisor has no pane of its own, so its window folds finished turns like the panes do
     const s = S.goal?.sessions.find(x => x.id === S.modal.sid) || {};
-    const { evs, done } = s.kind === 'meta-advisor' ? foldTurns(S.modal.evs, s.id) : { evs: S.modal.evs, done: 0 };
-    return { evs, done, sids: [S.modal.sid], sig: S.modal.sid, who: s.kind === 'worker'
+    return { ...foldTurns(S.modal.evs, S.modal.sid), sids: [S.modal.sid], sig: S.modal.sid, who: s.kind === 'worker'
       ? { prompt: 'meta-work → worker', reply: cliName(s.agent) } : { prompt: `→ ${s.kind || 'session'}`, reply: s.kind || 'session' } };
   }
   if (key === 'meta-work') {
@@ -776,8 +773,6 @@ function feedSource(key) {
 }
 const liveKeys = () => ['meta-work', ...S.goal.sessions.filter(s => s.kind === 'worker').map(s => s.id), ...(S.modal ? ['modal'] : [])];
 const stick = el => { if (!el.dataset.free) el.scrollTop = el.scrollHeight; };
-// Long prompts scroll inside their frame; show their last lines first
-const bottomPrompts = root => $$('.fr.prompt pre', root).forEach(p => { if (!p.dataset.read) p.scrollTop = p.scrollHeight; });
 // Coalesce bursts of streamed events into one paint per frame
 const queued = new Map();
 function schedule(kind, key, fn) {
@@ -798,7 +793,6 @@ function renderFeed(key) {
   }
   const html = evs.slice(from).map(e => tuiEvent(e, who)).join('');
   if (html) { $('.empty', fs)?.remove(); fs.insertAdjacentHTML('beforeend', html); }
-  bottomPrompts(fs);
   while (fs.childElementCount > FEED_TAIL) fs.firstElementChild.remove();
   if (!fs.childElementCount) fs.innerHTML = '<div class="empty">no activity yet</div>';
   el.dataset.n = evs.length;
@@ -818,7 +812,6 @@ function renderLive(key) {
 // Scrolling up pauses following; the button (or scrolling back down) resumes it
 document.addEventListener('scroll', e => {
   const el = e.target;
-  if (el.matches?.('.fr.prompt pre')) { el.dataset.read = el.scrollHeight - el.scrollTop - el.clientHeight > 4 ? '1' : ''; return; }
   if (!el.classList?.contains('feed')) return;
   const free = el.scrollHeight - el.scrollTop - el.clientHeight > 40;
   el.dataset.free = free ? '1' : '';
@@ -902,17 +895,22 @@ function renderChatBar() {
   const bar = $('#chat-bar');
   if (!bar) return;
   const chats = S.goal.sessions.filter(s => s.kind === 'meta-chat');
-  if (!S.chat.sid && chats.length) S.chat.sid = chats[chats.length - 1].id;
+  const draft = S.chat.draft;
+  if (!S.chat.sid && !draft && chats.length) S.chat.sid = chats[chats.length - 1].id;
   const cur = chats.find(c => c.id === S.chat.sid);
   // The expanded window shows the whole chat, so only the overview pane folds
   const fold = S.chatOut ? '' : `<button class="icon-btn fold" id="chat-fold" title="${chatFold ? 'Show' : 'Hide'} the chat">${chatFold ? '▸' : '▾'}</button>`;
-  bar.innerHTML = `${fold}<select id="chat-sel" ${chats.length ? '' : 'disabled'}>${chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
-      chat ${i + 1} · ${agentLine(c, c.context)}</option>`).reverse().join('') || '<option>no chats yet</option>'}</select>
+  const options = (draft ? `<option value="" ${S.chat.sid ? '' : 'selected'}>new chat · ${agentLine(draft)} · not sent yet</option>` : '')
+    + chats.map((c, i) => `<option value="${c.id}" ${c.id === S.chat.sid ? 'selected' : ''}>
+      chat ${i + 1} · ${agentLine(c, c.context)}</option>`).reverse().join('');
+  bar.innerHTML = `${fold}<select id="chat-sel" ${options ? '' : 'disabled'}>${options || '<option>no chats yet</option>'}</select>
     ${cur ? agentPill(simpleStatus(cur)) : ''}<button class="btn small" id="chat-new-btn">+ new chat</button>
+    ${cur || draft ? `<button class="btn small del" id="chat-del" title="${cur ? 'Delete this chat with its messages' : 'Discard this new chat'}">delete</button>` : ''}
     <button class="btn small" id="chat-expand">${S.chatOut ? 'collapse' : 'expand'}</button>`;
   $('#chat-expand').onclick = () => S.chatOut ? closeModal() : expandChat();
   bar.onclick = e => { if (e.target === bar || e.target.id === 'chat-fold') toggleChat(); };
-  $('#chat-sel').onchange = e => { S.chat.sid = e.target.value; S.chat.liveEvs = []; loadChatMessages(); };
+  $('#chat-sel').onchange = e => { S.chat.sid = e.target.value || null; S.chat.liveEvs = []; loadChatMessages(); };
+  if ($('#chat-del')) $('#chat-del').onclick = deleteChat;
   $('#chat-new-btn').onclick = () => { S.chat.creating = !S.chat.creating; if (chatFold) toggleChat(false); renderNewChat(); };
   renderNewChat();
 }
@@ -925,12 +923,21 @@ function renderNewChat() {
       <button class="btn small" id="nc-cancel">cancel</button><button class="btn small primary" id="nc-ok">create</button></div></div>`;
   wireAgentRows(el);
   $('#nc-cancel').onclick = () => { S.chat.creating = false; renderNewChat(); };
-  $('#nc-ok').onclick = () => act(async () => {
-    const { ws, gid } = S.route;
-    const r = await api(`/api/goals/${ws}/${gid}/meta-chats`, { body: readAgentRow($('.agent-row[data-key]', el)) });
-    S.chat = { ...S.chat, sid: r.id, creating: false };
-    await loadGoal(); renderChatBar(); await loadChatMessages();
-  }, 'Meta-chat created');
+  // Nothing is stored until the first message: the new chat stays a draft in this page until then
+  $('#nc-ok').onclick = () => {
+    S.chat = { ...S.chat, draft: readAgentRow($('.agent-row[data-key]', el)), sid: null, creating: false, liveEvs: [] };
+    renderChatBar(); loadChatMessages(); $('#chat-input')?.focus();
+  };
+}
+async function deleteChat() {
+  if (!S.chat.sid) { S.chat.draft = null; renderChatBar(); return loadChatMessages(); }  // a draft has nothing stored
+  if (!window.confirm('Delete this meta-chat? Its messages and logs are deleted for good; notes it proposed stay.')) return;
+  await act(async () => { await api(`/api/meta-chats/${S.chat.sid}`, { method: 'DELETE' }); await chatGone(); }, 'Meta-chat deleted');
+}
+// The shown chat was deleted (here or in another tab): fall back to the newest one left
+async function chatGone() {
+  S.chat.sid = null; S.chat.liveEvs = [];
+  await loadGoal(); renderChatBar(); await loadChatMessages();
 }
 // META-CHAT expand: the chat pane itself (feed, live turn, composer) moves into a large window
 function expandChat() {
@@ -944,17 +951,21 @@ function expandChat() {
 async function loadChatMessages() {
   const feed = $('#chat-feed');
   if (!feed) return;
-  if (!S.chat.sid) { feed.innerHTML = '<div class="empty">Create a chat to talk with a meta-agent about this goal.</div>'; setComposer(false); return; }
+  if (!S.chat.sid) {
+    S.chat.messages = []; S.chat.busy = false;
+    feed.innerHTML = S.chat.draft ? '<div class="empty">Ask anything, e.g. what is blocking the goal right now?</div>'
+      : '<div class="empty">Create a chat to talk with a meta-agent about this goal.</div>';
+    return setComposer(true);
+  }
   const r = await api(`/api/meta-chats/${S.chat.sid}/messages`);
   S.chat.messages = r.messages; S.chat.busy = r.busy;
   if (!r.busy) S.chat.liveEvs = [];
   feed.innerHTML = (r.messages.map((m, i) => m.role === 'user'
-    ? `<div class="fr prompt"><div class="fl"><span>▶ human</span><span class="faint">${hhmm(m.ts)}</span></div><pre>${esc(m.text)}</pre></div>`
+    ? `<div class="fr prompt"><div class="fl"><span>▶ human</span><span class="faint">${hhmm(m.ts)}</span></div><div class="md">${md(m.text)}</div></div>`
     : `<div class="fr reply"><div class="fl"><span>◀ meta-chat</span><span class="spacer"></span><button class="btn small" data-save-note="${i}">save as note</button></div>
         <div class="md">${md(m.text)}</div></div>`).join('')
     || '<div class="empty">Ask anything, e.g. what is blocking the goal right now?</div>') + '<div id="chat-live"></div>';
   feed.dataset.free = '';
-  bottomPrompts(feed);
   paintChatLive();
   setComposer(!r.busy);
 }
@@ -970,14 +981,21 @@ function paintChatLive() {
 }
 function setComposer(enabled) {
   if (!$('#chat-send')) return;
-  $('#chat-send').disabled = !enabled || !S.chat.sid;
-  $('#chat-input').disabled = !S.chat.sid;
+  const chat = S.chat.sid || S.chat.draft;
+  $('#chat-send').disabled = !enabled || !chat;
+  $('#chat-input').disabled = !chat;
 }
 async function sendChat() {
   const text = $('#chat-input').value.trim();
-  if (!text || !S.chat.sid) return;
+  if (!text || !(S.chat.sid || S.chat.draft)) return;
+  const { ws, gid } = S.route;
   await act(async () => {
-    await api(`/api/meta-chats/${S.chat.sid}/messages`, { body: { text } });
+    if (S.chat.sid) await api(`/api/meta-chats/${S.chat.sid}/messages`, { body: { text } });
+    else {  // a draft is stored together with its first message
+      const r = await api(`/api/goals/${ws}/${gid}/meta-chats`, { body: { ...S.chat.draft, text } });
+      S.chat.sid = r.id; S.chat.draft = null;
+      await loadGoal(); renderChatBar();
+    }
     $('#chat-input').value = ''; S.chat.liveEvs = [];
     await loadChatMessages();
   });
@@ -1029,7 +1047,7 @@ function renderWorkers() {
     const row = $(`#w-${w.id}`), was = row.classList.contains('open');
     row.className = workerClass(w);
     $('.wh', row).innerHTML = workerHead(w);
-    if (!was && workerOpen(w)) { renderLive(w.id); bottomPrompts(row); }  // just opened: jump to the live end
+    if (!was && workerOpen(w)) renderLive(w.id);  // just opened: jump to the live end
   });
 }
 function workerClass(w) {
@@ -1044,7 +1062,7 @@ function toggleWorker(sid) {
   renderWorkers();
 }
 
-// log window: one session, every event, streaming live while it runs
+// log window: one whole session, finished turns folded, the running turn streaming every step
 async function sessionModal(sid) {
   const s = S.goal.sessions.find(x => x.id === sid) || { id: sid };
   const evs = await api(`/api/sessions/${sid}/events?limit=3000`);
@@ -1282,6 +1300,10 @@ function handle(evt) {
       if (e.type === 'turn' || e.type === 'turn_end') scheduleRefresh();
       break;
     }
+    case 'session_deleted':
+      if (inGoal && evt.session === S.chat.sid) chatGone();
+      else if (inGoal) scheduleRefresh();
+      break;
     case 'meta_chat_message':
       if (inGoal && evt.session === S.chat.sid) loadChatMessages();
       if (inGoal) scheduleRefresh();
