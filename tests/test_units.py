@@ -647,6 +647,14 @@ def test_reap_scope_stops_what_a_turn_left_running():
     assert runner.reap_scope(unit, 0) == ()
 
 
+def test_envelope_drops_expired_quota_warnings():
+    import time
+    from agentloop import digest
+    item = lambda text, until: {"kind": "system", "payload": json.dumps({"text": text, "until": until})}
+    out = digest.envelope([item("[System] old", time.time() - 60), item("[System] live", time.time() + 60)])
+    assert "old" not in out and "live" in out
+
+
 def test_usage_limit_until_reads_the_reset():
     import time
     from agentloop.adapters.base import usage_limit_until

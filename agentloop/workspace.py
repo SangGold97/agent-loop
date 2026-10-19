@@ -245,7 +245,7 @@ def read_goal_files(ws: Path, gid: str) -> dict:
 
 
 def human_write(ws: Path, rel: str, text: str) -> str:
-    """Write a human-owned file and commit it. Returns the diff (for notifying the meta-work)."""
+    """Write a human-owned file and commit it. Returns the diff, empty when nothing changed."""
     target = (ws / rel).resolve()
     if not target.is_relative_to(ws.resolve()):
         raise ValueError("path escapes the workspace")

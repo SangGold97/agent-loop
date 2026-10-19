@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 
@@ -51,12 +52,14 @@ def envelope(items: list[dict], budget: str | None = None) -> str:
     for it in items:
         p = json.loads(it["payload"])
         kind = it["kind"]
+        if p.get("until") and p["until"] < time.time():
+            continue
         if kind in ("kickoff", "handoff", "system", "budget", "worker_done", "advice"):
             parts.append(p["text"])
         elif kind == "note":
             parts.append(f"[Human note #{p['id']}] {p['text']}")
         elif kind == "file_changed":
-            parts.append(f"[{p['name']} changed by the human]\n```diff\n{p['diff'][-4000:]}\n```")
+            parts.append(f"[{p['name']} changed by the human]")
     if budget:
         parts.append(budget)
     return "\n\n".join(parts) or "[System] No new events."

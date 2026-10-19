@@ -165,7 +165,8 @@ class Engine:
             text = (f"{agent} has used {w['used']:.0%} of its {w['name']} usage window{reset}; prefer another CLI "
                     "for new workers and sends until then.")
             for g in self.db.q("SELECT ws, id FROM goals WHERE status='running'"):
-                self.db.push_inbox(g["ws"], g["id"], "system", {"text": f"[System] {text}"}, deferred=True)
+                self.db.push_inbox(g["ws"], g["id"], "system",
+                                   {"text": f"[System] {text}", "until": w.get("resets_at")}, deferred=True)
                 self.publish("alert", ws=g["ws"], goal=g["id"], text=text)
 
     def check_disk(self, free_gb: float) -> None:
@@ -1249,7 +1250,7 @@ class Engine:
         if change and len(parts) == 3 and parts[0] == "goals":
             gid, name = parts[1], parts[2]
             if self.goal_row(ws, gid)["status"] in ("running", "paused", "stopped"):
-                self.db.push_inbox(ws, gid, "file_changed", {"name": name, "diff": change},
+                self.db.push_inbox(ws, gid, "file_changed", {"name": name},
                                    deferred=name == "goal.yaml")
                 self.kick(ws, gid)
         self.publish("file_changed", ws=ws, path=rel)
