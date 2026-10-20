@@ -77,24 +77,28 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   meta turns are spent, and resources reach it as events when they run low (RAM refusals, free disk under 10 GB,
   usage limits); `loop infra` and `loop budget` show the rest on demand.
 - Every turn runs in its own `systemd-run --user --scope`. Processes still running when the CLI exits (a job the
-  agent backgrounded) are stopped and named in the digest; orphans are stopped on restart. Each turn also gets its
+  agent backgrounded) are stopped and named in the digest, detached jobs aside (below); orphans are stopped on
+  restart. Each turn also gets its
   own `TMPDIR`, removed when the turn ends, so scratch files never pile up in `/tmp`. GPUs are hidden from every
   session; a job sees one only through `loop run --vram` (below).
 - RAM is one pool for all sessions: their scopes share a slice capped at host RAM minus `pool_reserve_gb`, so an
-  out-of-memory kill stays among agent processes. A job that needs more than about 2 GB runs through
-  `loop run --ram <GB> -- <cmd>`, which waits until that much is left to grant and holds it until the job ends.
-  Grants together never exceed the pool minus `session_reserve_gb`, so jobs cannot keep the meta-work from
-  starting workers. The grant is a reservation: the job runs in a scope of its own capped at the grant times
-  `job_memory_max_factor`, borrowing free pool RAM above its grant; a job that outgrows the cap is killed there and
-  costs no other process. As with VRAM, once less than `min_free_ram_gb` is free the job furthest over its grant
-  is stopped, so a job that keeps to its grant is never stopped for another's overuse. If the helper dies, the
-  platform stops the job with it. Within two seconds of starting, every other
-  process of a turn but the CLI is marked first in line for the OOM killer, so when the pool runs out the kernel
-  kills a tool process without a grant, not an agent or a job that keeps to its grant. Processes outside the
-  platform can still exhaust the host's reserve. Spawns, sends and advice are refused while less than
-  `min_free_ram_gb` is free; the refused goal then waits without counting as idle and gets an event once
-  enough is free again. The digest reports a turn's memory peak and kills.
-- VRAM is granted per job too: `loop run --ram <GB> --vram <GB> -- <cmd>` waits until one GPU has that much left
+  out-of-memory kill stays among agent processes. Nothing is reserved up front: heavy jobs run through
+  `loop run -- <cmd>` in a scope of their own, and the platform watches the whole pool every 2 s. While it is
+  over 90% used, `loop run` waits (one job starts per sample, so the next sees what the last one took), and
+  spawns, sends and advice are refused; the refused goal waits without counting as idle and gets an event once
+  the pool has room. Above 95%, the newest heavy process (a `loop run` job, or a tool process of a turn holding
+  1 GB or more; never an agent CLI or a `loop run` helper) is stopped, one every 5 s, so the jobs that were there
+  first keep running; its `loop run` prints why. The kernel's OOM killer, should the pool run out between
+  samples, takes them in the same order (`oom_score_adj` from 1000 for the newest heavy one, 200 for other tool
+  processes, 0 for CLIs and helpers). If the helper dies, the platform stops the job with it. Processes outside
+  the platform can still exhaust the host's reserve. The digest reports a turn's memory peak and kills.
+- `loop run --detach` runs the job's helper as a user service outside the turn's scope and returns at once, so
+  the agent ends its turn instead of polling. The job stays in the pool, survives a platform restart and is stopped
+  after `job_timeout_h` (9 h). When it ends, the platform resumes the worker with its exit status and log tail,
+  right after its turn if one is running; when that turn cannot start (budget, RAM, usage limit), or the job is
+  the meta-work's, the result goes to the meta-work as an event. `loop stop` stops one job, or a worker with its
+  jobs, and a goal that stops stops its jobs.
+- VRAM is granted per job: `loop run --vram <GB> -- <cmd>` waits until one GPU has that much left
   to grant (its total minus `vram_reserve_gb`, minus every grant in full and what other programs use), then shows
   the job that GPU alone. VRAM has no hard cap, so a job may use more than its grant while the GPU has room; once
   less than `vram_reserve_gb` is free there, the job furthest over its grant is stopped, and a job that keeps to

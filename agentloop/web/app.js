@@ -1173,10 +1173,10 @@ function gpuCell(x) {
   }
   return Object.entries(used).map(([i, gb]) => `GPU${i} ${gb === null ? '?' : gb.toFixed(1)} GB`).join('<br>');
 }
-// A session's `loop run` jobs: granted RAM (and VRAM), then requests still waiting for theirs
+// A session's `loop run` jobs: RAM in use (and VRAM granted), then jobs still waiting to start
 function grantCell(x) {
-  const held = (x.grants || []).map(g => `RAM ${g.gb} GB` + (g.vram ? ` · VRAM ${g.vram} GB` : ''));
-  const waiting = (x.waiting || []).map(w => `<span style="color:var(--warn)">${w.gb}G${w.vram ? ` + ${w.vram}G VRAM` : ''} `
+  const held = (x.grants || []).map(g => `RAM ${g.rss_gb.toFixed(1)} GB` + (g.vram ? ` · VRAM ${g.vram} GB` : ''));
+  const waiting = (x.waiting || []).map(w => `<span style="color:var(--warn)">${w.vram ? `${w.vram}G VRAM ` : ''}`
     + `wait ${Math.floor((S.infra.ts - w.since) / 60)} mins</span>`);
   return [...held, ...waiting].join('<br>');
 }
@@ -1188,14 +1188,14 @@ function renderInfra() {
       <span class="faint small">updated ${hhmm(s.ts)}</span></div>
     <div class="grid cols-4">
       <div class="card stat"><div class="label">cpu</div><div class="value">${s.cpu_pct.toFixed(0)}%</div>${meter(s.cpu_pct, 100)}<div class="sub">${s.cpus} cores</div></div>
-      <div class="card stat"><div class="label">ram</div><div class="value">${usedRam} / ${s.ram_total_gb} GB</div>${meter(s.ram_pct, 100)}<div class="sub">${s.ram_free_gb} GB available · swap ${s.swap_pct}%</div></div>
+      <div class="card stat"><div class="label">ram</div><div class="value">${usedRam} / ${s.ram_total_gb} GB</div>${meter(s.ram_pct, 100)}<div class="sub">${s.ram_free_gb} GB available · swap ${s.swap_pct}%${s.pool_gb ? ` · agent pool ${s.pool_free_gb} of ${s.pool_gb} GB free` : ''}</div></div>
       <div class="card stat"><div class="label">disk</div><div class="value">${s.disk_free_gb} GB free</div>${meter(s.disk_total_gb - s.disk_free_gb, s.disk_total_gb)}<div class="sub">of ${s.disk_total_gb} GB</div></div>
       <div class="card stat"><div class="label">gpu</div>${s.gpus.length ? s.gpus.map(g => `<div class="value">${esc(g.name)}</div>${meter(g.mem_used_gb, g.mem_total_gb)}<div class="sub">VRAM ${g.mem_used_gb}/${g.mem_total_gb} GB · util ${g.util}%${gpuStale(s) ? ` · ${gpuStale(s)} (nvidia-smi not answering)` : ''}</div>`).join('')
         : '<div class="value">none</div><div class="sub">jobs run CPU-only; loop run --vram is refused</div>'}</div>
     </div>
     <div style="margin-top:22px">${box('last 10 minutes', `<div class="legend"><span><i style="background:var(--accent)"></i>cpu %</span><span><i style="background:var(--reply)"></i>ram %</span>${s.gpus.length ? '<span><i style="background:var(--warn)"></i>vram %</span>' : ''}</div>
       <canvas class="chart" id="infra-chart"></canvas>`)}</div>
-    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>role</th><th>CLI</th><th>goal</th><th>memory</th><th>gpu</th><th>grants</th></tr>
+    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>role</th><th>CLI</th><th>goal</th><th>memory</th><th>gpu</th><th>jobs</th></tr>
       ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)}</td><td>${esc(x.role || '')}</td><td>${esc(cliName(x.agent || ''))}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td><td>${gpuCell(x)}</td><td>${grantCell(x)}</td></tr>`).join('')}</table>`
         : '<div class="empty">No agent sessions running.</div>'}`)}</div></div>`;
   drawChart($('#infra-chart'), 600 / INFRA_SAMPLE_S);

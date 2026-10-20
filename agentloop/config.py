@@ -29,9 +29,9 @@ DEFAULTS: dict = {
         "language": "English",
         "base_branch": None,
     },
-    "infra": {"min_free_ram_gb": 2, "pool_reserve_gb": 4, "session_reserve_gb": 4, "job_memory_max_factor": 1.5,
-              "worker_memory_max_gb": None, "vram_reserve_gb": 1},
+    "infra": {"pool_reserve_gb": 3, "worker_memory_max_gb": None, "vram_reserve_gb": 1},
     "turn_timeout_min": 180,
+    "job_timeout_h": 9,  # a detached job (`loop run --detach`) is stopped after this many hours
     "guard": {"deny_patterns": []},
     "mcp_servers": [],  # MCP server URLs Claude sessions may use; all others blocked
 }

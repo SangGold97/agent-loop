@@ -1,6 +1,7 @@
 """Host resource sampling (CPU, RAM, disk, GPU) and admission checks for new workers."""
 from __future__ import annotations
 
+import contextlib
 import copy
 import logging
 import os
@@ -16,7 +17,7 @@ import psutil
 
 log = logging.getLogger("agentloop")
 
-SAMPLE_S = 2  # CPU/RAM/disk sample period, which is also how often RAM and VRAM grants are policed
+SAMPLE_S = 2  # CPU/RAM/disk sample period, which is also how often the RAM pool and VRAM grants are policed
 # Each nvidia-smi call is a round trip to the Windows GPU driver under WSL; polled every second, the calls piled
 # up as stalls while CUDA jobs ran on the GPU that also drives the display, so the GPU is read less often
 GPU_POLL_S = 10
@@ -64,26 +65,21 @@ def cgroup_dir(pid: int) -> Path | None:
     return path if (path / "memory.stat").exists() else None
 
 
-def mark_oom_first(path: Path, keep: set[int]) -> None:
-    """Put every process of a turn's scope but `keep` (the CLI and its `loop run` helpers) first in line for the
-    OOM killer.
-
-    The CLI, the helpers and their jobs (which run in scopes of their own) keep the default score, so when the
-    pool runs out the kernel kills a tool process that holds no RAM grant, not an agent or a job that keeps to its
-    grant."""
+def cgroup_pids(path: Path) -> set[int]:
     try:
-        pids = (path / "cgroup.procs").read_text().split()
+        return {int(pid) for pid in (path / "cgroup.procs").read_text().split()}
     except OSError:
-        return
-    for pid in pids:
-        if int(pid) in keep:
-            continue
-        adj = Path(f"/proc/{pid}/oom_score_adj")
-        try:
-            if adj.read_text().strip() != "1000":
-                adj.write_text("1000")
-        except OSError:  # the process has exited
-            pass
+        return set()
+
+
+def set_oom_adj(pid: int, adj: int) -> None:
+    """Set a process's place in line for the kernel's OOM killer (1000 = first)."""
+    path = Path(f"/proc/{pid}/oom_score_adj")
+    try:
+        if path.read_text().strip() != str(adj):
+            path.write_text(str(adj))
+    except OSError:  # the process has exited
+        pass
 
 
 def scope_memory(path: Path) -> tuple[int, int] | None:
@@ -100,11 +96,11 @@ def scope_memory(path: Path) -> tuple[int, int] | None:
         return None
 
 
-def wsl_host_mount() -> str | None:
-    """The Windows drive (as its /mnt path) that holds this WSL distro's virtual disk, or None outside WSL.
+def wsl_vhdx() -> Path | None:
+    """This WSL distro's virtual disk (ext4.vhdx, as its /mnt path), or None outside WSL.
 
-    The distro's ext4.vhdx reports its maximum size (1 TB by default), but it can only grow as far as the free
-    space of the Windows drive it lives on, so that drive bounds the real free space."""
+    The disk reports its maximum size (1 TB by default), but it only has its own free blocks (it never shrinks
+    when files are deleted) plus what it can still grow into on the Windows drive it lives on."""
     if "microsoft" not in os.uname().release.lower():
         return None
     # A server started as a service or from a stripped environment may lack WSL_DISTRO_NAME, and Windows' dirs in
@@ -122,19 +118,19 @@ def wsl_host_mount() -> str | None:
     # One registry key per distro; pick the BasePath of the key whose DistributionName is ours.
     for block in re.split(r"\r?\n(?=HKEY_)", out):
         values = dict(re.findall(r"^\s+(\w+)\s+REG_\w+\s+(.*?)\s*$", block, re.M))
-        drive = re.match(r"(?:\\\\\?\\)?([A-Za-z]):", values.get("BasePath", ""))
+        base = re.match(r"(?:\\\\\?\\)?([A-Za-z]):(.*)", values.get("BasePath", ""))
         ours = values.get("DistributionName") == distro if distro else \
             bool(default) and block.split("\n", 1)[0].rstrip().endswith(default.group(1))
-        if ours and drive:
-            mount = f"/mnt/{drive.group(1).lower()}"
-            return mount if os.path.ismount(mount) else None
+        if ours and base:
+            vhdx = Path(f"/mnt/{base.group(1).lower()}", *base.group(2).split("\\"), "ext4.vhdx")
+            return vhdx if os.path.ismount(vhdx.parents[-3]) and vhdx.exists() else None
     return None
 
 
 class Infra:
     def __init__(self, disk_path: str):
         self.disk_path = disk_path
-        self.host_mount = wsl_host_mount()
+        self.vhdx = wsl_vhdx()
         self.history: deque = deque(maxlen=600 // SAMPLE_S)  # the last 10 minutes
         psutil.cpu_percent()
         # nvidia-smi can hang for a minute when WSL's GPU channel stalls; it is polled on its own thread so the
@@ -159,9 +155,11 @@ class Infra:
     def sample(self) -> dict:
         vm, disk = psutil.virtual_memory(), psutil.disk_usage(self.disk_path)
         free, total = disk.free, disk.total
-        if self.host_mount:  # WSL: the virtual disk can grow only into the host drive's free space
-            free = min(free, psutil.disk_usage(self.host_mount).free)
-            total = min(total, disk.used + free)
+        if self.vhdx:  # WSL: the virtual disk's own free blocks plus what it can still grow into
+            with contextlib.suppress(OSError):
+                room = psutil.disk_usage(self.vhdx.parents[-3]).free + max(0, self.vhdx.stat().st_size - disk.used)
+                free = min(free, room)
+                total = min(total, disk.used + free)
         snap = {
             "ts": time.time(), "cpu_pct": psutil.cpu_percent(), "cpus": psutil.cpu_count(),
             "ram_total_gb": round(vm.total / 2**30, 1), "ram_free_gb": round(vm.available / 2**30, 1),

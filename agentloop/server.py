@@ -284,7 +284,7 @@ def create_app(api_url: str) -> FastAPI:
     async def agent_cmd(cmd: str, req: Request, x_loop_token: str | None = Header(None)):
         caller, b = engine.caller(x_loop_token), await body(req)
         # Workers only use the RAM pool; steering the goal stays with the meta-work
-        if caller["kind"] == "worker" and cmd not in ("ram", "ram-release", "infra"):
+        if caller["kind"] == "worker" and cmd not in ("ram", "ram-release", "infra", "job", "job-end"):
             raise AgentError("workers can only use `loop run` and `loop infra`")
         if caller["kind"] == "meta-advisor" and cmd not in ("ls", "show", "status", "budget", "infra"):
             raise AgentError("the advisor has read-only access; return advice to the meta-work in your final reply")
@@ -319,10 +319,14 @@ def create_app(api_url: str) -> FastAPI:
         elif cmd == "infra":
             text = engine.infra_text()
         elif cmd == "ram":
-            return await engine.ram_grant(caller, float(b.get("gb") or 0), float(b.get("wait") or 0),
-                                          int(b.get("pid") or 0), str(b.get("cmd", "")), float(b.get("vram") or 0))
+            return await engine.ram_grant(caller, float(b.get("wait") or 0), int(b.get("pid") or 0),
+                                          str(b.get("cmd", "")), float(b.get("vram") or 0), b.get("job"))
         elif cmd == "ram-release":
-            return engine.ram_release(caller, int(b.get("grant") or 0), bool(b.get("killed")))
+            return engine.ram_release(caller, int(b.get("grant") or 0), bool(b.get("killed")), b.get("job"))
+        elif cmd == "job":
+            return engine.job_register(caller, str(b.get("cmd", "")))
+        elif cmd == "job-end":
+            text = engine.job_report(caller, str(b.get("job", "")), str(b.get("text", "")))
         else:
             raise HTTPException(404, f"unknown command {cmd}")
         return {"text": text}

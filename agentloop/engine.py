@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -24,9 +25,9 @@ from .adapters import RunSpec
 from .adapters.base import to_tokens
 from .config import DEFAULTS, PYTHON, home, goal_config, state_dir, workspace_config
 from .db import DB
-from .infra import GPU_STALE_S, SAMPLE_S, Infra, cgroup_dir, mark_oom_first, scope_memory, tree_rss
-from .runner import (Runner, child_env, job_scope_argv, kill_unit, scratch_root, systemd_available,
-                     unit_prefix)
+from .infra import GPU_STALE_S, SAMPLE_S, Infra, cgroup_dir, cgroup_pids, scope_memory, set_oom_adj, tree_rss
+from .runner import (Runner, child_env, job_scope_argv, job_unit, jobs_tmp_root, kill_unit, pool_cgroup,
+                     scratch_root, systemd_available, unit_prefix)
 
 log = logging.getLogger("agentloop")
 VERIFY_TIMEOUT_S = 900
@@ -34,6 +35,10 @@ PREFIX = {"meta-work": "mw", "worker": "w", "meta-chat": "mc", "meta-advisor": "
 LIMIT_SLACK_S = 60  # retry this long after a vendor's announced usage-limit reset
 VRAM_SETTLE_S = 10  # a GPU is not policed again this long after a job on it was stopped, while its memory frees
 RAM_SETTLE_S = 5  # likewise for the RAM pool
+RAM_ADMIT = 0.90  # share of the RAM pool in use from which `loop run`, spawn, send and advise wait
+RAM_KILL = 0.95  # share in use from which the newest heavy process is stopped
+HEAVY_GB = 1.0  # a tool process or job this large may be stopped to save the pool
+AGENT_PROCS = {"claude", "codex", "agy"}  # an agent CLI's own processes, never stopped for RAM
 QUOTA_WARN = 0.9  # share of a CLI's usage window past which running goals hear it is running out
 DISK_WARN_GB = 10  # free disk below which running goals hear it is running out (again once back above twice that)
 
@@ -101,13 +106,15 @@ class Engine:
         self.task_goal: dict[asyncio.Task, tuple[str, str]] = {}  # tasks working on a goal, awaited by deletes
         self.chat_tasks: dict[str, asyncio.Task] = {}  # meta-chat -> its running turn, awaited by its delete
         self.agent_ops: dict[str, dict] = {}
-        # RAM held by `loop run` jobs, the requests still waiting for it, and each running turn's memory record;
-        # all of it lives only as long as the turns, so a restart starts empty
+        # Running `loop run` jobs (with their VRAM grants), the requests still waiting to start, and each running
+        # turn's memory record; all of it lives only as long as the turns, so a restart starts empty, but for the
+        # detached jobs, which `startup` restores from the jobs table
         self.grants: dict[int, dict] = {}
         self.grant_ids = itertools.count(1)
         self.ram_waiting: dict[int, dict] = {}
         self.turn_mem: dict[str, dict] = {}
-        self.ram_wait_goals: dict[tuple[str, str], float] = {}  # goals refused a dispatch for RAM -> GB they need
+        self.ram_wait_goals: set[tuple[str, str]] = set()  # goals refused a dispatch while the pool was full
+        self.ram_admitted = 0.0  # sample time of the last job started; the next one waits for a newer sample
         # Per GPU index, the VRAM in use while none of its grants was active: where the driver lists no processes
         # (WSL), what a GPU uses above it is its jobs'. Grants stopped for RAM or VRAM -> (session, what `loop run`
         # reports)
@@ -304,6 +311,11 @@ class Engine:
                 self.db.update("turns", {"id": t["id"]}, status="interrupted", ended=time.time())
             self.db.update("sessions", {"id": s["id"]}, status="interrupted", turns=s["turns"] + len(cut))
         self.recover_advice()
+        # Detached jobs outlive a restart, so their records come back and the pool keeps watching them; one whose
+        # helper is gone is ended by `police_jobs`
+        for j in self.db.q("SELECT * FROM jobs WHERE status='running' AND grant_info IS NOT NULL"):
+            if psutil.pid_exists(j["pid"]):
+                self.grants[next(self.grant_ids)] = {**json.loads(j["grant_info"]), "rss_gb": 0.0}
         # A meta-chat is kept only once the human wrote in it; drop chats created empty by older versions
         self.db.x("DELETE FROM sessions WHERE kind='meta-chat' AND id NOT IN (SELECT session FROM messages)")
         # Integration worktrees used to live at wt/_int-<gid>; nothing runs yet, so they move to wt/<gid> now
@@ -347,20 +359,20 @@ class Engine:
             try:
                 snap = await asyncio.to_thread(self.infra.sample)
                 snap["sessions"] = []
-                # A grant's job runs in its own scope next to its session's; one whose `loop run` died without
-                # releasing it (e.g. the helper was killed) is stopped with its whole process tree and frees its RAM
+                # A job runs in its own scope in the pool slice; one whose `loop run` died without ending it (e.g.
+                # the helper was killed) is stopped with its whole process tree
                 for key, g in list(self.grants.items()):
                     if not psutil.pid_exists(g["pid"]):
                         self.end_grant(key)
                         continue
-                    cg = self.turn_mem.get(g["sid"], {}).get("cgroup")
-                    used = scope_memory(cg.parent / f"{g['unit']}.scope") if g["unit"] and cg else None
+                    base = pool_cgroup()
+                    used = scope_memory(base / f"{g['unit']}.scope") if g["unit"] and base else None
                     if used:
                         g["oom"] = used[1]
                     # Without systemd the job is a child of the helper
                     g["rss_gb"] = round((used[0] if used else 0 if g["unit"] else tree_rss(g["pid"])) / 2**30, 2)
-                    # Peak of the per-second samples, which `loop run` prints when the job ends; a job too short to
-                    # be sampled has none
+                    # Peak of the samples, which `loop run` prints when the job ends; a job too short to be sampled
+                    # has none
                     if used or not g["unit"]:
                         g["peak_gb"] = max(g.get("peak_gb") or 0.0, g["rss_gb"])
                 for key, (proc, _) in list(self.runner.procs.items()):
@@ -370,43 +382,38 @@ class Engine:
                     cg = mem.get("cgroup") or cgroup_dir(proc.pid)
                     # Until systemd-run has moved the CLI into its scope, the cgroup is still the server's
                     used = scope_memory(cg) if cg and cg.name.startswith(unit_prefix()) else None
-                    helpers = {g["pid"] for g in self.grants.values() if g["sid"] == key}
-                    # A helper's `systemd-run` sits in the turn's scope until it has moved into the job's scope;
-                    # marked there, it would hand the job the OOM-first score, so the helpers' children are kept
-                    for pid in list(helpers):
-                        with contextlib.suppress(psutil.Error):
-                            helpers |= {c.pid for c in psutil.Process(pid).children(recursive=True)}
                     if used:
                         mem["cgroup"], mem["oom"] = cg, used[1]
-                        mark_oom_first(cg, {proc.pid, *helpers})
                     rss = round((used[0] if used else tree_rss(proc.pid)) / 2**30, 2)
                     jobs = sum(g["rss_gb"] for g in self.grants.values() if g["sid"] == key and g["unit"])
                     mem["peak"] = max(mem["peak"], rss + jobs)
                     snap["sessions"].append({"id": key, "kind": s["kind"], "ws": s["ws"], "goal": s["goal"],
                                              "role": s["role"], "agent": s.get("agent") or "",
                                              "rss_gb": round(rss + jobs, 2),
-                                             # What the session's `loop run` jobs hold (and use of their GPU),
-                                             # and still wait for; their RAM use is in rss_gb already
-                                             "grants": [{"gb": g["gb"], "vram": g["vram"], "gpu": g.get("gpu"),
+                                             # The session's `loop run` jobs (their RAM is in rss_gb already) and
+                                             # those still waiting to start
+                                             "grants": [{"rss_gb": g["rss_gb"], "vram": g["vram"], "gpu": g.get("gpu"),
                                                          "vram_used": g.get("vram_used")}
                                                         for g in self.grants.values() if g["sid"] == key],
-                                             "waiting": [{"gb": w["gb"], "vram": w["vram"], "since": w["since"]}
+                                             "waiting": [{"vram": w["vram"], "since": w["since"]}
                                                          for w in self.ram_waiting.values() if w["sid"] == key]})
+                snap["pool_gb"], snap["pool_free_gb"] = self.pool_gb(), self.ram_free()
                 self.police_ram()
+                self.police_jobs()
                 self.sample_vram(snap)
                 self.police_vram(snap)
                 self.check_disk(snap["disk_free_gb"])
                 self.publish("infra", data=snap)
-                # A goal refused a dispatch for RAM hears once enough is free again, unless it ended meanwhile
-                for (ws, gid), need in list(self.ram_wait_goals.items()):
+                # A goal refused a dispatch for RAM hears once the pool has room again, unless it ended meanwhile
+                for ws, gid in list(self.ram_wait_goals):
                     row = self.db.one("SELECT status FROM goals WHERE ws=? AND id=?", ws, gid)
                     if not row or row["status"] != "running":
-                        self.ram_wait_goals.pop((ws, gid), None)
-                    elif (free := self.ram_free()) >= need:
-                        self.ram_wait_goals.pop((ws, gid), None)
+                        self.ram_wait_goals.discard((ws, gid))
+                    elif self.ram_share() < RAM_ADMIT:
+                        self.ram_wait_goals.discard((ws, gid))
                         self.db.push_inbox(ws, gid, "system", {"text": (
-                            f"[System] RAM is free again ({free} GB free); spawn or send what was "
-                            "refused if it is still needed.")})
+                            f"[System] The RAM pool has room again ({self.ram_free()} GB free); spawn or send what "
+                            "was refused if it is still needed.")})
                         self.kick(ws, gid)
             except Exception:
                 log.exception("infra sample failed")
@@ -415,7 +422,9 @@ class Engine:
     async def shutdown(self) -> None:
         for key in list(self.runner.procs):
             await self.runner.kill(key)
-        self.runner.clear_pool()
+        # Detached jobs keep running in the pool slice across a restart
+        if not self.db.one("SELECT 1 FROM jobs WHERE status='running'"):
+            self.runner.clear_pool()
 
     # ---------- budget ----------
     def budget(self, ws: str, gid: str) -> dict:
@@ -471,18 +480,17 @@ class Engine:
                             ws)["c"]
         if total >= cfg["limits"]["max_workers_total"]:
             raise AgentError(f"workspace worker limit reached ({total}); wait for a report")
-        self.check_ram(ws, gid, cfg["infra"]["min_free_ram_gb"])
+        self.check_ram(ws, gid)
 
-    def check_ram(self, ws: str, gid: str, need: float) -> None:
-        """Refuse a dispatch while less than `need` GB is free. The goal then waits for RAM: it does not
-        count as idle, and the sampler sends it an event once enough is free again."""
-        free = self.ram_free()
-        if free >= need:
-            self.ram_wait_goals.pop((ws, gid), None)
+    def check_ram(self, ws: str, gid: str) -> None:
+        """Refuse a dispatch while the pool is RAM_ADMIT full. The goal then waits for RAM: it does not count as
+        idle, and the sampler sends it an event once the pool has room again."""
+        if self.ram_share() < RAM_ADMIT:
+            self.ram_wait_goals.discard((ws, gid))
         else:
-            self.ram_wait_goals[(ws, gid)] = need
-            raise AgentError(f"only {free} GB RAM free (min {need}; {self.ram_text()}); an event "
-                             "follows when enough is free again, so do other work or end your turn meanwhile")
+            self.ram_wait_goals.add((ws, gid))
+            raise AgentError(f"the RAM pool is full ({self.ram_text()}); an event follows when it has room again, "
+                             "so do other work or end your turn meanwhile")
 
     # ---------- RAM pool shared by all sessions ----------
     def infra_max(self, key: str) -> float:
@@ -495,26 +503,21 @@ class Engine:
         return max(1.0, round(self.infra.latest()["ram_total_gb"] - self.infra_max("pool_reserve_gb"), 1))
 
     def ram_free(self) -> float:
-        """GB still free for new sessions and jobs: what the pool and the host have left, with every grant counted
-        in full even while its job is still loading, so two requests never both see the same free RAM."""
+        """GB the pool has left: what its sessions and jobs leave, but no more than the host has available."""
         snap = self.infra.latest()
-        used = sum(s["rss_gb"] for s in snap.get("sessions", []))
-        unused = sum(max(0.0, g["gb"] - g["rss_gb"]) for g in self.grants.values())
-        return round(max(0.0, min(self.pool_gb() - used, snap["ram_free_gb"]) - unused), 1)
+        sessions = snap.get("sessions", [])
+        # A session's RAM includes its jobs; a detached job whose session has no turn running counts on its own
+        used = sum(s["rss_gb"] for s in sessions) + sum(
+            g["rss_gb"] for g in self.grants.values() if g.get("job") and g["sid"] not in {s["id"] for s in sessions})
+        return round(max(0.0, min(self.pool_gb() - used, snap["ram_free_gb"])), 1)
 
-    def jobs_max_gb(self) -> float:
-        """The most all grants together may hold: the pool minus the part kept for agent sessions, so jobs never
-        hold the RAM the meta-work needs to start workers."""
-        return round(max(0.0, self.pool_gb() - self.infra_max("session_reserve_gb")), 1)
-
-    def job_free(self) -> float:
-        """GB a new job may still be granted: what is free, but no more than the grants' share has left."""
-        granted = sum(g["gb"] for g in self.grants.values())
-        return round(max(0.0, min(self.ram_free(), self.jobs_max_gb() - granted)), 1)
+    def ram_share(self) -> float:
+        """Share of the pool in use."""
+        return 1 - self.ram_free() / self.pool_gb()
 
     def ram_text(self) -> str:
-        parts = [f"agent RAM pool {self.pool_gb()} GB, {self.ram_free()} GB free, {self.job_free()} GB left to "
-                 f"grant to jobs (at most {self.jobs_max_gb()} GB in all)"]
+        parts = [f"agent RAM pool {self.pool_gb()} GB, {self.ram_share():.0%} in use ({self.ram_free()} GB free); "
+                 f"`loop run` waits from {RAM_ADMIT:.0%}, and from {RAM_KILL:.0%} the newest heavy process is stopped"]
         parts += [f"GPU{gpu['index']} VRAM {gpu['mem_total_gb']} GB, {self.vram_free(gpu)} GB left to grant"
                   for gpu in self.infra.latest()["gpus"]]
 
@@ -527,30 +530,71 @@ class Engine:
             return f" + {g['vram']} GB VRAM on GPU{g['gpu']} ({used} in use)"
 
         if self.grants:
-            parts.append("granted: " + "; ".join(f"{g['sid']} {g['gb']} GB ({g['rss_gb']:.1f} in use){vram(g)} "
-                                                 f"`{g['cmd']}`" for g in self.grants.values()))
+            parts.append("jobs: " + "; ".join(f"{g['sid']} {g['rss_gb']:.1f} GB RAM{vram(g)} `{g['cmd']}`"
+                                              for g in self.grants.values()))
         if self.ram_waiting:
-            parts.append("waiting: " + "; ".join(f"{w['sid']} {w['gb']} GB{vram(w)} `{w['cmd']}`"
+            parts.append("waiting: " + "; ".join(f"{w['sid']}{vram(w)} `{w['cmd']}`"
                                                  for w in self.ram_waiting.values()))
         return " · ".join(parts)
 
+    def heavy(self) -> list[dict]:
+        """What the pool may lose, newest first: `loop run` jobs and the tool processes of running turns that hold
+        HEAVY_GB or more. An agent CLI and the `loop run` helpers are never among them."""
+        items = [{"started": g["started"], "gb": g["rss_gb"], "sid": g["sid"], "key": key, "what": g["cmd"],
+                  "pids": self.job_pids(g) - {g["pid"]}} for key, g in self.grants.items() if g["rss_gb"] >= HEAVY_GB]
+        for sid, mem in self.turn_mem.items():
+            for pid in mem.get("tools", ()):
+                with contextlib.suppress(psutil.Error):
+                    proc = psutil.Process(pid)
+                    gb = proc.memory_info().rss / 2**30
+                    if gb >= HEAVY_GB:
+                        items.append({"started": proc.create_time(), "gb": gb, "sid": sid, "pid": pid,
+                                      "what": shlex.join(proc.cmdline())[:120], "pids": {pid}})
+        return sorted(items, key=lambda h: -h["started"])
+
     def police_ram(self) -> None:
-        """A job may use more than its RAM grant, up to its scope's cap, while the pool has room. Once less than
-        min_free_ram_gb is free, the job furthest over its grant is stopped, so borrowed RAM goes back to the
-        grants and sessions it belongs to, and a job that keeps to its grant never pays for another's overuse."""
-        if time.time() < self.ram_settle or self.ram_free() >= self.infra_max("min_free_ram_gb"):
+        """No job reserves RAM; the pool is watched as a whole. From RAM_KILL of it in use, the newest heavy process
+        is stopped, one at a time with RAM_SETTLE_S for its memory to free, so the jobs that were there first keep
+        running. Should the pool run out between samples, the kernel's OOM killer takes them in the same order."""
+        tools: dict[int, str] = {}  # a turn's tool processes, other than the CLI and `loop run` helpers
+        for sid, mem in self.turn_mem.items():
+            if not mem.get("cgroup"):
+                continue
+            keep = {g["pid"] for g in self.grants.values() if g["sid"] == sid}
+            if proc := self.runner.procs.get(sid, (None,))[0]:
+                keep.add(proc.pid)
+            # A helper's `systemd-run` sits in the turn's scope until it has moved into the job's scope, and an
+            # agent CLI may run its own binary under a launcher (codex's node wrapper)
+            for pid in list(keep):
+                with contextlib.suppress(psutil.Error):
+                    for c in psutil.Process(pid).children(recursive=True):
+                        if pid != getattr(proc, "pid", None) or c.name() in AGENT_PROCS:
+                            keep.add(c.pid)
+            mem["tools"] = cgroup_pids(mem["cgroup"]) - keep
+            tools |= dict.fromkeys(mem["tools"], sid)
+        heavy = self.heavy()
+        # Kernel order: the newest heavy one first, older ones after it, then the other tool processes
+        rank = dict.fromkeys(tools, 200)
+        for i, h in enumerate(heavy):
+            rank |= dict.fromkeys(h["pids"], max(300, 1000 - 100 * i))
+        for pid, adj in rank.items():
+            set_oom_adj(pid, adj)
+        if not heavy or time.time() < self.ram_settle or self.ram_share() < RAM_KILL:
             return
-        over = [(g["rss_gb"] - g["gb"], k) for k, g in self.grants.items() if g["rss_gb"] > g["gb"]]
-        if not over:
-            return
-        key = max(over)[1]
-        g = self.grants[key]
+        h = heavy[0]
         self.ram_settle = time.time() + RAM_SETTLE_S
-        self.stop_job(key, f"stopped for using {g['rss_gb']:.1f} GB RAM against its {g['gb']} GB grant while the "
-                           "RAM pool was nearly full; run it with a larger --ram or make it use less memory")
+        why = (f"stopped at {h['gb']:.1f} GB because the RAM pool was {self.ram_share():.0%} full and it was the "
+               "newest heavy process; run it again once `loop infra` shows room, or make it use less memory")
+        if "key" in h:
+            self.stop_job(h["key"], why)
+            return
+        with contextlib.suppress(psutil.Error):
+            psutil.Process(h["pid"]).kill()
+        self.turn_mem[h["sid"]]["over"].append(f"`{h['what']}` (pid {h['pid']}) was {why}")
+        log.warning("%s: killed pid %s (%.1f GB) for RAM: %s", h["sid"], h["pid"], h["gb"], h["what"])
 
     def stop_job(self, key: int, why: str) -> None:
-        """Stop a job the platform polices and free its grant; its `loop run` and the turn's memory note say why."""
+        """Stop a `loop run` job; its `loop run` and the turn's memory note say why."""
         g = self.grants[key]
         if not g["unit"]:  # without systemd the job is a child of the helper
             with contextlib.suppress(psutil.Error):
@@ -567,7 +611,7 @@ class Engine:
         return self.infra_max("vram_reserve_gb")
 
     def vram_free(self, gpu: dict) -> float:
-        """GB of `gpu` a new job may still be granted. As in the RAM pool, every grant counts in full even while
+        """GB of `gpu` a new job may still be granted. Every grant counts in full even while
         its job is still loading, and memory used outside the platform's jobs (the desktop, other programs) is
         taken off as well."""
         granted = sum(g["vram"] for g in self.grants.values() if g.get("gpu") == gpu["index"])
@@ -581,10 +625,8 @@ class Engine:
         with contextlib.suppress(psutil.Error):
             proc = psutil.Process(g["pid"])
             pids = {proc.pid, *(c.pid for c in proc.children(recursive=True))}
-        cg = self.turn_mem.get(g["sid"], {}).get("cgroup")
-        if g["unit"] and cg:
-            with contextlib.suppress(OSError):
-                pids |= {int(x) for x in (cg.parent / f"{g['unit']}.scope" / "cgroup.procs").read_text().split()}
+        if g["unit"] and (base := pool_cgroup()):
+            pids |= cgroup_pids(base / f"{g['unit']}.scope")
         return pids
 
     def sample_vram(self, snap: dict) -> None:
@@ -642,20 +684,19 @@ class Engine:
         fits = [(free, gpu["index"]) for gpu in self.infra.latest()["gpus"] if (free := self.vram_free(gpu)) >= vram]
         return min(fits)[1] if fits else None
 
-    async def ram_grant(self, caller: dict, gb: float, wait_s: float, pid: int, cmd: str, vram: float = 0.0) -> dict:
-        """Grant `gb` of the pool, and `vram` GB on one GPU when asked, to the `loop run` job `pid` once both are
-        free, waiting up to `wait_s`. Only a job granted VRAM sees a GPU, and only that one. The grant is what the
-        job reserves; its scope is capped at job_memory_max_factor times that, so it can borrow free pool RAM and
-        is stopped first when the pool fills up (`police_ram`)."""
+    async def ram_grant(self, caller: dict, wait_s: float, pid: int, cmd: str, vram: float = 0.0,
+                        job: str | None = None) -> dict:
+        """Start the `loop run` job `pid` once the RAM pool is less than RAM_ADMIT full, and `vram` GB is free on one
+        GPU when asked, waiting up to `wait_s`; one job starts per sample, so the next sees what the last one took.
+        Only a job granted VRAM sees a GPU, and only that one. The job runs in its own scope in the pool, where
+        `police_ram` can stop it. A detached `job` outlives the turn."""
         if caller["kind"] not in ("worker", "meta-work"):
             raise AgentError("`loop run` belongs to workers and the meta-work")
-        most = self.jobs_max_gb()
-        if not 0 < gb <= most:
-            raise AgentError(f"--ram must be more than 0 and at most {most} GB (the {self.pool_gb()} GB pool minus "
-                             f"the {self.infra_max('session_reserve_gb')} GB kept for agent sessions)")
-        factor = workspace_config(self.wsp(caller["ws"]))["infra"]["job_memory_max_factor"] if caller.get("ws") \
-            else DEFAULTS["infra"]["job_memory_max_factor"]
-        max_gb = round(gb * max(1.0, factor), 2)
+        if job:
+            jrow = self.db.one("SELECT unit FROM jobs WHERE id=? AND session=? AND status='running'", job, caller["id"])
+            if not jrow:
+                raise AgentError(f"no running job {job} of this session")
+            self.db.update("jobs", {"id": job}, pid=pid)
         if vram:
             gpus = self.infra.latest()["gpus"]
             if not gpus:
@@ -665,17 +706,17 @@ class Engine:
                 raise AgentError(f"--vram must be more than 0 and at most {most} GB (the largest GPU minus the "
                                  f"{self.vram_reserve()} GB kept free)")
         key, deadline = next(self.grant_ids), time.time() + min(wait_s, 1800)
-        self.ram_waiting[key] = {"sid": caller["id"], "gb": gb, "vram": vram, "cmd": cmd[:120], "since": time.time()}
+        self.ram_waiting[key] = {"sid": caller["id"], "vram": vram, "cmd": cmd[:120], "since": time.time()}
         try:
             while True:
-                free, gpu = self.job_free(), self.pick_gpu(vram) if vram else None
-                # No await between the check and the grant, so concurrent requests are served one at a time
-                if gb <= free and (not vram or gpu is not None):
+                ts, gpu = self.infra.latest()["ts"], self.pick_gpu(vram) if vram else None
+                # No await between the check and the start, so concurrent requests are served one at a time
+                if self.ram_share() < RAM_ADMIT and ts > self.ram_admitted and (not vram or gpu is not None):
+                    self.ram_admitted = ts
                     unit = f"{unit_prefix()}-{caller['id']}-job{key}-{int(time.time() * 1000)}" \
                         if systemd_available() else None
-                    text, env = f"granted {gb} GB ({round(free - gb, 1)} GB left to grant)", {}
-                    if max_gb > gb:
-                        text += f", usable up to {max_gb} GB while the pool has room"
+                    unit = jrow["unit"] if job else unit
+                    text, env = f"started with the RAM pool {self.ram_share():.0%} in use", {}
                     if vram:
                         # The GPU's level without grants is what its jobs are measured against
                         if not any(g.get("gpu") == gpu for g in self.grants.values()):
@@ -685,34 +726,37 @@ class Engine:
                         # nvidia-smi numbers GPUs by PCI bus, CUDA by speed unless told otherwise
                         env = {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": str(gpu),
                                "LOOP_VRAM_GB": str(vram)}
-                    self.grants[key] = {"sid": caller["id"], "gb": gb, "max_gb": max_gb, "pid": pid,
-                                        "cmd": cmd[:120], "unit": unit, "rss_gb": 0.0, "oom": 0,
-                                        "started": time.time(), "vram": vram,
-                                        **({"gpu": gpu, "vram_used": 0.0} if vram else {})}
-                    return {"text": text, "grant": key, "max_gb": max_gb,
-                            "argv": job_scope_argv(unit, max_gb) if unit else [], "env": env}
+                    self.grants[key] = {"sid": caller["id"], "pid": pid, "cmd": cmd[:120], "unit": unit,
+                                        "rss_gb": 0.0, "oom": 0, "started": time.time(), "vram": vram,
+                                        **({"gpu": gpu, "vram_used": 0.0} if vram else {}),
+                                        **({"job": job} if job else {})}
+                    if job:
+                        self.db.update("jobs", {"id": job}, grant_info=json.dumps(self.grants[key]))
+                    return {"text": text, "grant": key, "argv": job_scope_argv(unit) if unit else [], "env": env}
                 if time.time() >= deadline:
-                    what = f"{gb} GB" + (f" and {vram} GB VRAM" if vram else "")
-                    raise AgentError(f"{what} not free after {wait_s / 60:.0f} min ({self.ram_text()}); run it "
-                                     "later, with less memory, or ask for less")
+                    what = "the RAM pool has no room" + (f" or {vram} GB VRAM is not free" if vram else "")
+                    raise AgentError(f"{what} after {wait_s / 60:.0f} min ({self.ram_text()}); run it later or "
+                                     "make it use less memory")
                 await asyncio.sleep(1)
         finally:
             self.ram_waiting.pop(key, None)
 
-    def ram_release(self, caller: dict, key: int, killed: bool = False) -> dict:
+    def ram_release(self, caller: dict, key: int, killed: bool = False, job: str | None = None) -> dict:
+        if job and key not in self.grants:  # started before a platform restart, restored under another key
+            key = next((k for k, g in self.grants.items() if g.get("job") == job), key)
         g, peak = self.grants.get(key), None
         if g and g["sid"] == caller["id"]:
             peak = g.get("peak_gb")
             self.end_grant(key, killed)
-        # A job stopped by the platform was not killed by the kernel at its cap; `loop run` says why
+        # A job stopped by the platform was not killed by the kernel; `loop run` says why
         stopped = self.stopped.get(key)
         text = self.stopped.pop(key)[1] if stopped and stopped[0] == caller["id"] else "released"
         return {"text": text, "peak_gb": peak}
 
     def end_grant(self, key: int, killed: bool = False) -> None:
-        """Free a grant and stop whatever still runs in its job's scope, so no job outlives its grant. A job killed
-        at its cap (seen by the sampler, or as a SIGKILL exit by `loop run`, since a scope emptied by the kill
-        may vanish before the next sample) goes into the turn's memory note."""
+        """End a job's record and stop whatever still runs in its scope, so no job outlives it. A job the kernel
+        killed (seen by the sampler, or as a SIGKILL exit by `loop run`, since a scope emptied by the kill may
+        vanish before the next sample) goes into the turn's memory note."""
         g = self.grants.pop(key, None)
         if not g:
             return
@@ -720,8 +764,8 @@ class Engine:
             kill_unit(g["unit"])
         if (g["oom"] or killed) and g["sid"] in self.turn_mem:
             what = f"{g['oom']} of its processes were killed" if g["oom"] else "it was killed (SIGKILL)"
-            self.turn_mem[g["sid"]]["over"].append(f"`{g['cmd']}`: {what}, most likely for reaching its "
-                                                   f"{g['max_gb']} GB cap ({g['gb']} GB grant)")
+            self.turn_mem[g["sid"]]["over"].append(f"`{g['cmd']}`: {what}, most likely by the kernel when the RAM "
+                                                   "pool ran out")
 
     @staticmethod
     def mem_note(mem: dict) -> str:
@@ -732,6 +776,112 @@ class Engine:
             parts.append(f"{mem['oom']} process(es) killed by the kernel for lack of memory")
         parts += mem.get("over", [])
         return "; ".join(parts)
+
+    # ---------- detached jobs (`loop run --detach`) ----------
+    def job_register(self, caller: dict, cmd: str) -> dict:
+        """Record a detached job before its `loop run` helper starts outside the caller's turn. The helper asks
+        to start like any `loop run`; the job may outlive the turn and a platform restart, and its result
+        goes back to the caller when it ends (`job_end`)."""
+        if caller["kind"] not in ("worker", "meta-work"):
+            raise AgentError("`loop run` belongs to workers and the meta-work")
+        jid = f"j-{secrets.token_hex(3)}"
+        log_path = self.gdir(caller["ws"], caller["goal"]) / "runs" / caller["id"] / "artifacts" / "jobs" / f"{jid}.log"
+        unit = job_unit(jid) if systemd_available() else None
+        self.db.x("INSERT INTO jobs(id, session, ws, goal, cmd, log, unit, started, status) VALUES(?,?,?,?,?,?,?,?,?)",
+                  jid, caller["id"], caller["ws"], caller["goal"], cmd[:500], str(log_path), unit, time.time(),
+                  "running")
+        hours = workspace_config(self.wsp(caller["ws"]))["job_timeout_h"]
+        return {"id": jid, "log": str(log_path), "tmp": str(jobs_tmp_root() / jid), "unit": unit,
+                "text": f"Started job {jid} in the background (output: {log_path}; stopped after {hours} h). End "
+                        "your turn now instead of waiting: when the job ends, its result arrives as a new message."}
+
+    def job_report(self, caller: dict, jid: str, text: str) -> str:
+        if not self.db.one("SELECT 1 FROM jobs WHERE id=? AND session=?", jid, caller["id"]):
+            raise AgentError(f"no job {jid} of this session")
+        self.job_end(jid, text)
+        return "reported"
+
+    def job_end(self, jid: str, how: str) -> None:
+        """Close a running detached job once, whichever comes first (its helper's report, a helper gone without
+        one, job_timeout_h), and hand its result to its session."""
+        j = self.db.one("SELECT * FROM jobs WHERE id=? AND status='running'", jid)
+        if not j:
+            return
+        self.db.update("jobs", {"id": jid}, status="done", ended=time.time())
+        shutil.rmtree(jobs_tmp_root() / jid, ignore_errors=True)
+        try:
+            with open(j["log"], "rb") as fh:
+                fh.seek(max(0, fh.seek(0, os.SEEK_END) - 4000))
+                tail = fh.read().decode(errors="replace").splitlines()[-20:]
+        except OSError:
+            tail = []
+        mins = (time.time() - j["started"]) / 60
+        took = f"{mins:.0f} min" if mins < 90 else f"{mins / 60:.1f} h"
+        log_text = f"End of {j['log']}:\n```\n" + "\n".join(tail) + "\n```" if tail else f"{j['log']} is empty."
+        self.db.update("jobs", {"id": jid}, result=f"[Job {jid} ended] {how} after {took}: `{j['cmd']}`\n{log_text}")
+        self.wake_for_jobs(j["session"])
+
+    def police_jobs(self) -> None:
+        """End detached jobs whose helper is gone without a report, and stop those past job_timeout_h."""
+        for j in self.db.q("SELECT * FROM jobs WHERE status='running'"):
+            age, hours = time.time() - j["started"], workspace_config(self.wsp(j["ws"]))["job_timeout_h"]
+            if age > hours * 3600:
+                self.job_end(j["id"], f"stopped at the {hours} h limit for jobs")
+                self.kill_job(j)
+            elif (not psutil.pid_exists(j["pid"])) if j["pid"] else age > 120:
+                self.job_end(j["id"], "its `loop run` helper ended without reporting how the job ended")
+
+    def stop_jobs(self, why: str, **where) -> list[str]:
+        """Stop the running detached jobs matching `where`. Their result is not delivered: whoever stops them
+        knows why."""
+        cond = " AND ".join(f"{k}=?" for k in where)
+        rows = self.db.q(f"SELECT * FROM jobs WHERE status='running' AND {cond}", *where.values())
+        for j in rows:
+            self.db.update("jobs", {"id": j["id"]}, status="stopped", ended=time.time(), result=why, reported=1)
+            self.kill_job(j)
+        return [j["id"] for j in rows]
+
+    def kill_job(self, j: dict) -> None:
+        for key in [k for k, g in self.grants.items() if g.get("job") == j["id"]]:
+            self.end_grant(key)
+        if j["unit"]:  # the helper's service and the job's scope
+            subprocess.run(["systemctl", "--user", "kill", "-s", "SIGKILL", f"{j['unit']}.service",
+                            f"{j['unit']}.scope"], capture_output=True)
+        elif j["pid"]:  # without systemd the helper leads a process group of its own, the job in it
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(j["pid"], signal.SIGKILL)
+        shutil.rmtree(jobs_tmp_root() / j["id"], ignore_errors=True)
+
+    def wake_for_jobs(self, sid: str) -> None:
+        """Hand a session the results of its ended detached jobs: a worker gets them as a turn of its own once
+        it is idle, or the meta-work gets them as an event when that turn cannot start; the meta-work gets its
+        own as an event."""
+        s = self.db.session(sid)
+        jobs = self.db.q("SELECT id, result FROM jobs WHERE session=? AND status='done' AND reported=0 "
+                         "ORDER BY ended", sid)
+        if not s or not jobs or (s["kind"] == "worker" and s["status"] == "running"):
+            return  # a worker in a turn gets them when that turn ends (worker_turn)
+        ws, gid = s["ws"], s["goal"]
+        if self.goal_row(ws, gid)["status"] != "running":
+            return
+        self.db.x(f"UPDATE jobs SET reported=1 WHERE id IN ({','.join('?' * len(jobs))})", *(j["id"] for j in jobs))
+        text = "\n\n".join(j["result"] for j in jobs)
+        if s["kind"] == "worker":
+            try:
+                if not Path(s["cwd"]).exists():
+                    raise AgentError("its worktree no longer exists")
+                self.check_limit(s["agent"])
+                self.check_dispatch(ws, gid)
+            except AgentError as exc:
+                text = (f"[System] {sid} was not resumed with the result of its job ({exc}); pass it on with "
+                        f"`loop send {sid}` if it is still needed.\n{text}")
+            else:
+                self.db.update("sessions", {"id": sid}, status="running")
+                self._count_dispatch(ws, gid)
+                self.spawn(self.worker_turn(sid, text, woken=", ".join(j["id"] for j in jobs)), goal=(ws, gid))
+                return
+        self.db.push_inbox(ws, gid, "system", {"text": text})
+        self.kick(ws, gid)
 
     # ---------- running one turn of any session ----------
     @staticmethod
@@ -838,7 +988,7 @@ class Engine:
         self.runner.set_pool(self.pool_gb())
         self.turn_mem[sid] = {"peak": 0.0, "oom": 0, "over": []}
         # Each turn gets its own scratch dir; it goes when the turn ends (its processes are stopped by then),
-        # and so do the RAM grants of its `loop run` jobs
+        # and so do its `loop run` jobs, all but the detached ones
         scratch = Path(spec.env["TMPDIR"])
         scratch.mkdir(parents=True, exist_ok=True)
         try:
@@ -846,8 +996,9 @@ class Engine:
                                         timeout_s=cfg["turn_timeout_min"] * 60, memory_max_gb=mem)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
-            jobs = [g["cmd"] for g in self.grants.values() if g["sid"] == sid]
-            for key in [k for k, g in self.grants.items() if g["sid"] == sid]:
+            mine = [k for k, g in self.grants.items() if g["sid"] == sid and not g.get("job")]
+            jobs = [self.grants[k]["cmd"] for k in mine]
+            for key in mine:
                 self.end_grant(key)
             for key in [k for k, (owner, _) in self.stopped.items() if owner == sid]:
                 self.stopped.pop(key)
@@ -890,8 +1041,8 @@ class Engine:
                 f"- Project repo: {p / 'repo'} (the human's checkout: read it, do not change it). Integration branch "
                 f"{gitops.int_branch(gid)} is checked out at {gitops.int_worktree(p, gid)}.\n"
                 f"- Worker agents (the human fixed model and effort; you pick the CLI and name the role):\n{agents}\n"
-                f"- Your turns and the workers share a {self.pool_gb()} GB RAM pool; jobs that need more than about "
-                "2 GB run through `loop run --ram <GB>`, and only jobs run with `--vram <GB>` as well see a GPU.\n"
+                f"- Your turns and the workers share a {self.pool_gb()} GB RAM pool; only jobs run with "
+                "`loop run --vram <GB>` see a GPU.\n"
                 f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.")
 
     async def start_goal(self, ws: str, gid: str) -> None:
@@ -935,6 +1086,7 @@ class Engine:
             if s["status"] == "queued":
                 self.db.update("sessions", {"id": s["id"]}, status="stopped", updated=time.time())
                 self.advice_result(s, "stopped", "The goal stopped before the consultation started.")
+        self.stop_jobs("the goal stopped", ws=ws, goal=gid)
         kinds = ("worker", "meta-work", "meta-advisor") if meta_work else ("worker", "meta-advisor")
         for s in self.db.q("SELECT id, kind FROM sessions WHERE ws=? AND goal=?", ws, gid):
             if s["kind"] in kinds:
@@ -1084,7 +1236,8 @@ class Engine:
             return
         self.check_budget(ws, gid)
         pending = self.db.one("SELECT id FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0", ws, gid)
-        if self.workers(ws, gid, running_only=True) or self.advisors(ws, gid) or pending \
+        jobs = self.db.one("SELECT 1 FROM jobs WHERE ws=? AND goal=? AND status='running'", ws, gid)
+        if self.workers(ws, gid, running_only=True) or self.advisors(ws, gid) or pending or jobs \
                 or self.goal_row(ws, gid)["final_turn"]:
             if progressed:  # work the meta-work did itself next to running workers counts too
                 self.set_goal(ws, gid, idle_streak=0)
@@ -1293,7 +1446,7 @@ class Engine:
         if errors:
             raise AgentError("; ".join(errors))
         self.check_limit(conf["agent"])
-        self.check_ram(ws, gid, cfg["infra"]["min_free_ram_gb"])
+        self.check_ram(ws, gid)
         sess = self.new_session(ws, gid, "meta-advisor", "meta-advisor", conf,
                                 self.wsp(ws) / "meta", parent=caller["id"])
         self.db.update("sessions", {"id": sess["id"]}, status="queued")
@@ -1445,11 +1598,13 @@ class Engine:
         m = self.goal_row(ws, gid)
         self.set_goal(ws, gid, worker_turns=m["worker_turns"] + 1, idle_streak=0)
 
-    async def worker_turn(self, sid: str, prompt: str) -> None:
+    async def worker_turn(self, sid: str, prompt: str, woken: str = "") -> None:
         sess = self.db.session(sid)
         ws, gid = sess["ws"], sess["goal"]
         try:
             text, n = await self._worker_turn(sess, prompt)
+            if woken:
+                text += f"\n[System] The platform started this turn with the result of {woken}."
         except Exception as exc:
             # Any platform failure must still reach the meta-work, or the goal stalls on a phantom worker
             log.exception("worker turn failed for %s", sid)
@@ -1461,6 +1616,7 @@ class Engine:
             text = (f"[Worker {sid} · role {cur['role']}] turn failed inside the platform: {exc!r}. Its worktree "
                     f"{cur['cwd']} is intact; retry with `loop send {sid}` or spawn a new worker.")
         self.db.push_inbox(ws, gid, "worker_done", {"text": text, "sid": sid, "turn": n})
+        self.wake_for_jobs(sid)  # detached jobs that ended during the turn
         self.check_budget(ws, gid)
         self.kick(ws, gid)
 
@@ -1504,11 +1660,16 @@ class Engine:
         return text, n
 
     async def stop_worker(self, caller: dict | None, sid: str) -> str:
+        if caller and sid.startswith("j-"):
+            stopped = self.stop_jobs("stopped by the meta-work", id=sid, ws=caller["ws"], goal=caller["goal"])
+            return f"Stopped job {sid}." if stopped else f"{sid} is not a running job of this goal (see `loop ls`)"
         w = self.own_worker(caller, sid) if caller else self.db.session(sid)
+        jobs = self.stop_jobs(f"stopped with {sid}", session=sid) if w else []
+        also = f" Stopped its jobs {', '.join(jobs)}." if jobs else ""
         if not w or not self.runner.running(sid):
-            return f"{sid} is not running"
+            return f"{sid} is not running.{also}"
         await self.runner.kill(sid, stopped=True)
-        return f"Stopped {sid}; its partial work was snapshotted and a report will follow."
+        return f"Stopped {sid}; its partial work was snapshotted and a report will follow.{also}"
 
     def merge_worker(self, caller: dict, sid: str) -> str:
         self.require_meta_work(caller)
@@ -1569,13 +1730,18 @@ class Engine:
     # ---------- read views (agents + UI) ----------
     def ls_text(self, caller: dict) -> str:
         rows = self.workers(caller["ws"], caller["goal"])
-        if not rows:
-            return "No workers yet."
-        out = ["id | role | agent/model | status | turns | context | tokens | merged | branch"]
+        out = ["id | role | agent/model | status | turns | context | tokens | merged | branch"] if rows else \
+            ["No workers yet."]
         for w in rows:
             out.append(f"{w['id']} | {w['role']} | {w['agent']}/{w['model'] or '-'} | {w['status']} | "
                        f"{w['turns']} | ~{digest.fmt_tokens(w['context'])} | {digest.fmt_tokens(w['tokens'])} | "
                        f"{'yes' if w['merged'] else 'no'} | {w['branch']}")
+        jobs = self.db.q("SELECT * FROM jobs WHERE ws=? AND goal=? AND status='running' ORDER BY started",
+                         caller["ws"], caller["goal"])
+        if jobs:
+            out += ["", "Running jobs (`loop run --detach`): id | session | running for | command"]
+            out += [f"{j['id']} | {j['session']} | {(time.time() - j['started']) / 3600:.1f} h | `{j['cmd'][:120]}`"
+                    for j in jobs]
         return "\n".join(out)
 
     def show_text(self, caller: dict, sid: str, turn: int | None, full: bool, with_log: bool = False) -> str:

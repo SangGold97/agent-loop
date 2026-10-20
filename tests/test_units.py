@@ -1,11 +1,13 @@
 import io
 import json
+import os
 import subprocess
 import time
+from collections import deque, namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agentloop import digest, guard
+from agentloop import digest, guard, infra
 from agentloop.adapters.agy import AgyAdapter
 from agentloop.adapters.base import RunSpec, ParseState, to_tokens, usage_limit_until
 from agentloop.adapters.claude import ClaudeAdapter
@@ -668,3 +670,18 @@ def test_usage_limit_until_reads_the_reset():
     assert time.localtime(usage_limit_until("You've hit your session limit · resets 5pm (Asia/Bangkok)", now))[2:5] \
         == (7, 17, 0)
     assert usage_limit_until("usage limit reached", now) == now + 3600
+
+
+def test_wsl_disk_free_counts_the_virtual_disks_own_free_blocks(monkeypatch, tmp_path):
+    vhdx = tmp_path / "ext4.vhdx"
+    vhdx.write_bytes(b"")
+    os.truncate(vhdx, 200 * 2**30)  # sparse: the virtual disk has grown to 200 GiB
+    usage = namedtuple("usage", "total used free")
+    gib = 2**30
+    sizes = {"/": usage(1000 * gib, 140 * gib, 860 * gib), str(vhdx.parents[-3]): usage(238 * gib, 202 * gib, 36 * gib)}
+    monkeypatch.setattr(infra.psutil, "disk_usage", lambda p: sizes[str(p)])
+    probe = infra.Infra.__new__(infra.Infra)
+    probe.disk_path, probe.vhdx, probe.history, probe.gpu_reading = "/", vhdx, deque(), (0.0, [])
+    # 60 GiB free inside the disk (deleted files never shrink it) plus 36 GiB it can still grow into
+    snap = probe.sample()
+    assert (snap["disk_free_gb"], snap["disk_total_gb"]) == (96, 236)

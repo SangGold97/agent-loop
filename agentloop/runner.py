@@ -42,6 +42,30 @@ def scratch_root() -> Path:
     return Path(tempfile.gettempdir()) / unit_prefix()
 
 
+def jobs_tmp_root() -> Path:
+    """Where detached jobs' TMPDIRs live: apart from the turns' scratch root, which a restart clears."""
+    return Path(tempfile.gettempdir()) / f"{unit_prefix()}-jobs"
+
+
+def job_unit(jid: str) -> str:
+    """Base name of a detached job's units (its `loop run` service and its job scope). The `<prefix>-*` pattern
+    a restart stops does not match it, so the job survives a platform restart."""
+    return f"{unit_prefix()}job-{jid}"
+
+
+_pool_cgroup: Path | None = None
+
+
+def pool_cgroup() -> Path | None:
+    """The pool slice's cgroup directory, where every turn's and job's scope sits."""
+    global _pool_cgroup
+    if _pool_cgroup is None:
+        cg = subprocess.run(["systemctl", "--user", "show", "-p", "ControlGroup", "--value", pool_slice()],
+                            capture_output=True, text=True).stdout.strip()
+        _pool_cgroup = Path("/sys/fs/cgroup" + cg) if cg else None
+    return _pool_cgroup
+
+
 @dataclass
 class TurnResult:
     vendor_id: str | None
@@ -99,11 +123,10 @@ def reap_scope(unit: str | None, pgid: int) -> tuple[str, ...]:
     return tuple(cmds)
 
 
-def job_scope_argv(unit: str, gb: float) -> list[str]:
-    """Prefix that runs a `loop run` job in its own scope in the pool, capped at its grant: the kernel stops a
-    job that outgrows its grant inside that scope, so its overuse never costs another process."""
+def job_scope_argv(unit: str) -> list[str]:
+    """Prefix that runs a `loop run` job in its own scope in the pool, where the platform measures and stops it."""
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", f"--slice={pool_slice()}",
-            "-p", f"MemoryMax={gb}G", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=continue", "--"]
+            "-p", "OOMPolicy=continue", "--"]
 
 
 def kill_unit(unit: str) -> None:

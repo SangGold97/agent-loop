@@ -1,4 +1,4 @@
-"""SQLite runtime state: goals, sessions, turns, inbox events, notes, meta-chat messages."""
+"""SQLite runtime state: goals, sessions, turns, inbox events, notes, meta-chat messages, detached jobs."""
 from __future__ import annotations
 
 import json
@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS notes(
   status TEXT, mode TEXT, source_session TEXT);
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY, session TEXT, ts REAL, role TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS jobs(
+  id TEXT PRIMARY KEY, session TEXT, ws TEXT, goal TEXT, cmd TEXT, log TEXT, unit TEXT, pid INT,
+  grant_info TEXT, started REAL, ended REAL, status TEXT, result TEXT, reported INT DEFAULT 0);
 """
 # Columns added after the first release: (table, column, type)
 ADDED_COLUMNS = [("goals", "first_started", "REAL"), ("goals", "base", "TEXT"), ("goals", "pushed", "REAL"),

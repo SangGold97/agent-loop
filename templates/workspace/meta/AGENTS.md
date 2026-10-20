@@ -33,8 +33,8 @@ Never wait for or poll workers, the advisor or slow background jobs; end the tur
   (fresh context, own worktree and branch). You choose the CLI and name the role; the human fixed model and effort.
 - `loop send W <<'EOF' ... EOF` continues an idle worker, keeping its context
 - `loop advise <<'EOF' ...question... EOF` asks the advisor; its reply arrives as an `[Advice]` event
-- `loop ls`, `loop show W [--turn N] [--full] [--log]` (`--log`: the commands a worker ran), `loop stop W`,
-  `loop merge W`, `loop infra`, `loop budget`, `loop run --ram GB [--vram GB] -- CMD`
+- `loop ls`, `loop show W [--turn N] [--full] [--log]` (`--log`: the commands a worker ran), `loop stop W|J`,
+  `loop merge W`, `loop infra`, `loop budget`, `loop run [--vram GB] [--detach] -- CMD`
 - `loop done --status success|partial|blocked <<'EOF' ...report... EOF`
 - Always quote the heredoc delimiter (`<<'EOF'`): with a bare `<<EOF` the shell runs backticks and `$(...)` in your text.
 
@@ -67,14 +67,15 @@ are met, partly met and not met, maps each criterion to its evidence and verdict
 while any of them fails.
 
 ### Resources
-Your turns and all workers share one RAM pool. A job that needs more than about 2 GB, yours or a worker's, runs
-through `loop run --ram <GB> -- <cmd>`, which waits while that RAM is held by other jobs; part of the pool is
-never granted to jobs, so they cannot keep you from starting workers. `loop infra` shows
-what each job holds. A long job in your own turn holds back every event until it ends. A GPU
-is visible only to a job run with `--vram <GB>` as well, which waits until that much VRAM is free on one GPU; any
-worker can run one, so GPU work needs no special spawn.
+Your turns and all workers share one RAM pool. Heavy jobs, yours or a worker's, run through `loop run -- <cmd>`.
+While the pool is over 90% used, `loop run` waits and spawns or sends are refused until it has room; above 95% the
+newest heavy process is stopped. A long job in your own turn holds back every event until it ends. `loop run --detach`
+runs a job past the turn: yours reports as an event; a worker's resumes that worker, which stays idle (sendable)
+meanwhile. `loop stop J` stops a job, `loop stop W` a worker with its jobs. A GPU is visible only to a job run
+with `--vram <GB>`, which waits until that much VRAM is free on one GPU; any worker can run one, so GPU work needs
+no special spawn.
 
-Check `loop infra` before spawning many workers or heavy jobs. The platform tells you when RAM, disk or a CLI's
+Check `loop infra` before spawning many workers or running a heavy job. The platform tells you when RAM, disk or a CLI's
 usage limit runs low; for a CLI, start new workers on another one.
 
 ## MODE: META-CHAT

@@ -2,15 +2,17 @@
 import asyncio
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 import yaml
 
-from agentloop import workspace
+from agentloop import engine as engine_mod, workspace
 from agentloop.engine import AgentError
-from agentloop.runner import scratch_root, systemd_available
+from agentloop.runner import jobs_tmp_root, scratch_root, systemd_available
 
 from conftest import wait_for
 
@@ -480,7 +482,7 @@ def test_goal_id_is_the_title_slug_and_must_be_new(server):
     assert workspace.list_goals(ws) == ["another-goal", "loc-tu-theo-tan-suat"]
 
 
-def test_loop_run_grants_ram_and_stops_a_job_over_its_grant(server):
+def test_loop_run_starts_jobs_in_the_pool_and_stops_them_with_their_helper(server):
     client, engine = server
     client.post("/api/workspaces", json={"name": "ram"})
     ws = Path(engine.wsp("ram"))
@@ -492,9 +494,10 @@ def test_loop_run_grants_ram_and_stops_a_job_over_its_grant(server):
                     == "awaiting_review" and v)
     sid = next(s["id"] for s in view["sessions"] if s["kind"] == "worker")
     out = (ws / "goals" / gid / "runs" / sid / "artifacts" / "ram.txt").read_text().split("\n---\n")
-    adj, ok, over, spawn, orphan, gpu = out
-    assert "granted 0.5 GB" in ok and "job ran, adj 0 cuda ''" in ok and "done (exit 0)" in ok
-    assert "peak RAM" in ok and "of 0.5 GB" in ok  # the job lives long enough to be sampled
+    adj, ok, old, spawn, orphan, gpu = out
+    assert "started with the RAM pool" in ok and "job ran, adj 0 cuda ''" in ok and "done (exit 0)" in ok
+    assert "peak RAM" in ok  # the job lives long enough to be sampled
+    assert "--ram is ignored" in old and "done (exit 0)" in old
     if engine.infra.latest()["gpus"]:
         assert "0.5 GB VRAM on GPU" in gpu and "gpu job" in gpu and " 0.5" in gpu
     else:
@@ -502,10 +505,51 @@ def test_loop_run_grants_ram_and_stops_a_job_over_its_grant(server):
     assert "workers can only use" in spawn
     assert not engine.grants and not engine.ram_waiting
     if systemd_available():  # the pool, the job scopes and the OOM order need systemd
-        assert adj == "0 1000"
-        assert "reaching its 0.15 GB cap (0.1 GB grant)" in over and orphan == "job stopped"
-        digest = engine.db.one("SELECT payload FROM inbox WHERE ws='ram' AND kind='worker_done'")["payload"]
-        assert "Memory in this worker's turn" in digest and "reaching its 0.15 GB cap" in digest
+        assert adj == "0 200" and orphan == "job stopped"
+
+
+def test_detached_job_outlives_its_turn_and_resumes_the_worker(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "detach"})
+    ws = Path(engine.wsp("detach"))
+    gid = client.post("/api/workspaces/detach/goals", json={
+        "title": "Detached job", "spec": "Create hello.py DETACH", "goal": "- hello.py exists",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/detach/{gid}/start")
+    wait_for(lambda: client.get(f"/api/goals/detach/{gid}").json()["row"]["status"] == "awaiting_review", timeout=60)
+    gdir = ws / "goals" / gid
+    sid = engine.db.one("SELECT id FROM sessions WHERE ws='detach' AND kind='worker'")["id"]
+    started = (gdir / "runs" / sid / "artifacts" / "detach.txt").read_text()
+    assert started.count("Started job j-") == 2 and "End your turn now" in started
+    # While the worker was idle, the meta-work saw its jobs running
+    assert (gdir / ".ls.txt").read_text().count(f"| {sid} |") == 2
+    # The short job outlived the turn that started it, and its result started the worker's next turn
+    resumed = (gdir / "runs" / sid / "artifacts" / "job.txt").read_text()
+    assert "ended] exit 0" in resumed and f"detached job output {jobs_tmp_root()}" in resumed
+    digests = engine.db.q("SELECT payload FROM inbox WHERE ws='detach' AND kind='worker_done' ORDER BY id")
+    assert len(digests) == 2 and "result of j-" in digests[1]["payload"]
+    # Closing the goal stopped the long job; no grant, process or scratch dir is left
+    assert sorted(j["status"] for j in engine.db.q("SELECT status FROM jobs WHERE ws='detach'")) == ["done", "stopped"]
+    assert not engine.grants
+    wait_for(lambda: not [p for p in psutil.process_iter(["cmdline"]) if p.info["cmdline"] == ["sleep", "300"]],
+             timeout=10)
+    assert not jobs_tmp_root().exists() or not any(jobs_tmp_root().iterdir())
+
+
+def test_detached_jobs_end_at_their_time_limit_or_with_their_helper(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "jobs"})
+    helper = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    for jid, pid, started in (("j-old", helper.pid, time.time() - 10 * 3600), ("j-gone", gone.pid, time.time())):
+        engine.db.x("INSERT INTO jobs(id, session, ws, goal, cmd, log, pid, started, status) VALUES(?,?,?,?,?,?,?,?,?)",
+                    jid, "w-none", "jobs", "g", "sleep 60", "/nonexistent.log", pid, started, "running")
+    # The sampling loop stops a job past job_timeout_h and ends one whose helper is gone
+    wait_for(lambda: not engine.db.q("SELECT 1 FROM jobs WHERE ws='jobs' AND status='running'"), timeout=10)
+    assert helper.wait(timeout=10) == -9
+    results = {r["id"]: r["result"] for r in engine.db.q("SELECT id, result FROM jobs WHERE ws='jobs'")}
+    assert "stopped at the 9 h limit" in results["j-old"] and "ended without reporting" in results["j-gone"]
 
 
 def test_cli_usage_limits_are_kept_shown_and_warned(server, monkeypatch):
@@ -544,7 +588,7 @@ def test_cli_usage_limits_are_kept_shown_and_warned(server, monkeypatch):
 def test_goal_refused_for_ram_waits_instead_of_pausing(server, monkeypatch):
     client, engine = server
     client.post("/api/workspaces", json={"name": "ramwait"})
-    monkeypatch.setattr(engine, "ram_free", lambda: 0.0)  # another goal holds the pool
+    monkeypatch.setattr(engine, "ram_share", lambda: 0.92)  # another goal fills the pool
     gid = client.post("/api/workspaces/ramwait/goals", json={
         "title": "RAM wait", "spec": "Create hello.py", "goal": "- hello.py exists",
         "config": goal_config()}).json()["id"]
@@ -557,62 +601,80 @@ def test_goal_refused_for_ram_waits_instead_of_pausing(server, monkeypatch):
     assert row["status"] == "running" and row["idle_streak"] == 0 and row["meta_turns"] == 1
     assert ("ramwait", gid) in engine.ram_wait_goals
     monkeypatch.undo()
-    # RAM is back: one event wakes the meta-work, whose next turn (here) closes the goal
+    # The pool has room again: one event wakes the meta-work, whose next turn (here) closes the goal
     wait_for(lambda: client.get(f"/api/goals/ramwait/{gid}").json()["row"]["status"] == "awaiting_review")
-    assert engine.db.one("SELECT 1 FROM inbox WHERE ws='ramwait' AND payload LIKE '%RAM is free again%'")
+    assert engine.db.one("SELECT 1 FROM inbox WHERE ws='ramwait' AND payload LIKE '%has room again%'")
     assert ("ramwait", gid) not in engine.ram_wait_goals
 
 
-def test_ram_grant_counts_grants_in_full(server):
+def test_loop_run_waits_while_the_pool_is_full(server, monkeypatch):
     _, engine = server
     worker = {"id": "w-ramtest", "kind": "worker"}
     with pytest.raises(AgentError, match="belongs to workers"):
-        asyncio.run(engine.ram_grant({"id": "mc-x", "kind": "meta-chat"}, 1, 0, os.getpid(), "x"))
-    # Part of the pool is never granted to jobs; it stays for agent sessions
-    with pytest.raises(AgentError, match="kept for agent sessions"):
-        asyncio.run(engine.ram_grant(worker, engine.jobs_max_gb() + 0.5, 0, os.getpid(), "x"))
-    free = engine.job_free()
-    first = asyncio.run(engine.ram_grant(worker, round(free * 0.6, 1), 0, os.getpid(), "python big.py"))
-    # The first grant still counts in full although its job uses nothing yet, so a second one cannot see that RAM
-    with pytest.raises(AgentError, match="not free") as refused:
-        asyncio.run(engine.ram_grant(worker, round(free * 0.6, 1), 0, os.getpid(), "python other.py"))
-    assert "w-ramtest" in str(refused.value) and "python big.py" in str(refused.value)
-    engine.ram_release(worker, first["grant"])
+        asyncio.run(engine.ram_grant({"id": "mc-x", "kind": "meta-chat"}, 0, os.getpid(), "x"))
+    monkeypatch.setattr(engine, "ram_share", lambda: 0.91)
+    with pytest.raises(AgentError, match="RAM pool has no room") as refused:
+        asyncio.run(engine.ram_grant(worker, 0, os.getpid(), "python big.py"))
+    assert "waits from 90%" in str(refused.value)
+    monkeypatch.undo()
+    first = asyncio.run(engine.ram_grant(worker, 5, os.getpid(), "python big.py"))
+    assert "started with the RAM pool" in first["text"]
+    # One job starts per sample, so the next one sees what the first took
+    started = time.time()
+    second = asyncio.run(engine.ram_grant(worker, 5, os.getpid(), "python other.py"))
+    assert time.time() - started > 0.5
+    for key in (first["grant"], second["grant"]):
+        engine.ram_release(worker, key)
     assert not engine.grants
-    # A grant whose `loop run` died without releasing it is dropped by the sampling loop
+    # A job whose `loop run` died without ending it is dropped by the sampling loop
     dead = subprocess.Popen(["true"])
     dead.wait()
-    asyncio.run(engine.ram_grant(worker, 0.1, 0, dead.pid, "true"))
+    asyncio.run(engine.ram_grant(worker, 5, dead.pid, "true"))
     wait_for(lambda: not engine.grants, timeout=10)
 
 
-def test_ram_jobs_borrow_and_the_one_furthest_over_is_stopped(server, monkeypatch):
+def test_newest_heavy_process_is_stopped_when_the_pool_is_full(server, monkeypatch):
     _, engine = server
     worker = {"id": "w-rampolice", "kind": "worker"}
     # The sampling loop must not measure the fake jobs over what the test sets
     monkeypatch.setattr(engine.infra, "sample", lambda: (_ for _ in ()).throw(RuntimeError("paused by the test")))
+    monkeypatch.setattr(engine_mod, "HEAVY_GB", 0.02)
     helpers = [subprocess.Popen(["sleep", "60"]) for _ in range(2)]
+    tool = None
     try:
-        a, b = (asyncio.run(engine.ram_grant(worker, 0.2, 0, h.pid, f"job{i}")) for i, h in enumerate(helpers))
-        # The scope's cap is above the grant, so the job can borrow free pool RAM
-        assert a["max_gb"] == 0.3 and "usable up to 0.3 GB" in a["text"]
-        engine.grants[a["grant"]]["rss_gb"], engine.grants[b["grant"]]["rss_gb"] = 0.25, 0.28
-        # While the pool has room, borrowing is fine
+        a, b = [], []
+        for out, h in zip((a, b), helpers):
+            engine.ram_admitted = 0.0
+            out.append(asyncio.run(engine.ram_grant(worker, 0, h.pid, f"job{h.pid}"))["grant"])
+        a, b = a[0], b[0]
+        engine.grants[a]["rss_gb"], engine.grants[b]["rss_gb"] = 0.5, 0.01
+        # A tool process of the worker's turn, started after the jobs (a process's start time is known to about a
+        # second) and holding more than HEAVY_GB
+        time.sleep(1.5)
+        tool = subprocess.Popen([sys.executable, "-c", "import time; x = bytearray(60 * 2**20); time.sleep(60)"])
+        wait_for(lambda: psutil.Process(tool.pid).memory_info().rss > 50 * 2**20)
+        engine.turn_mem[worker["id"]] = {"peak": 0.0, "oom": 0, "over": [], "tools": {tool.pid}}
+        # Below RAM_KILL nothing is stopped
+        monkeypatch.setattr(engine, "ram_share", lambda: 0.92)
         engine.police_ram()
-        assert a["grant"] in engine.grants and b["grant"] in engine.grants
-        # Once it is nearly full, the job furthest over its grant goes first, and only it
-        monkeypatch.setattr(engine, "ram_free", lambda: 0.5)
+        assert tool.poll() is None and a in engine.grants and b in engine.grants
+        # Above it the newest heavy process goes first, and only it; a job under HEAVY_GB is never chosen
+        monkeypatch.setattr(engine, "ram_share", lambda: 0.96)
         engine.police_ram()
-        assert a["grant"] in engine.grants and b["grant"] not in engine.grants
-        assert "0.3 GB RAM against its 0.2 GB grant" in engine.ram_release(worker, b["grant"])["text"]
-        # While the stopped job's memory frees, the other is left alone, and a job within its grant never goes
+        assert tool.wait(timeout=5) == -9 and a in engine.grants
+        assert "was stopped at 0.1 GB because the RAM pool was 96% full" in engine.turn_mem[worker["id"]]["over"][0]
+        # While its memory frees, nothing else goes; then the next newest heavy one does
         engine.police_ram()
-        assert a["grant"] in engine.grants
+        assert a in engine.grants
         engine.ram_settle = 0.0
-        engine.grants[a["grant"]]["rss_gb"] = 0.2
         engine.police_ram()
-        assert a["grant"] in engine.grants
+        assert a not in engine.grants and b in engine.grants
+        assert "newest heavy process" in engine.ram_release(worker, a)["text"]
     finally:
+        engine.turn_mem.pop(worker["id"], None)
+        if tool:
+            tool.kill()
+            tool.wait()
         for key in [k for k, g in engine.grants.items() if g["sid"] == worker["id"]]:
             engine.ram_release(worker, key)
         for h in helpers:
@@ -634,7 +696,8 @@ def test_vram_grants_fit_gpus_and_stop_the_job_furthest_over(server, monkeypatch
     helpers = [subprocess.Popen(["sleep", "60"]) for _ in range(6)]
 
     def grant(vram, i):
-        return asyncio.run(engine.ram_grant(worker, 0.1, 0, helpers[i].pid, f"job{i}", vram=vram))
+        engine.ram_admitted = 0.0  # the fake sample never advances
+        return asyncio.run(engine.ram_grant(worker, 0, helpers[i].pid, f"job{i}", vram=vram))
 
     try:
         with pytest.raises(AgentError, match="at most 23.0 GB"):
@@ -644,7 +707,7 @@ def test_vram_grants_fit_gpus_and_stop_the_job_furthest_over(server, monkeypatch
         assert a["env"]["CUDA_VISIBLE_DEVICES"] == "1" and "10 GB VRAM on GPU1" in a["text"]
         assert b["env"] == {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "0", "LOOP_VRAM_GB": "15"}
         # Grants count in full before their jobs load: GPU0 has 23 - 2 - 15 = 6 GB left, GPU1 1 GB
-        with pytest.raises(AgentError, match="10 GB VRAM not free"):
+        with pytest.raises(AgentError, match="10 GB VRAM is not free"):
             grant(10, 2)
         d = grant(5, 3)
         assert d["env"]["CUDA_VISIBLE_DEVICES"] == "0"

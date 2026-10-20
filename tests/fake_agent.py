@@ -72,7 +72,10 @@ def main():
         emit({"type": "result", "subtype": "success", "is_error": True, "result": text, "session_id": sid})
         return
     if role == "worker":
-        if "FAIL" in prompt:
+        if "[Job " in prompt:  # resumed by the platform with the result of a detached job
+            Path(".artifacts/job.txt").write_text(prompt)
+            text = "**Result:** read the job result"
+        elif "FAIL" in prompt:
             Path("broken.txt").write_text("partial\n")
             text = "**Result:** failed on purpose\n**Issues:** simulated failure"
         else:
@@ -85,24 +88,23 @@ def main():
             if "TAMPER" in prompt:  # a write the guard does not see; the platform must revert it
                 (gdir / "goal.md").write_text("- nothing to do\n")
             if "RAMJOB" in prompt:
-                # A tool process goes first to the OOM killer within a second; the CLI and a granted job do not
+                # A tool process is put ahead of the CLI and `loop run` jobs for the OOM killer within a sample
                 tool = subprocess.Popen(["sleep", "5"])
                 time.sleep(2.5)
                 adj = " ".join(Path(f"/proc/{pid}/oom_score_adj").read_text().strip() for pid in (os.getpid(), tool.pid))
                 tool.kill()
-                ok = loop("run", "--ram", "0.5", "--", sys.executable, "-c",
+                ok = loop("run", "--", sys.executable, "-c",
                           "import os, time; print('job ran, adj', open('/proc/self/oom_score_adj').read().strip(), "
                           "'cuda', repr(os.environ.get('CUDA_VISIBLE_DEVICES'))); time.sleep(2.5)")
                 # Only a job granted VRAM sees a GPU (refused on a host without one)
-                gpu = loop("run", "--ram", "0.1", "--vram", "0.5", "--", sys.executable, "-c",
+                gpu = loop("run", "--vram", "0.5", "--", sys.executable, "-c",
                            "import os; print('gpu job', os.environ.get('CUDA_VISIBLE_DEVICES'), "
                            "os.environ.get('LOOP_VRAM_GB'))")
-                # A job that outgrows its grant is killed in its own scope; steering is refused to a worker
-                over = loop("run", "--ram", "0.1", "--", sys.executable, "-c",
-                            "import time; x = bytearray(300 * 2**20); time.sleep(10)")
+                # An agent used to granting RAM is told the flag is gone; steering is refused to a worker
+                old = loop("run", "--ram", "4", "--", "true")
                 spawn = loop("spawn", "--agent", "fake", "--role", "x", "--prompt", "x")
-                # The job of a killed `loop run` helper is stopped with it, not left running without a grant
-                helper = subprocess.Popen(["loop", "run", "--ram", "0.2", "--", "sleep", "30"],
+                # The job of a killed `loop run` helper is stopped with it, not left running unwatched
+                helper = subprocess.Popen(["loop", "run", "--", "sleep", "30"],
                                           stderr=subprocess.PIPE, text=True)
                 helper.stderr.readline()
                 time.sleep(0.5)
@@ -114,7 +116,13 @@ def main():
                     orphan = "job stopped"
                 except psutil.TimeoutExpired:
                     orphan = "job still running"
-                Path(".artifacts/ram.txt").write_text("\n---\n".join([adj, ok, over, spawn, orphan, gpu]))
+                Path(".artifacts/ram.txt").write_text("\n---\n".join([adj, ok, old, spawn, orphan, gpu]))
+            if "DETACH" in prompt:
+                # One job ends soon after this turn, the other runs until the goal closes
+                out = [loop("run", "--detach", "--", sys.executable, "-c",
+                            "import os, time; time.sleep(3); print('detached job output', os.environ['TMPDIR'])"),
+                       loop("run", "--detach", "--", "sleep", "300")]
+                Path(".artifacts/detach.txt").write_text("\n---\n".join(out))
             emit({"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "Bash", "input": {"command": "python hello.py"}}]}})
             emit({"type": "user", "message": {"content": [{"type": "tool_result", "content": "hello"}]}})
@@ -156,8 +164,12 @@ def main():
             text += "\n" + loop("done", "--status", "partial", stdin="- wip only")
         elif "[Kickoff]" in prompt:
             (gdir / "plan.md").write_text("# Plan\n\n- [ ] create hello.py\n")
-            task = "Create hello.py" + "".join(f" {k}" for k in ("TAMPER", "RAMJOB") if k in _spec(gdir))
+            task = "Create hello.py" + "".join(f" {k}" for k in ("TAMPER", "RAMJOB", "DETACH") if k in _spec(gdir))
             text = loop("spawn", "--agent", "fake", "--role", "coder", "--prompt", task)
+        elif "DETACH" in _spec(gdir) and "[Worker" in prompt and "result of j-" not in prompt:
+            # The worker left a job running: wait for the digest of the turn the platform starts with its result
+            (gdir / ".ls.txt").write_text(loop("ls"))
+            text = "waiting for the worker's job"
         elif m := re.search(r"\[Worker (w-\w+)", prompt):
             (wt / "meta_note.txt").write_text("written by the meta-work\n")  # uncommitted: the merge must keep it
             merged = loop("merge", m.group(1))

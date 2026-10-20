@@ -27,15 +27,12 @@ defaults:
   base_branch: null           # null = the branch repo/ has checked out when the goal starts; its PR targets it
 
 infra:
-  min_free_ram_gb: 2          # refuse to start workers while less RAM than this is free; jobs over their RAM grant
-                              # are stopped below it (largest value of all workspaces)
-  pool_reserve_gb: 4          # host RAM kept out of the pool all sessions share (largest value of all workspaces)
-  session_reserve_gb: 4       # pool RAM never granted to `loop run` jobs, kept for agent sessions (largest value)
-  job_memory_max_factor: 1.5  # a job's hard RAM cap is its grant times this; above the grant it borrows free pool RAM
+  pool_reserve_gb: 3          # host RAM kept out of the pool all sessions share (largest value of all workspaces)
   worker_memory_max_gb: null  # optional hard cap per session on top of the pool (null = pool only)
   vram_reserve_gb: 1          # VRAM kept free on each GPU; jobs over their VRAM grant are stopped below it
 
 turn_timeout_min: 180
+job_timeout_h: 9              # a detached job (`loop run --detach`) is stopped after this many hours
 
 guard:
   deny_patterns: []           # extra regexes; matching shell commands are blocked for all agents
