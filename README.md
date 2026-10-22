@@ -36,7 +36,7 @@ To run it on another machine and use the UI from this one, see [remote/README.md
 | **Meta-work** | One meta session per goal, driven by events (kickoff, worker finished, note, goal changed, budget). It does simple work itself in the integration worktree, where the platform commits its changes as `meta-work(<sid>)` (before a spawn, merge or `loop done` and after each turn), and delegates the rest to workers. |
 | **Meta-chat** | Prompt-by-prompt chat bound to a goal (agent/model/effort chosen per chat); runs commands and tools freely but does not change project code, and steers the goal only through notes you approve. A chat is stored once you send its first message and can be deleted from its bar. |
 | **Meta-advisor** | Consulted through `loop advise`, with agent/model/effort from `goal.yaml → meta_advisor`. Each question starts a new read-only session for one turn right away, while the meta-work turn that asked goes on. Its final text returns to the meta-work inbox as `[Advice]`; the Advisor button beside META-WORK opens its session log, without a chat composer. |
-| **Worker** | A Claude Code, Codex or agy session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<role>-<sid>`; accepted work is merged into `loop/<goal>/integration`. It receives the meta-work's prompt as is and a generic `worker/AGENTS.md`, nothing about the platform; `.venv/` and `.artifacts/` stay out of git, and `.artifacts/` is kept in `runs/<sid>/artifacts/`. |
+| **Worker** | A Claude Code, Codex or agy session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<role>-<sid>`; accepted work is merged into `loop/<goal>/integration`. It receives the meta-work's prompt as is and a generic `worker/AGENTS.md`, nothing about the platform; `.venv/` and `.artifacts/` stay out of git, and `.artifacts/` is kept in `runs/<sid>/artifacts/`. `loop retire W` removes a finished worker's worktree but keeps its branch and log; a worker without a worktree shows as retired and can no longer be sent. |
 | **Digest** | What a finished worker turn sends to the meta-work: a line naming the worker, role and turn, then its final reply as is (kept in `runs/<sid>/t<n>.out.md`). Its changes and the commands it ran are pulled on demand, with git and `loop show W --log`. |
 | **goal.md** | Success criteria, free text. Lines `- verify: \`cmd\`` are run on the committed integration branch before a `success` close (a run that edits tracked files is rejected and its edits and new files are undone); everything else is judged by the meta-work. |
 
@@ -92,18 +92,25 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   samples, takes them in the same order (`oom_score_adj` from 1000 for the newest heavy one, 200 for other tool
   processes, 0 for CLIs and helpers). If the helper dies, the platform stops the job with it. Processes outside
   the platform can still exhaust the host's reserve. The digest reports a turn's memory peak and kills.
+- CPU is shared by weight, never reserved or waited for: an idle core goes to whoever wants it. Every turn and job
+  scope has the same `CPUWeight`, so under contention busy jobs split the CPU per scope rather than per thread, and
+  the pool slice as a whole yields to the platform server and the human's own programs. A `loop run` job gets
+  `OMP_NUM_THREADS`, `MKL_NUM_THREADS` and `OPENBLAS_NUM_THREADS` set to the cores the running jobs leave free (at
+  least 2) and `OMP_WAIT_POLICY=PASSIVE`, unless its environment sets them. When the CPU averages 90% or more over
+  10 minutes, running goals hear it once (again after it falls below 70%); `loop infra` shows that average.
 - `loop run --detach` runs the job's helper as a user service outside the turn's scope and returns at once, so
   the agent ends its turn instead of polling. The job stays in the pool, survives a platform restart and is stopped
-  after `job_timeout_h` (9 h). When it ends, the platform resumes the worker with its exit status and log tail,
+  after `job_timeout_h` (9 h); a `loop run` inside it belongs to the job, not to the turn. When it ends, the platform resumes the worker with its exit status and log tail,
   right after its turn if one is running; when that turn cannot start (budget, RAM, usage limit), or the job is
   the meta-work's, the result goes to the meta-work as an event. `loop stop` stops one job, or a worker with its
   jobs, and a goal that stops stops its jobs.
 - VRAM is granted per job: `loop run --vram <GB> -- <cmd>` waits until one GPU has that much left
   to grant (its total minus `vram_reserve_gb`, minus every grant in full and what other programs use), then shows
   the job that GPU alone. VRAM has no hard cap, so a job may use more than its grant while the GPU has room; once
-  less than `vram_reserve_gb` is free there, the job furthest over its grant is stopped, and a job that keeps to
-  its grant is never stopped for another's overuse. Where the driver lists no processes (WSL), a GPU's jobs are
-  measured by what it uses above its level without grants, and with several grants the newest goes first. GPUs are
+  less than `vram_reserve_gb` is free there, the newest job with processes on that GPU is stopped, as the RAM pool
+  stops its newest heavy process (the newest job granted the GPU where the driver names no processes), and memory
+  outside the platform's jobs stops nothing. Where the driver gives no memory per process (WSL), the jobs together
+  are measured by what the GPU uses above its level without grants, which the job's record keeps. GPUs are
   read every 10 s on their own thread (CPU, RAM and disk every 2 s); while `nvidia-smi` hangs, the infra page marks the last reading stale and no job is
   stopped on it.
 - Events handed to a meta-work turn stay "in flight" until it completes; a crash, restart or stop puts them back.

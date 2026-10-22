@@ -123,10 +123,18 @@ def reap_scope(unit: str | None, pgid: int) -> tuple[str, ...]:
     return tuple(cmds)
 
 
+# CPU is shared by weight, never by reservation: an idle core goes to whoever wants it. The pool slice yields to its
+# siblings (the platform server and the human's own programs) when they contend; inside it every turn and job scope
+# has the same weight, so busy jobs split the CPU per scope rather than per thread. An explicit weight on a scope
+# makes systemd enable the cpu controller in the slice, without which the kernel would share it per thread.
+POOL_CPU_WEIGHT = 20
+SCOPE_CPU = ["-p", "CPUWeight=100"]
+
+
 def job_scope_argv(unit: str) -> list[str]:
     """Prefix that runs a `loop run` job in its own scope in the pool, where the platform measures and stops it."""
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", f"--slice={pool_slice()}",
-            "-p", "OOMPolicy=continue", "--"]
+            "-p", "OOMPolicy=continue", *SCOPE_CPU, "--"]
 
 
 def kill_unit(unit: str) -> None:
@@ -155,7 +163,7 @@ class Runner:
         """Cap the slice all sessions share, so an out-of-memory kill stays among agent processes."""
         if gb != self.pool_gb and systemd_available():
             subprocess.run(["systemctl", "--user", "set-property", "--runtime", pool_slice(), f"MemoryMax={gb}G",
-                            "MemorySwapMax=0"], capture_output=True)
+                            "MemorySwapMax=0", f"CPUWeight={POOL_CPU_WEIGHT}"], capture_output=True)
             self.pool_gb = gb
 
     def clear_pool(self) -> None:
@@ -178,7 +186,7 @@ class Runner:
             unit = f"{unit_prefix()}-{key}-{int(time.time() * 1000)}"
             caps = ["-p", f"MemoryMax={memory_max_gb}G", "-p", "MemorySwapMax=0"] if memory_max_gb else []
             argv = ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
-                    f"--slice={pool_slice()}", "-p", "OOMPolicy=continue", *caps, "--", *argv]
+                    f"--slice={pool_slice()}", "-p", "OOMPolicy=continue", *SCOPE_CPU, *caps, "--", *argv]
         env = child_env({**spec.env, **adapter.env(spec)})
         st = ParseState()
         raw_log.parent.mkdir(parents=True, exist_ok=True)

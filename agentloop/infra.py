@@ -33,14 +33,16 @@ def gpus() -> list[dict]:
     for line in out.stdout.strip().splitlines():
         idx, uuid, name, used, total, util = [x.strip() for x in line.split(",")]
         rows.append({"index": int(idx), "uuid": uuid, "name": name, "mem_used_gb": round(float(used) / 1024, 1),
-                     "mem_total_gb": round(float(total) / 1024, 1), "util": float(util), "procs": {}})
-    # VRAM per process tells which `loop run` job holds what; WSL lists no processes, so `procs` stays empty there
+                     "mem_total_gb": round(float(total) / 1024, 1), "util": float(util), "procs": {}, "pids": []})
+    # VRAM per process tells which `loop run` job holds what; WSL names the processes but not their memory, so
+    # `procs` stays empty there and only `pids` says who is on the GPU
     apps = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory",
                            "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
     by_uuid = {g["uuid"]: g for g in rows}
     for line in apps.stdout.strip().splitlines():
         try:
             uuid, pid, used = [x.strip() for x in line.split(",")]
+            by_uuid[uuid]["pids"].append(int(pid))
             by_uuid[uuid]["procs"][int(pid)] = round(float(used) / 1024, 2)
         except (KeyError, ValueError):  # an unknown GPU or "[N/A]" memory
             continue
@@ -96,6 +98,24 @@ def scope_memory(path: Path) -> tuple[int, int] | None:
         return None
 
 
+def scope_cpu_s(path: Path) -> float | None:
+    """CPU seconds a scope's processes have used, those that have exited included."""
+    try:
+        return next(int(line.split()[1]) for line in (path / "cpu.stat").read_text().splitlines()
+                    if line.startswith("usage_usec ")) / 1e6
+    except (OSError, StopIteration, ValueError):
+        return None
+
+
+def tree_cpu_s(pid: int) -> float:
+    """CPU seconds of a process and its living children (without systemd, where a job has no scope)."""
+    try:
+        proc = psutil.Process(pid)
+        return sum(sum(p.cpu_times()[:2]) for p in [proc, *proc.children(recursive=True)])
+    except psutil.Error:
+        return 0.0
+
+
 def wsl_vhdx() -> Path | None:
     """This WSL distro's virtual disk (ext4.vhdx, as its /mnt path), or None outside WSL.
 
@@ -148,9 +168,12 @@ class Infra:
                         time.time() - self.gpu_reading[0], exc_info=True)
 
     def gpu_loop(self) -> None:
+        # Every GPU_POLL_S from the start of one poll to the next, however long nvidia-smi takes
+        tick = time.monotonic()
         while True:
             self.poll_gpus()
-            time.sleep(GPU_POLL_S)
+            tick = max(tick + GPU_POLL_S, time.monotonic())
+            time.sleep(tick - time.monotonic())
 
     def sample(self) -> dict:
         vm, disk = psutil.virtual_memory(), psutil.disk_usage(self.disk_path)
@@ -174,9 +197,13 @@ class Infra:
     def latest(self) -> dict:
         return self.history[-1] if self.history else self.sample()
 
+    def cpu_avg(self) -> float:
+        """Mean CPU use over the samples kept (up to the last 10 minutes)."""
+        return sum(s["cpu_pct"] for s in self.history) / len(self.history) if self.history else 0.0
+
     def summary(self) -> str:
         s = self.latest()
         gpu = "; ".join(f"GPU{g['index']} {g['name']} {g['mem_used_gb']}/{g['mem_total_gb']} GB, {g['util']:.0f}%"
                         for g in s["gpus"]) or "none"
-        return (f"CPU {s['cpu_pct']:.0f}% of {s['cpus']} cores · "
+        return (f"CPU {s['cpu_pct']:.0f}% of {s['cpus']} cores ({self.cpu_avg():.0f}% over 10 min) · "
                 f"RAM {s['ram_free_gb']}/{s['ram_total_gb']} GB free · disk {s['disk_free_gb']} GB free · GPU {gpu}")

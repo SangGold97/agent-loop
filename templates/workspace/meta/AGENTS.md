@@ -32,6 +32,8 @@ Never wait for or poll workers, the advisor or slow background jobs; end the tur
 - `loop spawn --agent claude|codex|agy --role R <<'EOF' ...prompt... EOF` starts a new worker
   (fresh context, own worktree and branch). You choose the CLI and name the role; the human fixed model and effort.
 - `loop send W <<'EOF' ... EOF` continues an idle worker, keeping its context
+- `loop retire W` removes a worker's worktree to free disk once its line of work is over; its branch, log and
+  artifacts stay, but it can no longer be sent. Remove worktrees this way, not with `git worktree remove`.
 - `loop advise <<'EOF' ...question... EOF` asks the advisor; its reply arrives as an `[Advice]` event
 - `loop ls`, `loop show W [--turn N] [--full] [--log]` (`--log`: the commands a worker ran), `loop stop W|J`,
   `loop merge W`, `loop infra`, `loop budget`, `loop run [--vram GB] [--detach] -- CMD`
@@ -72,8 +74,8 @@ While the pool is over 90% used, `loop run` waits and spawns or sends are refuse
 newest heavy process is stopped. A long job in your own turn holds back every event until it ends. `loop run --detach`
 runs a job past the turn: yours reports as an event; a worker's resumes that worker, which stays idle (sendable)
 meanwhile. `loop stop J` stops a job, `loop stop W` a worker with its jobs. A GPU is visible only to a job run
-with `--vram <GB>`, which waits until that much VRAM is free on one GPU; any worker can run one, so GPU work needs
-no special spawn.
+with `--vram <GB>`, which waits until that much VRAM is free on one GPU, and when the GPU fills up the newest job on
+it is stopped; any worker can run one, so GPU work needs no special spawn.
 
 Check `loop infra` before spawning many workers or running a heavy job. The platform tells you when RAM, disk or a CLI's
 usage limit runs low; for a CLI, start new workers on another one.

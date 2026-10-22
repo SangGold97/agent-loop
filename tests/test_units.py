@@ -21,6 +21,12 @@ def test_deep_merge():
     assert out == {"workers": {"claude": {"model": "b", "effort": "high"}}, "x": 1}
 
 
+def test_core_ranges():
+    from agentloop.engine import core_ranges
+    assert core_ranges({6, 7, 8}) == "6-8" and core_ranges({0, 1, 2, 3, 14, 15, 9}) == "0-3,9,14-15"
+    assert core_ranges(set(range(os.cpu_count()))) == "all" and core_ranges(set()) == ""
+
+
 def test_to_tokens():
     assert to_tokens("400k") == 400_000 and to_tokens("1M") == 1_000_000 and to_tokens(None) is None
 

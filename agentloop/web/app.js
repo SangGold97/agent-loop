@@ -37,7 +37,8 @@ const fmtDur = hours => { const m = Math.round(hours * 60); return `${Math.floor
 const label = s => String(s || '').replace(/_/g, ' ');
 const firstLine = s => (String(s || '').split('\n').find(l => l.trim()) || '').slice(0, 220);
 // Workers and meta sessions are shown with three states only
-const simpleStatus = s => (s.live || s.status === 'running') ? 'running' : s.status === 'failed' ? 'failed' : 'idle';
+const simpleStatus = s => (s.live || s.status === 'running') ? 'running' : s.status === 'failed' ? 'failed'
+  : s.kind === 'worker' && s.status === 'retired' ? 'retired' : 'idle';
 let refreshTimer = null;
 
 async function api(path, opts = {}) {
@@ -654,7 +655,10 @@ function renderSideInfra() {
   $('#si-ts').textContent = hhmm(s.ts);
   $('#si-vals').innerHTML = `<span class="c-cpu">cpu ${s.cpu_pct.toFixed(0)}%</span><span class="c-ram">ram ${(s.ram_total_gb - s.ram_free_gb).toFixed(1)}/${s.ram_total_gb}G</span>`
     + (gpu ? `<span class="c-gpu">vram ${gpu.mem_used_gb}/${gpu.mem_total_gb}G · util ${gpu.util.toFixed(0)}%${stale ? ` · ${stale}` : ''}</span>` : '');
-  $('#nav-infra').title = `${s.sessions?.length || 0} agent sessions using ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB · open the infra page`;
+  // Jobs running while their session has no turn (detached) are not in any session's memory
+  const inTurn = new Set((s.sessions || []).map(x => x.id)), alone = (s.jobs || []).filter(j => !inTurn.has(j.sid));
+  $('#nav-infra').title = `${s.sessions?.length || 0} agent sessions using ${(s.sessions || []).reduce((a, x) => a + x.rss_gb, 0).toFixed(1)} GB`
+    + (alone.length ? ` · ${alone.length} jobs outside a turn using ${alone.reduce((a, j) => a + j.rss_gb, 0).toFixed(1)} GB` : '') + ' · open the infra page';
   drawChart($('#side-chart'), 120 / INFRA_SAMPLE_S, true);
 }
 function renderReport() {
@@ -1013,7 +1017,7 @@ function saveNoteModal(text) {
   }, 'Note saved');
 }
 
-// WORKER-AGENTS: running first, then newest; header = role · status · CLI · model/effort
+// WORKER-AGENTS: running first, retired (no worktree) last, newest first within each; header = role · status · CLI · model/effort
 const workerOpen = w => simpleStatus(w) === 'running' || !!S.open[w.id];
 function workerHead(w) {
   const st = simpleStatus(w);
@@ -1025,7 +1029,7 @@ function paintHeads() { renderMetaWorkHead(); renderWorkers(); if (!$('#chat-sel
 function renderWorkers() {
   const el = $('#ov-workers');
   if (!el) return;
-  const rank = w => simpleStatus(w) === 'running' ? 1 : 0;
+  const rank = w => ({ running: 2, retired: 0 })[simpleStatus(w)] ?? 1;
   const workers = S.goal.sessions.filter(s => s.kind === 'worker').sort((a, b) => rank(b) - rank(a) || b.created - a.created);
   $('#ov-wcount').textContent = workers.length ? `(${workers.length})` : '';
   const ids = workers.map(w => w.id).join();
@@ -1164,21 +1168,37 @@ function gpuStale(s) {
   const age = s.gpus_ts ? s.ts - s.gpus_ts : 0;
   return age > GPU_STALE_S ? `stale ${Math.round(age)}s` : '';
 }
-// VRAM a session's `loop run` jobs use, per GPU (sessions themselves see no GPU); `?` where a GPU's jobs cannot
-// be told apart (WSL with several grants)
+// VRAM granted to a session's `loop run` jobs, per GPU (sessions themselves see no GPU)
 function gpuCell(x) {
-  const used = {};
-  for (const g of (x.grants || []).filter(g => g.vram)) {
-    used[g.gpu] = used[g.gpu] === null || g.vram_used == null ? null : (used[g.gpu] || 0) + g.vram_used;
-  }
-  return Object.entries(used).map(([i, gb]) => `GPU${i} ${gb === null ? '?' : gb.toFixed(1)} GB`).join('<br>');
+  const granted = {};
+  for (const g of (x.grants || []).filter(g => g.vram)) granted[g.gpu] = (granted[g.gpu] || 0) + g.vram;
+  return Object.entries(granted).map(([i, gb]) => `GPU${i} ${gb} GB`).join('<br>');
 }
-// A session's `loop run` jobs: RAM in use (and VRAM granted), then jobs still waiting to start
+// A session's `loop run` jobs: RAM in use, then jobs still waiting to start
 function grantCell(x) {
-  const held = (x.grants || []).map(g => `RAM ${g.rss_gb.toFixed(1)} GB` + (g.vram ? ` · VRAM ${g.vram} GB` : ''));
+  const held = (x.grants || []).map(g => `RAM ${g.rss_gb.toFixed(1)} GB`);
   const waiting = (x.waiting || []).map(w => `<span style="color:var(--warn)">${w.vram ? `${w.vram}G VRAM ` : ''}`
     + `wait ${Math.floor((S.infra.ts - w.since) / 60)} mins</span>`);
   return [...held, ...waiting].join('<br>');
+}
+// Running `loop run` jobs, whether their session is in a turn or not: owner, command, use, whether the job
+// outlives the turn (detached, or run inside a detached job) and how long it has run
+function jobsTable(jobs) {
+  if (!jobs?.length) return '<div class="empty">No jobs running.</div>';
+  // From the Python interpreter on, as `python -I …`; wrappers before it (taskset, env, paths) are left out
+  const pyCmd = cmd => {
+    const t = cmd.split(' '), i = t.findIndex(x => /^python[\d.]*$/.test(x.split('/').pop()));
+    return i < 0 ? cmd : ['python', ...t.slice(i + 1)].join(' ');
+  };
+  const cpu = j => j.cpu_cores == null ? '' : `${j.cpu_cores.toFixed(1)} cores${j.cpus ? ` (core_num ${j.cpus})` : ''}`;
+  const gpu = j => !j.vram ? '' : `GPU${j.gpu} · ${j.vram} GB`;
+  const detached = j => !j.job ? 'no' : j.within ? 'yes (inside the job)' : 'yes';
+  return `<table class="t"><tr><th>job</th><th>session</th><th>role</th><th>goal</th><th>command</th><th>cpu</th><th>ram</th><th>vram (grant)</th><th>detached</th><th>time</th></tr>
+    ${jobs.map(j => `<tr><td>${esc(j.job || '')}</td><td>${esc(j.sid)}</td><td>${esc(j.role || j.kind)}</td>
+      <td>${j.ws ? `<a href="#/ws/${j.ws}/g/${j.goal}">${esc(j.ws)}/${esc(j.goal)}</a>` : ''}</td>
+      <td><code class="small" title="${esc(j.cmd)}" style="word-break:break-all">${esc(pyCmd(j.cmd))}</code></td>
+      <td>${cpu(j)}</td><td>${j.rss_gb.toFixed(1)} GB</td><td>${gpu(j)}</td><td>${detached(j)}</td>
+      <td>${fmtDur((S.infra.ts - j.started) / 3600)}</td></tr>`).join('')}</table>`;
 }
 function renderInfra() {
   const s = S.infra;
@@ -1188,16 +1208,17 @@ function renderInfra() {
       <span class="faint small">updated ${hhmm(s.ts)}</span></div>
     <div class="grid cols-4">
       <div class="card stat"><div class="label">cpu</div><div class="value">${s.cpu_pct.toFixed(0)}%</div>${meter(s.cpu_pct, 100)}<div class="sub">${s.cpus} cores</div></div>
-      <div class="card stat"><div class="label">ram</div><div class="value">${usedRam} / ${s.ram_total_gb} GB</div>${meter(s.ram_pct, 100)}<div class="sub">${s.ram_free_gb} GB available · swap ${s.swap_pct}%${s.pool_gb ? ` · agent pool ${s.pool_free_gb} of ${s.pool_gb} GB free` : ''}</div></div>
+      <div class="card stat"><div class="label">ram</div><div class="value">${usedRam} / ${s.ram_total_gb} GB</div>${meter(s.ram_pct, 100)}<div class="sub">${s.ram_free_gb} GB available · swap ${s.swap_pct}%</div></div>
       <div class="card stat"><div class="label">disk</div><div class="value">${s.disk_free_gb} GB free</div>${meter(s.disk_total_gb - s.disk_free_gb, s.disk_total_gb)}<div class="sub">of ${s.disk_total_gb} GB</div></div>
       <div class="card stat"><div class="label">gpu</div>${s.gpus.length ? s.gpus.map(g => `<div class="value">${esc(g.name)}</div>${meter(g.mem_used_gb, g.mem_total_gb)}<div class="sub">VRAM ${g.mem_used_gb}/${g.mem_total_gb} GB · util ${g.util}%${gpuStale(s) ? ` · ${gpuStale(s)} (nvidia-smi not answering)` : ''}</div>`).join('')
         : '<div class="value">none</div><div class="sub">jobs run CPU-only; loop run --vram is refused</div>'}</div>
     </div>
     <div style="margin-top:22px">${box('last 10 minutes', `<div class="legend"><span><i style="background:var(--accent)"></i>cpu %</span><span><i style="background:var(--reply)"></i>ram %</span>${s.gpus.length ? '<span><i style="background:var(--warn)"></i>vram %</span>' : ''}</div>
       <canvas class="chart" id="infra-chart"></canvas>`)}</div>
-    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>role</th><th>CLI</th><th>goal</th><th>memory</th><th>gpu</th><th>jobs</th></tr>
+    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>role</th><th>CLI</th><th>goal</th><th>memory</th><th>vram (grant)</th><th>jobs</th></tr>
       ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)}</td><td>${esc(x.role || '')}</td><td>${esc(cliName(x.agent || ''))}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td><td>${gpuCell(x)}</td><td>${grantCell(x)}</td></tr>`).join('')}</table>`
-        : '<div class="empty">No agent sessions running.</div>'}`)}</div></div>`;
+        : '<div class="empty">No agent sessions running.</div>'}`)}</div>
+    <div style="margin-top:22px">${box('running jobs', jobsTable(s.jobs))}</div></div>`;
   drawChart($('#infra-chart'), 600 / INFRA_SAMPLE_S);
 }
 // Line chart of cpu/ram(/vram) %; `pct` labels the grid lines as 0%…100% (sidebar)

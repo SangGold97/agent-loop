@@ -1,16 +1,18 @@
 """End-to-end with the scripted fake agent: workspace -> goal -> meta-work -> worker -> merge -> done."""
 import asyncio
+import json
 import os
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import psutil
 import pytest
 import yaml
 
-from agentloop import engine as engine_mod, workspace
+from agentloop import engine as engine_mod, runner as runner_mod, workspace
 from agentloop.engine import AgentError
 from agentloop.runner import jobs_tmp_root, scratch_root, systemd_available
 
@@ -94,6 +96,27 @@ def test_full_goal(server):
                               text=True).stdout
     assert f"loop/{gid}/integration" in branches and sid not in branches
     assert client.get(f"/api/goals/demo/{gid}").json()["row"]["status"] == "done"
+
+
+def test_retired_worker_keeps_branch_and_log_but_cannot_be_sent(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "retire"})
+    ws = Path(engine.wsp("retire"))
+    gid = client.post("/api/workspaces/retire/goals", json={
+        "title": "Retire", "spec": "Create hello.py RETIRE", "goal": "- hello.py exists",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/retire/{gid}/start")
+    view = wait_for(lambda: (v := client.get(f"/api/goals/retire/{gid}").json())["row"]["status"]
+                    == "awaiting_review" and v)
+    w = next(s for s in view["sessions"] if s["kind"] == "worker")
+    merged, retired, send, again, ls = (ws / "goals" / gid / ".retire.txt").read_text().split("\n---\n")
+    assert merged.startswith("Merged") and retired.startswith(f"Retired {w['id']}")
+    assert "is retired" in send and w["branch"] in send and again == f"{w['id']} is already retired."
+    assert "| retired |" in ls and w["status"] == "retired"
+    # The worktree is gone; the branch and the kept outputs stay
+    assert not Path(w["cwd"]).exists() and (ws / "goals" / gid / "runs" / w["id"] / "artifacts" / "prompt.txt").exists()
+    assert subprocess.run(["git", "rev-parse", "--verify", "-q", w["branch"]], cwd=ws / "repo").returncode == 0
+    assert client.post(f"/api/goals/retire/{gid}/accept").status_code == 200
 
 
 def test_worker_edit_to_human_file_is_reverted(server):
@@ -494,8 +517,12 @@ def test_loop_run_starts_jobs_in_the_pool_and_stops_them_with_their_helper(serve
                     == "awaiting_review" and v)
     sid = next(s["id"] for s in view["sessions"] if s["kind"] == "worker")
     out = (ws / "goals" / gid / "runs" / sid / "artifacts" / "ram.txt").read_text().split("\n---\n")
-    adj, ok, old, spawn, orphan, gpu = out
+    adj, ok, old, spawn, orphan, gpu, threads = out
     assert "started with the RAM pool" in ok and "job ran, adj 0 cuda ''" in ok and "done (exit 0)" in ok
+    # The job's own OMP_NUM_THREADS wins over the default; what it leaves unset gets the defaults
+    own, default = [line.split() for line in threads.splitlines() if line.startswith("threads")]
+    assert own[1] == "3" and int(own[2]) >= 2 and own[3] == "PASSIVE"
+    assert int(default[1]) >= 2 and default[1] == default[2] and default[3] == "PASSIVE"
     assert "peak RAM" in ok  # the job lives long enough to be sampled
     assert "--ram is ignored" in old and "done (exit 0)" in old
     if engine.infra.latest()["gpus"]:
@@ -506,6 +533,8 @@ def test_loop_run_starts_jobs_in_the_pool_and_stops_them_with_their_helper(serve
     assert not engine.grants and not engine.ram_waiting
     if systemd_available():  # the pool, the job scopes and the OOM order need systemd
         assert adj == "0 200" and orphan == "job stopped"
+        # Jobs share the CPU per scope at equal weight; the pool slice yields to its siblings
+        assert default[5:] == ["100", str(runner_mod.POOL_CPU_WEIGHT)]
 
 
 def test_detached_job_outlives_its_turn_and_resumes_the_worker(server):
@@ -531,6 +560,9 @@ def test_detached_job_outlives_its_turn_and_resumes_the_worker(server):
     # Closing the goal stopped the long job; no grant, process or scratch dir is left
     assert sorted(j["status"] for j in engine.db.q("SELECT status FROM jobs WHERE ws='detach'")) == ["done", "stopped"]
     assert not engine.grants
+    # A job's record keeps what restores it after a restart, not its last RAM or VRAM measurement
+    assert not any("rss_gb" in json.loads(j["grant_info"])
+                   for j in engine.db.q("SELECT grant_info FROM jobs WHERE ws='detach'"))
     wait_for(lambda: not [p for p in psutil.process_iter(["cmdline"]) if p.info["cmdline"] == ["sleep", "300"]],
              timeout=10)
     assert not jobs_tmp_root().exists() or not any(jobs_tmp_root().iterdir())
@@ -623,6 +655,10 @@ def test_loop_run_waits_while_the_pool_is_full(server, monkeypatch):
     started = time.time()
     second = asyncio.run(engine.ram_grant(worker, 5, os.getpid(), "python other.py"))
     assert time.time() - started > 0.5
+    # The infra page lists both, oldest first, with the cores they use once sampled twice
+    jobs = wait_for(lambda: len(j := engine.infra.latest().get("jobs", [])) == 2
+                    and all(x["cpu_cores"] is not None for x in j) and j, timeout=10)
+    assert [j["cmd"] for j in jobs] == ["python big.py", "python other.py"] and not any(j["job"] for j in jobs)
     for key in (first["grant"], second["grant"]):
         engine.ram_release(worker, key)
     assert not engine.grants
@@ -631,6 +667,46 @@ def test_loop_run_waits_while_the_pool_is_full(server, monkeypatch):
     dead.wait()
     asyncio.run(engine.ram_grant(worker, 5, dead.pid, "true"))
     wait_for(lambda: not engine.grants, timeout=10)
+
+
+def test_job_threads_follow_free_cores_and_a_saturated_cpu_is_reported_once(server, monkeypatch):
+    client, engine = server
+    # The sampling loop must not add real samples to the history the test sets
+    monkeypatch.setattr(engine.infra, "sample", lambda: (_ for _ in ()).throw(RuntimeError("paused by the test")))
+    cpus = engine.infra.latest()["cpus"]
+    monkeypatch.setattr(engine, "grants", {})
+    assert engine.job_threads() == max(engine_mod.MIN_JOB_THREADS, cpus)
+    # A job not yet measured counts with its own default, so a job started right after it gets the minimum
+    engine.grants[1] = {"threads": cpus}
+    assert engine.job_threads() == engine_mod.MIN_JOB_THREADS
+    # Once measured, it counts with the cores it uses
+    engine.grants[1]["cpu_cores"] = 1.0
+    assert engine.job_threads() == max(engine_mod.MIN_JOB_THREADS, cpus - 1)
+    engine.grants.clear()
+
+    client.post("/api/workspaces", json={"name": "cpu"})
+    gid = client.post("/api/workspaces/cpu/goals", json={
+        "title": "CPU", "spec": "x", "goal": "- x", "config": goal_config()}).json()["id"]
+    engine.db.x("UPDATE goals SET status='running' WHERE ws='cpu' AND id=?", gid)
+    history = engine.infra.history
+    try:
+        def fill(pct, n=history.maxlen):
+            engine.infra.history = deque([{**history[-1], "cpu_pct": pct}] * n, maxlen=history.maxlen)
+            engine.check_cpu()
+
+        # Under 10 minutes of samples says nothing; a saturated 10-minute mean is said once, deferred, until the
+        # mean falls below the re-arm level
+        for pct, n in ((99, history.maxlen - 1), (95, history.maxlen), (95, history.maxlen), (80, history.maxlen),
+                       (95, history.maxlen), (60, history.maxlen), (92, history.maxlen)):
+            fill(pct, n)
+        warned = engine.db.q("SELECT deferred FROM inbox WHERE ws='cpu' AND payload LIKE '%busy over the last 10%'")
+        assert [r["deferred"] for r in warned] == [1, 1]
+        assert "(92% over 10 min)" in engine.infra_text()
+    finally:
+        engine.infra.history = history
+        engine.cpu_warned = False
+        engine.db.x("UPDATE goals SET status='awaiting_review' WHERE ws='cpu' AND id=?", gid)
+        engine.db.x("UPDATE inbox SET consumed=1 WHERE ws='cpu'")
 
 
 def test_newest_heavy_process_is_stopped_when_the_pool_is_full(server, monkeypatch):
@@ -682,7 +758,7 @@ def test_newest_heavy_process_is_stopped_when_the_pool_is_full(server, monkeypat
             h.wait()
 
 
-def test_vram_grants_fit_gpus_and_stop_the_job_furthest_over(server, monkeypatch):
+def test_vram_grants_fit_gpus_and_a_full_gpu_stops_its_newest_job(server, monkeypatch):
     _, engine = server
     worker = {"id": "w-vramtest", "kind": "worker"}
     gpus = [{"index": 0, "name": "big", "mem_used_gb": 2.0, "mem_total_gb": 24.0, "util": 0.0, "procs": {}},
@@ -711,38 +787,46 @@ def test_vram_grants_fit_gpus_and_stop_the_job_furthest_over(server, monkeypatch
             grant(10, 2)
         d = grant(5, 3)
         assert d["env"]["CUDA_VISIBLE_DEVICES"] == "0"
-        # With a process list, the job over its grant is stopped and the one within it is kept
+        # A GPU nearly full stops the newest job with processes on it, whether or not it keeps to its grant
         gpus[0]["procs"] = {helpers[1].pid: 14.0, helpers[3].pid: 7.0}
         gpus[0]["mem_used_gb"] = 23.5
         engine.sample_vram(snap)
+        assert gpus[0]["jobs_gb"] == 21.0
         engine.police_vram(snap)
         assert b["grant"] in engine.grants and d["grant"] not in engine.grants
-        assert "7.0 GB VRAM against its 5 GB grant while GPU0" in engine.ram_release(worker, d["grant"])["text"]
-        # Without one (WSL), what the GPU uses above its level without grants is its only job's
+        assert "GPU0 had less than 1 GB free and it was the newest job" in engine.ram_release(worker, d["grant"])["text"]
+        # The sampling loop polices the fake GPUs too: each one is given room again once its case is checked
+        gpus[0]["procs"], gpus[0]["mem_used_gb"] = {helpers[1].pid: 14.0}, 23.0  # 1 GB free: not policed, no room
+        # Without a process list, what the GPU uses above its level without grants is its jobs', and the newest
+        # job granted it goes
         engine.vram_settle.clear()
         gpus[1]["mem_used_gb"] = 11.5
         engine.sample_vram(snap)
+        assert gpus[1]["jobs_gb"] == 11.5
         engine.police_vram(snap)
         assert a["grant"] not in engine.grants
-        assert "11.5 GB VRAM against its 10 GB grant" in engine.ram_release(worker, a["grant"])["text"]
-        # Several grants without a process list: the GPU's jobs together are over, so the newest goes first
+        assert "GPU1 had less than 1 GB free" in engine.ram_release(worker, a["grant"])["text"]
         gpus[1]["mem_used_gb"] = 0.0
         engine.sample_vram(snap)
         e, f = grant(4, 4), grant(4, 5)
         assert e["env"]["CUDA_VISIBLE_DEVICES"] == f["env"]["CUDA_VISIBLE_DEVICES"] == "1"
+        # Where the driver names the processes on a GPU but not their memory (WSL), a newer job not on the GPU yet
+        # is passed over
         engine.vram_settle.clear()
-        gpus[1]["mem_used_gb"] = 11.5
+        gpus[1]["mem_used_gb"], gpus[1]["pids"] = 11.5, [helpers[4].pid]
         engine.sample_vram(snap)
         engine.police_vram(snap)
-        assert e["grant"] in engine.grants and f["grant"] not in engine.grants
-        assert "using more VRAM" in engine.ram_release(worker, f["grant"])["text"]
+        assert e["grant"] not in engine.grants and f["grant"] in engine.grants
+        engine.ram_release(worker, e["grant"])
         # While the stopped job's memory frees, the job left on that GPU is not blamed for it
+        gpus[1]["pids"] = [helpers[5].pid]
         engine.sample_vram(snap)
         engine.police_vram(snap)
-        assert e["grant"] in engine.grants
+        assert f["grant"] in engine.grants
+        gpus[1]["mem_used_gb"] = 0.0
         # Memory outside the jobs filling a GPU stops nothing
         engine.vram_settle.clear()
-        gpus[0]["procs"] = {helpers[1].pid: 14.0}
+        gpus[0]["procs"], gpus[0]["mem_used_gb"] = {1: 22.0}, 23.5
         engine.sample_vram(snap)
         engine.police_vram(snap)
         assert b["grant"] in engine.grants

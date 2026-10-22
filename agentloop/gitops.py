@@ -197,6 +197,12 @@ def remove_worktree(ws: Path, wt: Path) -> None:
         git(ws / "repo", "worktree", "remove", "--force", str(wt), check=False)
 
 
+def retire_worktree(ws: Path, wt: Path) -> None:
+    """Remove a worker's worktree but keep its branch. Without --force, so git refuses (and raises) while the
+    worktree still holds uncommitted changes or untracked files; ignored files such as .artifacts/ go with it."""
+    git(ws / "repo", "worktree", "remove", str(wt))
+
+
 def cleanup(ws: Path, gid: str, workers: list[dict]) -> list[str]:
     """Remove worker worktrees; delete merged branches, tag unmerged ones as exp/<gid>/<sid>."""
     repo, into, tagged = ws / "repo", int_branch(gid), []

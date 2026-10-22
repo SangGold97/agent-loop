@@ -96,6 +96,16 @@ def main():
                 ok = loop("run", "--", sys.executable, "-c",
                           "import os, time; print('job ran, adj', open('/proc/self/oom_score_adj').read().strip(), "
                           "'cuda', repr(os.environ.get('CUDA_VISIBLE_DEVICES'))); time.sleep(2.5)")
+                # Thread defaults unless the job's environment sets its own; the job's scope and the pool slice
+                # carry their CPU weights ('-' without systemd)
+                probe = ("import os, pathlib; cg = pathlib.Path('/sys/fs/cgroup' + open('/proc/self/cgroup')"
+                         ".read().strip().split(':', 2)[2]); w = lambda p: (p / 'cpu.weight').read_text().strip() "
+                         "if (p / 'cpu.weight').exists() else '-'; print('threads', os.environ.get('OMP_NUM_THREADS'), "
+                         "os.environ.get('MKL_NUM_THREADS'), os.environ.get('OMP_WAIT_POLICY'), 'cpuw', w(cg), "
+                         "w(cg.parent))")
+                threads = subprocess.run(["loop", "run", "--", sys.executable, "-c", probe], capture_output=True,
+                                         text=True, env={**os.environ, "OMP_NUM_THREADS": "3"}).stdout.strip()
+                threads += "\n" + loop("run", "--", sys.executable, "-c", probe)
                 # Only a job granted VRAM sees a GPU (refused on a host without one)
                 gpu = loop("run", "--vram", "0.5", "--", sys.executable, "-c",
                            "import os; print('gpu job', os.environ.get('CUDA_VISIBLE_DEVICES'), "
@@ -116,12 +126,18 @@ def main():
                     orphan = "job stopped"
                 except psutil.TimeoutExpired:
                     orphan = "job still running"
-                Path(".artifacts/ram.txt").write_text("\n---\n".join([adj, ok, old, spawn, orphan, gpu]))
+                Path(".artifacts/ram.txt").write_text("\n---\n".join([adj, ok, old, spawn, orphan, gpu, threads]))
             if "DETACH" in prompt:
-                # One job ends soon after this turn, the other runs until the goal closes
-                out = [loop("run", "--detach", "--", sys.executable, "-c",
-                            "import os, time; time.sleep(3); print('detached job output', os.environ['TMPDIR'])"),
+                # One job ends soon after this turn, through a `loop run` of its own that has started before the turn
+                # ends and must not end with it; the other runs until the goal closes
+                out = [loop("run", "--detach", "--", "loop", "run", "--", sys.executable, "-c",
+                            "import os, pathlib, time; pathlib.Path('.artifacts/nested.txt').touch(); time.sleep(3); "
+                            "print('detached job output', os.environ['TMPDIR'])"),
                        loop("run", "--detach", "--", "sleep", "300")]
+                for _ in range(100):
+                    if Path(".artifacts/nested.txt").exists():
+                        break
+                    time.sleep(0.1)
                 Path(".artifacts/detach.txt").write_text("\n---\n".join(out))
             emit({"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "Bash", "input": {"command": "python hello.py"}}]}})
@@ -170,6 +186,13 @@ def main():
             # The worker left a job running: wait for the digest of the turn the platform starts with its result
             (gdir / ".ls.txt").write_text(loop("ls"))
             text = "waiting for the worker's job"
+        elif "RETIRE" in _spec(gdir) and (m := re.search(r"\[Worker (w-\w+)", prompt)):
+            # Retires the merged worker: its worktree goes, its branch stays, and it can no longer be sent
+            w = m.group(1)
+            out = [loop("merge", w), loop("retire", w), loop("send", w, "--prompt", "again"), loop("retire", w),
+                   loop("ls")]
+            (gdir / ".retire.txt").write_text("\n---\n".join(out))
+            text = loop("done", "--status", "success", stdin="- hello.py exists: verified")
         elif m := re.search(r"\[Worker (w-\w+)", prompt):
             (wt / "meta_note.txt").write_text("written by the meta-work\n")  # uncommitted: the merge must keep it
             merged = loop("merge", m.group(1))

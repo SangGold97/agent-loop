@@ -9,7 +9,8 @@
   `loop run -- <cmd>`, after checking `loop infra` for room: it waits while RAM is over 90% used, and above 95%
   the newest heavy process is stopped.
 - Only a job run with `--vram <GB>` sees a GPU (`loop run --vram 12 -- <cmd>`); `$LOOP_VRAM_GB` holds its grant.
-  It may use more while the GPU has room, but is stopped first when the GPU fills up, so ask for its peak VRAM.
+  It may use more while the GPU has room; when the GPU fills up, the newest job on it is stopped, so ask for its
+  peak VRAM.
 - `loop run --detach` (same options) keeps a job running after your turn ends; its result arrives as your next
   message.
 

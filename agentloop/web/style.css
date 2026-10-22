@@ -303,6 +303,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .worker .wh > :not(.role):not(.wmeta):not(.spacer) { flex: none; }
 .worker .feed-wrap > .feed { padding: 0 8px; }
 .worker.running { border-color: color-mix(in srgb, var(--run) 60%, var(--border-2)); }
+.worker.retired > .wh { opacity: .55; }  /* worktree removed: log stays readable, no further turns */
 .chat-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
 .chat-bar select { width: auto; flex: 1; }
 .composer { display: flex; gap: 6px; margin-top: 6px; }

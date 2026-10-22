@@ -130,6 +130,8 @@ def create_app(api_url: str) -> FastAPI:
         for s in sessions:
             s.pop("token", None)
             s["live"] = engine.runner.running(s["id"])
+            if s["kind"] == "worker":
+                s["status"] = engine.worker_status(s)
         done, total = digest.checklist(files["plan.md"])
         # What each consultation sent back to the meta-work: the [Advice] text without its header line
         advice = {}
@@ -288,7 +290,7 @@ def create_app(api_url: str) -> FastAPI:
             raise AgentError("workers can only use `loop run` and `loop infra`")
         if caller["kind"] == "meta-advisor" and cmd not in ("ls", "show", "status", "budget", "infra"):
             raise AgentError("the advisor has read-only access; return advice to the meta-work in your final reply")
-        if cmd in ("spawn", "send", "stop", "merge", "done", "advise") and caller["kind"] != "meta-work":
+        if cmd in ("spawn", "send", "stop", "merge", "retire", "done", "advise") and caller["kind"] != "meta-work":
             raise AgentError(f"`loop {cmd}` belongs to the meta-work; propose a note with `loop note` instead")
         if cmd == "spawn":
             text = await engine.spawn_worker(caller, b.get("agent", ""), b.get("role", ""), b.get("prompt", ""))
@@ -300,6 +302,8 @@ def create_app(api_url: str) -> FastAPI:
             text = await engine.stop_worker(caller, b.get("sid", ""))
         elif cmd == "merge":
             text = await asyncio.to_thread(engine.merge_worker, caller, b.get("sid", ""))
+        elif cmd == "retire":
+            text = await asyncio.to_thread(engine.retire_worker, caller, b.get("sid", ""))
         elif cmd == "done":
             text = await engine.done(caller, b.get("status", ""), b.get("report", ""))
         elif cmd == "note":
@@ -320,7 +324,8 @@ def create_app(api_url: str) -> FastAPI:
             text = engine.infra_text()
         elif cmd == "ram":
             return await engine.ram_grant(caller, float(b.get("wait") or 0), int(b.get("pid") or 0),
-                                          str(b.get("cmd", "")), float(b.get("vram") or 0), b.get("job"))
+                                          str(b.get("cmd", "")), float(b.get("vram") or 0), b.get("job"),
+                                          b.get("within"))
         elif cmd == "ram-release":
             return engine.ram_release(caller, int(b.get("grant") or 0), bool(b.get("killed")), b.get("job"))
         elif cmd == "job":

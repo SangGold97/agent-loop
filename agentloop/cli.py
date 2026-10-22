@@ -21,6 +21,7 @@ HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   ls      list this goal's workers
   show    worker details / a turn's evidence   loop show w-1a2b3c --turn 2 [--full] [--log]
   merge   merge a worker branch into loop/<goal>/integration
+  retire  remove a finished worker's worktree to free disk; its branch stays   loop retire w-1a2b3c
   done    close the goal with a report      loop done --status success <<'EOF' ... EOF
   status  goal overview (meta-chat)
   note    propose a note to the human (meta-chat)  loop note "try X instead of Y"
@@ -70,13 +71,15 @@ def run_job(vram: float, wait_min: float, cmd: list[str], job: str | None = None
 
     The job runs in a scope of its own in the pool. Nothing is reserved: when the pool fills up, the platform stops
     the newest heavy process, and the kernel's OOM killer, should it come to that, takes them in the same order;
-    this helper keeps the default OOM score. Only a job granted VRAM sees a GPU; the platform stops it if it is
-    over that grant while the GPU is nearly full. If this helper dies, the platform stops the job. A job that ends
+    this helper keeps the default OOM score. Only a job granted VRAM sees a GPU; once that GPU is nearly full, the
+    platform stops the newest job on it. If this helper dies, the platform stops the job. A job that ends
     on its own gets its peak RAM (sampled every 2 s) printed."""
     if not cmd:
         sys.exit("loop run: give the command after --, e.g. loop run -- python train.py")
+    # Inside a detached job (its helper sets LOOP_JOB) this job belongs to that one and outlives the turn with it
+    within = None if job else os.environ.get("LOOP_JOB")
     grant = call("ram", {"vram": vram, "wait": wait_min * 60, "pid": os.getpid(), "cmd": shlex.join(cmd),
-                         "job": job}, full=True)
+                         "job": job, "within": within}, full=True)
     print(f"loop run: {grant['text']}", file=sys.stderr, flush=True)
     with contextlib.suppress(OSError):
         Path("/proc/self/oom_score_adj").write_text("0")
@@ -84,7 +87,9 @@ def run_job(vram: float, wait_min: float, cmd: list[str], job: str | None = None
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     rc, child, released = 127, None, {"text": "released"}
     try:
-        child = subprocess.Popen([*grant["argv"], *cmd], env={**os.environ, **grant.get("env", {})})
+        # Thread defaults apply only where the caller's environment sets nothing
+        env = {**grant.get("defaults", {}), **os.environ, **grant.get("env", {})}
+        child = subprocess.Popen([*grant["argv"], *cmd], env=env)
         rc = child.wait()
     except OSError as exc:
         print(f"loop run: cannot start {cmd[0]}: {exc}", file=sys.stderr)
@@ -163,7 +168,7 @@ def main(argv: list[str] | None = None) -> None:
             sparser.add_argument("sid")
         sparser.add_argument("--prompt")
         sparser.add_argument("--prompt-file", dest="prompt_file")
-    for name in ("stop", "merge"):
+    for name in ("stop", "merge", "retire"):
         sub.add_parser(name).add_argument("sid")
     show = sub.add_parser("show")
     show.add_argument("sid")
@@ -202,7 +207,7 @@ def main(argv: list[str] | None = None) -> None:
             payload.update({"agent": a.agent, "role": a.role})
         elif a.cmd == "send":
             payload["sid"] = a.sid
-    elif a.cmd in ("stop", "merge"):
+    elif a.cmd in ("stop", "merge", "retire"):
         payload = {"sid": a.sid}
     elif a.cmd == "show":
         payload = {"sid": a.sid, "turn": a.turn, "full": a.full, "log": a.log}

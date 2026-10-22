@@ -29,7 +29,7 @@ defaults:
 infra:
   pool_reserve_gb: 3          # host RAM kept out of the pool all sessions share (largest value of all workspaces)
   worker_memory_max_gb: null  # optional hard cap per session on top of the pool (null = pool only)
-  vram_reserve_gb: 1          # VRAM kept free on each GPU; jobs over their VRAM grant are stopped below it
+  vram_reserve_gb: 1          # VRAM kept free on each GPU; below it the newest job on that GPU is stopped
 
 turn_timeout_min: 180
 job_timeout_h: 9              # a detached job (`loop run --detach`) is stopped after this many hours
