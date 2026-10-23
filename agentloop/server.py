@@ -133,12 +133,14 @@ def create_app(api_url: str) -> FastAPI:
             if s["kind"] == "worker":
                 s["status"] = engine.worker_status(s)
         done, total = digest.checklist(files["plan.md"])
-        # What each consultation sent back to the meta-work: the [Advice] text without its header line
+        # What each consultation turn sent back to the meta-work: the [Advice] text without its header line
         advice = {}
-        for item in engine.db.q("SELECT payload FROM inbox WHERE ws=? AND goal=? AND kind='advice'", ws, gid):
+        for item in engine.db.q("SELECT payload FROM inbox WHERE ws=? AND goal=? AND kind='advice' ORDER BY id",
+                                ws, gid):
             payload = json.loads(item["payload"])
             head, _, text = payload["text"].partition("\n")
-            advice[payload["sid"]] = {"status": head.rpartition(" · ")[2], "text": text}
+            advice.setdefault(payload["sid"], []).append(
+                {"turn": payload.get("turn", 1), "status": head.rpartition(" · ")[2], "text": text})
         return {"ws": ws, "id": gid, "row": row, "files": files, "config": goal_config(p, gid)["goal"],
                 "budget": engine.budget(ws, gid), "checklist": {"done": done, "total": total},
                 "sessions": sessions, "advice": advice,
@@ -258,6 +260,11 @@ def create_app(api_url: str) -> FastAPI:
         engine.publish("models")
         return catalog
 
+    @app.post("/api/quotas/refresh")
+    async def quotas_refresh():
+        await engine.refresh_quotas()
+        return engine.quotas
+
     @app.post("/api/agents/{name}/{op}")
     async def agents_op(name: str, op: str):
         if name not in agents.UPDATE_CMD or op not in ("update", "smoke"):
@@ -276,7 +283,7 @@ def create_app(api_url: str) -> FastAPI:
                 engine.agent_ops[name] = {"state": "done", "op": op, "result": result, "ended": time.time()}
             except Exception as exc:  # surface any failure in the UI
                 engine.agent_ops[name] = {"state": "failed", "op": op, "result": {"error": repr(exc)}}
-            engine.publish("agents", name=name)
+            engine.publish("agents", name=name, op=engine.agent_ops[name])
 
         engine.spawn(job())
         return {"ok": True}
@@ -295,7 +302,7 @@ def create_app(api_url: str) -> FastAPI:
         if cmd == "spawn":
             text = await engine.spawn_worker(caller, b.get("agent", ""), b.get("role", ""), b.get("prompt", ""))
         elif cmd == "advise":
-            text = engine.advise(caller, b.get("prompt", ""))
+            text = engine.advise(caller, b.get("prompt", ""), b.get("follow_up"))
         elif cmd == "send":
             text = await engine.send_worker(caller, b.get("sid", ""), b.get("prompt", ""))
         elif cmd == "stop":
@@ -311,7 +318,8 @@ def create_app(api_url: str) -> FastAPI:
                 raise AgentError("meta-work sessions write strategy to plan.md; notes are proposed by meta-chats")
             nid = engine.add_note(caller["ws"], caller["goal"], b.get("text", ""), author="meta-chat",
                                   status="pending", source=caller["id"])
-            text = f"Proposed note #{nid}; the human will approve or reject it in the UI."
+            seq = engine.db.one("SELECT seq FROM notes WHERE id=?", nid)["seq"]
+            text = f"Proposed note #{seq}; the human will approve or reject it in the UI."
         elif cmd == "ls":
             text = engine.ls_text(caller)
         elif cmd == "show":

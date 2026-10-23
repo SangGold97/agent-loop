@@ -56,6 +56,14 @@ function toast(msg, kind = 'info', ms = 4500) {
   $('#toasts').appendChild(el);
   setTimeout(() => el.remove(), ms);
 }
+// A pop-up that shows an action running; the returned function swaps in its outcome and closes it 3 s later
+function busyToast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = `<span class="spin">|</span> ${esc(msg)}`;
+  $('#toasts').appendChild(el);
+  return (text, kind) => { el.className = `toast ${kind}`; el.textContent = text; setTimeout(() => el.remove(), 3000); };
+}
 async function act(fn, okMsg) {
   try { const r = await fn(); if (okMsg) toast(okMsg, 'ok'); return r; } catch (e) { toast(e.message, 'error', 8000); }
 }
@@ -83,7 +91,7 @@ function pill(status, text) { return `<span class="pill ${esc(status)}">${esc(la
 // A goal's or agent's status; running gets a spinner instead of a separate "thinking" line.
 // The delay ties the spinner's phase to the clock so repainting the header does not restart it.
 const agentPill = st => st === 'running'
-  ? `<span class="pill running"><span class="spin" style="animation-delay:-${Date.now() % 800}ms">|</span> running</span>` : pill(st);
+  ? `<span class="pill running"><span class="spin" style="animation-delay:-${Date.now() % 1000}ms">|</span> running</span>` : pill(st);
 function meter(used, max) {
   if (!max) return '<div class="meter"><i style="width:0"></i></div>';
   const pct = Math.min(100, (used / max) * 100);
@@ -128,6 +136,7 @@ document.addEventListener('click', e => {
     S.more[more.dataset.more] = open;
     c.classList.toggle('open', open);
     more.textContent = open ? 'show less' : 'show more';
+    fitTab();  // the panes below a folded or unfolded report take the height it leaves
   } else if (exp) {
     const key = exp.dataset.docExpand, body = $(`[data-scroll="${CSS.escape(key)}"]`);
     if (body) docModal(key, body.innerHTML);
@@ -147,12 +156,18 @@ function docModal(key, html) {
       <div class="row" style="margin-top:6px"><span class="spacer"></span><button class="btn small" id="dm-cancel">cancel</button>
         <button class="btn small primary" id="dm-save">save</button></div></div>`;
     $('#dm-text', m).focus();
+    saveOnChange($('#dm-text', m), $('#dm-save', m), S.goal.files[key]);
     $('#dm-cancel', m).onclick = () => docModal(key, md(S.goal.files[key]));
     $('#dm-save', m).onclick = () => act(async () => {
       await saveDoc(name, $('#dm-text', m).value);
       docModal(key, md(S.goal.files[key]));
     }, `${key} saved`);
   };
+}
+// Save stays disabled until the text differs from the saved file
+function saveOnChange(textarea, btn, saved) {
+  btn.disabled = true;
+  textarea.oninput = () => { btn.disabled = textarea.value === saved; };
 }
 async function saveDoc(name, text) {
   const { ws, gid } = S.route;
@@ -500,7 +515,7 @@ function renderGoalHead() {
   const M = S.goal, st = M.row.status, { ws, gid } = S.route;
   const buttons = [];
   if (['draft', 'stopped', 'paused'].includes(st)) buttons.push(`<button class="btn primary" data-act="start">${st === 'draft' ? 'start goal' : 'resume'}</button>`);
-  if (st === 'running') buttons.push('<button class="btn danger" data-act="stop">stop</button>');
+  if (st === 'running') buttons.push('<button class="btn small del" data-act="stop">stop</button>');
   buttons.push('<button class="btn small del" data-act="delete" title="Delete this goal with its sessions">delete</button>');
   $('#m-head').innerHTML = `<div class="page-head"><div class="row goal-title" title="${esc(gid)}">
       <a href="#/ws/${ws}">${esc(ws)}</a><span class="faint">/</span><span class="gt">${esc(M.config.title)}</span>
@@ -616,7 +631,7 @@ function renderOverview() {
   renderStats(); renderMetaWork(); renderChat(); renderWorkers();
   fitTab();
 }
-// The overview, and the panes of the config and plan tabs, fill the window; each pane scrolls on its own
+// The overview, and the panes of the config, plan and notes tabs, fill the window; each pane scrolls on its own
 function fitTab() {
   const el = $('#ov-main') || $('#m-tab .fit');
   if (el) el.style.height = window.innerWidth <= 1000 ? '' : Math.max(380, window.innerHeight - el.getBoundingClientRect().top - 17) + 'px';
@@ -713,6 +728,7 @@ function renderConfigTab(force) {
   }, 'Configuration saved');
   $$('[data-edit]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.edit] = true; renderConfigTab(true); });
   $$('[data-cancel]', el).forEach(b => b.onclick = () => { S.edit[b.dataset.cancel] = false; renderConfigTab(true); });
+  $$('[data-doc]', el).forEach(t => saveOnChange(t, $(`[data-save-doc="${t.dataset.doc}"]`, el), M.files[t.dataset.doc + '.md']));
   $$('[data-save-doc]', el).forEach(b => b.onclick = () => act(
     () => saveDoc(b.dataset.saveDoc, $(`[data-doc="${b.dataset.saveDoc}"]`, el).value), `${b.dataset.saveDoc}.md saved`));
 }
@@ -800,6 +816,9 @@ function renderFeed(key) {
   while (fs.childElementCount > FEED_TAIL) fs.firstElementChild.remove();
   if (!fs.childElementCount) fs.innerHTML = '<div class="empty">no activity yet</div>';
   el.dataset.n = evs.length;
+  // The feed's last tool call blinks its dot while the session runs (see renderLive)
+  $('.tl.last', fs)?.classList.remove('last');
+  [...fs.querySelectorAll('.tl')].pop()?.classList.add('last');
   renderLive(key);
 }
 // The reply being typed right now (Claude streams tokens; Codex shows each step as it completes)
@@ -811,6 +830,7 @@ function renderLive(key) {
   const html = text ? `<div class="fr reply live"><div class="fl">◀ ${esc(who.reply)}</div><pre class="stream">${esc(text)}<span class="cursor"></span></pre></div>` : '';
   const fp = $('.fp', el);
   if (fp.innerHTML !== html) fp.innerHTML = html;
+  el.classList.toggle('running', S.goal?.sessions.some(s => sids.includes(s.id) && (s.live || s.status === 'running')) ?? false);
   stick(el);
 }
 // Scrolling up pauses following; the button (or scrolling back down) resumes it
@@ -981,6 +1001,9 @@ function paintChatLive() {
   el.innerHTML = S.chat.busy ? S.chat.liveEvs.filter(e => e.type !== 'text').map(e => tuiEvent(e, { prompt: '', reply: 'meta-chat' })).join('')
     + (text ? `<div class="fr reply live"><div class="fl">◀ meta-chat</div><pre class="stream">${esc(text)}<span class="cursor"></span></pre></div>` : '')
     : '';
+  // Like the other feeds, the last tool call blinks its dot while the turn runs
+  [...el.querySelectorAll('.tl')].pop()?.classList.add('last');
+  $('#chat-feed').classList.toggle('running', S.chat.busy);
   stick($('#chat-feed'));
 }
 function setComposer(enabled) {
@@ -1023,7 +1046,7 @@ function workerHead(w) {
   const st = simpleStatus(w);
   return `<span class="fold">${workerOpen(w) ? '▾' : '▸'}</span><span class="role">${esc(w.role)}</span>${agentPill(st)}
     <span class="spacer"></span><span class="faint wmeta">${agentLine(w, w.context)}</span>
-    <button class="btn small" data-log="${w.id}">expand</button>${st === 'running' ? `<button class="btn small danger" data-stop="${w.id}">stop</button>` : ''}`;
+    <button class="btn small" data-log="${w.id}">expand</button>${st === 'running' ? `<button class="btn small stop" data-stop="${w.id}">stop</button>` : ''}`;
 }
 function paintHeads() { renderMetaWorkHead(); renderWorkers(); if (!$('#chat-sel:focus')) renderChatBar(); }
 function renderWorkers() {
@@ -1088,13 +1111,16 @@ async function sessionModal(sid) {
 function planHtml() {
   const f = S.goal.files, advisors = S.goal.sessions.filter(s => s.kind === 'meta-advisor');
   const items = advisors.map((s, i) => {
-    const a = S.goal.advice[s.id];
+    const replies = S.goal.advice[s.id] || [], last = replies[replies.length - 1];
     // Each consultation folds to its header; the newest starts open, the human's choice wins
     const key = `advice-${s.id}`, open = S.more[key] ?? i === advisors.length - 1;
+    // Follow-ups resume the same session, so their replies stack under one consultation
+    const body = replies.map(a => `${replies.length > 1 ? `<div class="faint small">${a.turn > 1 ? `follow-up ${a.turn - 1}` : 'first reply'}</div>` : ''}${md(a.text)}`).join('');
+    const waiting = s.status === 'queued' || s.status === 'running';
     return `<div class="advice-item ${open ? 'open' : ''}" data-fold-item="${key}"><div class="row small ai-head"><span class="fold">${open ? '▾' : '▸'}</span>
-        <b>consultation ${i + 1}</b>${pill(a ? a.status : s.status)}
+        <b>consultation ${i + 1}</b>${pill(last && !waiting ? last.status : s.status)}
         <span class="spacer"></span><span class="faint">${fmtTime(s.created)}</span><button class="btn small" data-log="${s.id}">expand</button></div>
-      ${a ? `<div class="ai-body md doc">${md(a.text)}</div>` : '<div class="ai-body faint small">no advice yet</div>'}</div>`;
+      ${body ? `<div class="ai-body md doc">${body}</div>` : '<div class="ai-body faint small">no advice yet</div>'}</div>`;
   }).reverse().join('');
   return `<div class="grid plan-grid fit" style="margin-top:18px">
     ${docBox('plan.md', 'plan.md <span class="x">current state, owned by the meta-work</span>', `<div class="md doc">${md(f['plan.md'])}</div>`)}
@@ -1103,7 +1129,7 @@ function planHtml() {
 }
 function renderNotes(update = false) {
   const el = $('#m-tab'), notes = S.goal.notes, review = S.goal.row.status === 'awaiting_review';
-  const list = notes.length ? notes.map(n => `<div class="box" style="margin-top:18px"><div class="lt">note #${n.id}
+  const list = notes.length ? notes.map(n => `<div class="advice-item"><div class="row small"><b>note #${n.seq}</b>
         <span class="chip ${n.author === 'human' ? 'human' : 'meta-chat'}">${esc(n.author)}</span>${pill(n.status)}</div>
       <div class="row small faint">${n.status === 'approved' ? (n.mode === 'now' ? 'delivered immediately' : 'queued with the next event') : ''}<span class="spacer"></span>${fmtTime(n.ts)}</div>
       ${n.status === 'pending' ? `<textarea data-note-text="${n.id}" style="margin-top:6px;min-height:70px">${esc(n.text)}</textarea>
@@ -1116,19 +1142,20 @@ function renderNotes(update = false) {
     : '<div class="empty">No notes yet.</div>';
   if (update && $('#notes-list')) {
     keepScroll(() => { $('#notes-list').innerHTML = list; });
-    fitClamps($('#notes-list')); renderReport(); return;
+    fitClamps($('#notes-list')); renderReport(); fitTab(); return;
   }
+  // Steering and the notes split the window below the report; the note list scrolls inside its pane
   el.innerHTML = `<div class="layer human" id="nt-human" hidden><div class="lt">human report</div><div id="nt-report"></div></div>
-    <div class="grid cols-2" style="align-items:start;margin-top:18px">
+    <div class="grid cols-2 fit" style="margin-top:18px">
     ${box('steer the meta-work', `<p class="hint">Notes override the meta-work's plan. They are appended to <code>notes.md</code> and delivered to the meta-work.</p>
-      <textarea id="note-text" style="min-height:130px" placeholder="e.g. prefer a simpler approach; skip the caching layer for now."></textarea>
+      <textarea id="note-text" style="min-height:130px;flex:1 1 auto" placeholder="e.g. prefer a simpler approach; skip the caching layer for now."></textarea>
       <div class="row" style="margin-top:8px">
         <label class="inline"><input type="radio" name="nmode" value="queue" checked> queue: deliver with the next event</label>
         <label class="inline"><input type="radio" name="nmode" value="now"> now: wake the meta-work</label>
         <span class="spacer"></span><button class="btn primary" id="note-add">${review ? 'add note & reopen' : 'add note'}</button></div>`)}
-    <div id="notes-list" class="list-scroll" data-scroll="notes">${list}</div></div>`;
+    ${box('notes <span class="x">newest first</span>', `<div id="notes-list" class="list-scroll" data-scroll="notes">${list}</div>`)}</div>`;
   fitClamps($('#notes-list'));
-  renderReport();
+  renderReport(); fitTab();
   $('#note-add').onclick = () => act(async () => {
     const { ws, gid } = S.route;
     if (S.goal.row.status === 'awaiting_review') {
@@ -1174,31 +1201,72 @@ function gpuCell(x) {
   for (const g of (x.grants || []).filter(g => g.vram)) granted[g.gpu] = (granted[g.gpu] || 0) + g.vram;
   return Object.entries(granted).map(([i, gb]) => `GPU${i} ${gb} GB`).join('<br>');
 }
-// A session's `loop run` jobs: RAM in use, then jobs still waiting to start
-function grantCell(x) {
-  const held = (x.grants || []).map(g => `RAM ${g.rss_gb.toFixed(1)} GB`);
-  const waiting = (x.waiting || []).map(w => `<span style="color:var(--warn)">${w.vram ? `${w.vram}G VRAM ` : ''}`
-    + `wait ${Math.floor((S.infra.ts - w.since) / 60)} mins</span>`);
-  return [...held, ...waiting].join('<br>');
+// From the Python interpreter on, as `python -I …`; wrappers before it (taskset, env, paths) are left out
+function pyCmd(cmd) {
+  const t = cmd.split(' '), i = t.findIndex(x => /^['"]?python[\d.]*$/.test(x.split('/').pop()));
+  return i < 0 ? cmd : ['python', ...t.slice(i + 1)].join(' ');
 }
-// Running `loop run` jobs, whether their session is in a turn or not: owner, command, use, whether the job
-// outlives the turn (detached, or run inside a detached job) and how long it has run
-function jobsTable(jobs) {
-  if (!jobs?.length) return '<div class="empty">No jobs running.</div>';
-  // From the Python interpreter on, as `python -I …`; wrappers before it (taskset, env, paths) are left out
-  const pyCmd = cmd => {
-    const t = cmd.split(' '), i = t.findIndex(x => /^python[\d.]*$/.test(x.split('/').pop()));
-    return i < 0 ? cmd : ['python', ...t.slice(i + 1)].join(' ');
-  };
-  const cpu = j => j.cpu_cores == null ? '' : `${j.cpu_cores.toFixed(1)} cores${j.cpus ? ` (core_num ${j.cpus})` : ''}`;
-  const gpu = j => !j.vram ? '' : `GPU${j.gpu} · ${j.vram} GB`;
-  const detached = j => !j.job ? 'no' : j.within ? 'yes (inside the job)' : 'yes';
-  return `<table class="t"><tr><th>job</th><th>session</th><th>role</th><th>goal</th><th>command</th><th>cpu</th><th>ram</th><th>vram (grant)</th><th>detached</th><th>time</th></tr>
-    ${jobs.map(j => `<tr><td>${esc(j.job || '')}</td><td>${esc(j.sid)}</td><td>${esc(j.role || j.kind)}</td>
-      <td>${j.ws ? `<a href="#/ws/${j.ws}/g/${j.goal}">${esc(j.ws)}/${esc(j.goal)}</a>` : ''}</td>
-      <td><code class="small" title="${esc(j.cmd)}" style="word-break:break-all">${esc(pyCmd(j.cmd))}</code></td>
-      <td>${cpu(j)}</td><td>${j.rss_gb.toFixed(1)} GB</td><td>${gpu(j)}</td><td>${detached(j)}</td>
-      <td>${fmtDur((S.infra.ts - j.started) / 3600)}</td></tr>`).join('')}</table>`;
+// At most 40 characters on one line, ending at the script: `python …/b/c.py`, the path cut from the left to fill
+// the width. Arguments after the script are left to the tooltip (the stored command is itself cut at 500 characters)
+function shortCmd(cmd, max = 40) {
+  const c = pyCmd(cmd);
+  if (c.length <= max) return c;
+  const m = c.match(/^.*?[^\s'"]+\.(?:py|sh|R|jl)(?=['"\s]|$)/);
+  if (!m) return `${c.slice(0, max - 1)}…`;
+  const upto = m[0];
+  if (upto.length < max - 1) return `${upto} …`;
+  const head = upto.includes(' ') ? upto.slice(0, upto.indexOf(' ') + 1) : '';
+  return `${head}…${upto.slice(-(max - head.length - 1))}`;
+}
+// Sessions whose jobs the human folded away; every other session shows its jobs under its row
+const jobsFolded = new Set();
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-jobs-fold]');
+  if (!b) return;
+  const id = b.dataset.jobsFold;
+  if (!jobsFolded.delete(id)) jobsFolded.add(id);
+  renderInfra();
+});
+// A session's `loop run` jobs under its row, with headings of their own in the session table's columns: job and
+// detached under session and kind, the command across role to goal, then memory, cpu and time where the session has
+// memory, VRAM and jobs (its VRAM covers its jobs). Jobs still waiting for room in the pool or on a GPU come last
+function jobRows(jobs, waiting) {
+  const since = t => fmtDur((S.infra.ts - t) / 3600);
+  const detached = j => !j.job ? 'no' : j.within ? 'inside job' : 'yes';
+  const cmd = c => `<td colspan="3"><code class="small" title="${esc(c)}">${esc(shortCmd(c))}</code></td>`;
+  const tr = cells => `<tr class="job">${cells}</tr>`;
+  return `<tr class="job job-head"><th>job</th><th>detached</th><th colspan="3">command</th><th class="num">memory</th>
+      <th class="num">cpu</th><th class="num">time</th></tr>`
+    + jobs.map(j => tr(`<td>${esc(j.job || '—')}</td><td>${detached(j)}</td>${cmd(j.cmd)}
+      <td class="num">${j.rss_gb.toFixed(1)} GB</td><td class="num">${j.cpu_cores == null ? '' : `${j.cpu_cores.toFixed(1)} cores`}</td>
+      <td class="num">${since(j.started)}</td>`)).join('')
+    + waiting.map(w => tr(`<td>—</td><td style="color:var(--warn)">waiting</td>${cmd(w.cmd || '')}
+      <td></td><td></td><td class="num">${since(w.since)}</td>`)).join('');
+}
+// Sessions in a turn, plus idle ones whose detached jobs still run, each followed by its jobs
+function sessionsTable(s) {
+  const rows = (s.sessions || []).map(x => ({ ...x, jobs: [] }));
+  for (const j of s.jobs || []) {
+    let x = rows.find(r => r.id === j.sid);
+    if (!x) rows.push(x = { id: j.sid, kind: j.kind, role: j.role, ws: j.ws, goal: j.goal, idle: true, rss_gb: 0,
+                            grants: [], waiting: [], jobs: [] });
+    x.jobs.push(j);
+    if (x.idle) { x.rss_gb = +(x.rss_gb + j.rss_gb).toFixed(2); x.grants.push(j); }
+  }
+  if (!rows.length) return '<div class="empty">No agent sessions running.</div>';
+  // Each session with its jobs is one tbody, so the rule between entries falls between sessions, not under jobs
+  return `<div class="scroll-x"><table class="t sessions"><thead><tr><th>session</th><th>kind</th><th>role</th><th>CLI</th><th>goal</th>
+      <th class="num">memory</th><th class="num">vram (grant)</th><th class="num">jobs</th></tr></thead>
+    ${rows.map(x => {
+      const n = x.jobs.length + x.waiting.length, open = n > 0 && !jobsFolded.has(x.id);
+      const fold = !n ? '' : `${n} job${n > 1 ? 's' : ''}${x.waiting.length ? ` <span style="color:var(--warn)">(${x.waiting.length} waiting)</span>` : ''}`
+        + `<button class="icon-btn fold" data-jobs-fold="${esc(x.id)}" title="${open ? 'Hide' : 'Show'} jobs">${open ? '▾' : '▸'}</button>`;
+      return `<tbody class="group"><tr class="${open ? 'has-jobs' : ''}"><td>${esc(x.id)}</td><td>${esc(x.kind)}</td><td>${esc(x.role || '')}</td>
+        <td>${x.idle ? '<span class="faint">idle</span>' : esc(cliName(x.agent || ''))}</td>
+        <td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td>
+        <td class="num">${x.rss_gb.toFixed(1)} GB</td><td class="num">${gpuCell(x)}</td><td class="num">${fold}</td></tr>
+        ${open ? `${jobRows(x.jobs, x.waiting)}<tr class="gap"><td colspan="8"></td></tr>` : ''}</tbody>`;
+    }).join('')}</table></div>`;
 }
 function renderInfra() {
   const s = S.infra;
@@ -1215,10 +1283,7 @@ function renderInfra() {
     </div>
     <div style="margin-top:22px">${box('last 10 minutes', `<div class="legend"><span><i style="background:var(--accent)"></i>cpu %</span><span><i style="background:var(--reply)"></i>ram %</span>${s.gpus.length ? '<span><i style="background:var(--warn)"></i>vram %</span>' : ''}</div>
       <canvas class="chart" id="infra-chart"></canvas>`)}</div>
-    <div style="margin-top:22px">${box('running sessions', `${s.sessions?.length ? `<table class="t"><tr><th>session</th><th>kind</th><th>role</th><th>CLI</th><th>goal</th><th>memory</th><th>vram (grant)</th><th>jobs</th></tr>
-      ${s.sessions.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)}</td><td>${esc(x.role || '')}</td><td>${esc(cliName(x.agent || ''))}</td><td>${x.ws ? `<a href="#/ws/${x.ws}/g/${x.goal}">${esc(x.ws)}/${esc(x.goal)}</a>` : ''}</td><td>${x.rss_gb} GB</td><td>${gpuCell(x)}</td><td>${grantCell(x)}</td></tr>`).join('')}</table>`
-        : '<div class="empty">No agent sessions running.</div>'}`)}</div>
-    <div style="margin-top:22px">${box('running jobs', jobsTable(s.jobs))}</div></div>`;
+    <div style="margin-top:22px">${box('running sessions', sessionsTable(s))}</div></div>`;
   drawChart($('#infra-chart'), 600 / INFRA_SAMPLE_S);
 }
 // Line chart of cpu/ram(/vram) %; `pct` labels the grid lines as 0%…100% (sidebar)
@@ -1253,22 +1318,16 @@ async function renderAgents(fresh = true) {
   if (fresh || !S.agents) S.agents = await api('/api/agents');
   S.models = S.agents.models || {};
   const card = name => {
-    const op = S.agents.ops[name], res = op?.result;
-    const smoke = res?.smoke || (op?.op === 'smoke' ? res : null);
+    const op = S.agents.ops[name];
     const models = modelList(name), quota = S.agents.quotas?.[name];
     // A window whose reset has passed is unused again, whatever the last report said
     const used = w => w.resets_at && w.resets_at * 1000 <= Date.now() ? 0 : w.used;
-    return box(cliName(name), `<div class="row"><span>${esc(S.agents.versions[name])}</span><span class="spacer"></span>
-        ${op?.state === 'running' ? `<span class="thinking">${op.op} running</span>` : ''}</div>
+    return box(cliName(name), `<div class="row"><span>${esc(S.agents.versions[name])}</span></div>
       ${quota ? `<div class="row" style="margin-top:14px"><b>usage limits</b><span class="faint small">as of ${fmtTime(quota.ts)}</span></div>
         <table class="t" style="margin-top:4px">${quota.windows.map(w => `<tr><td>${esc(w.name)}</td><td style="width:35%">${meter(used(w), 1)}</td>
           <td class="small">${Math.round(used(w) * 100)}%</td><td class="small faint">${w.resets_at && used(w) ? `resets ${fmtTime(w.resets_at)}` : ''}</td></tr>`).join('')}</table>` : ''}
       <div class="row" style="margin-top:8px"><button class="btn" data-op="${name}/smoke" ${op?.state === 'running' ? 'disabled' : ''}>smoke test</button>
         <button class="btn primary" data-op="${name}/update" ${op?.state === 'running' ? 'disabled' : ''}>update to latest</button></div>
-      ${smoke ? `<div style="margin-top:10px">${pill(smoke.ok ? 'ok' : 'failed', smoke.ok ? 'smoke test passed' : 'smoke test failed')}
-        <span class="faint small">${smoke.seconds ?? ''}s</span>${smoke.error ? `<pre class="fe err">${esc(smoke.error)}</pre>` : ''}</div>` : ''}
-      ${res?.output ? `<div class="hint" style="margin-top:10px">update output</div><pre class="small" style="max-height:200px;overflow:auto">${esc(res.output)}</pre>` : ''}
-      ${op?.state === 'failed' ? `<pre class="fe err">${esc(res?.error)}</pre>` : ''}
       <div class="row" style="margin-top:14px"><b>available models</b><span class="faint small">${models.length} · as reported by ${esc(S.models[name]?.version || '?')}</span></div>
       ${models.length ? `<table class="t" style="margin-top:4px"><tr><th>model</th><th>efforts</th></tr>${models.map(m => `<tr><td>${esc(m.alias ? m.name : m.id)}</td>
         <td class="small">${esc(m.efforts.join(' ') || '(none)')}</td></tr>`).join('')}</table>` : '<div class="empty">No catalog yet; run a smoke test, then refresh.</div>'}`);
@@ -1276,12 +1335,24 @@ async function renderAgents(fresh = true) {
   main.innerHTML = `<div class="page"><div class="page-head"><div><div class="crumbs">platform</div><h1>agent CLIs</h1>
       <p class="muted small">Sessions use your existing logins. Update runs the CLI's own updater, then a smoke turn, then re-reads the model list;
         every model/effort selector in the UI uses this list.</p></div>
-      <div class="actions"><button class="btn" id="models-refresh">refresh model list</button></div></div>
+      <div class="actions"><button class="btn" id="quotas-refresh">refresh usage</button>
+        <button class="btn" id="models-refresh">refresh model list</button></div></div>
     <div class="grid cols-2" style="margin-top:18px">${AGENTS.map(card).join('')}</div></div>`;
-  $$('[data-op]').forEach(b => b.onclick = () => act(async () => {
-    await api(`/api/agents/${b.dataset.op}`, { body: {} }); await renderAgents();
-  }, 'Started'));
-  $('#models-refresh').onclick = () => act(async () => { await api('/api/models/refresh', { body: {} }); await renderAgents(); }, 'Model list refreshed');
+  // Smoke and update run in the background: their pop-up waits for the `agents` event that ends the op
+  $$('[data-op]').forEach(b => b.onclick = async () => {
+    const [name, op] = b.dataset.op.split('/');
+    const done = busyToast(`${cliName(name)} ${op === 'smoke' ? 'smoke test' : 'update'} running`);
+    (S.opDone ||= {})[name] = done;
+    try { await api(`/api/agents/${b.dataset.op}`, { body: {} }); await renderAgents(); }
+    catch (e) { delete S.opDone[name]; done(e.message, 'error'); }
+  });
+  const refresh = (id, what, path) => $(id).onclick = async () => {
+    const done = busyToast(`refreshing ${what}`);
+    try { await api(path, { body: {} }); done(`${what}: done`, 'ok'); await renderAgents(); }
+    catch (e) { done(`${what}: failed (${e.message})`, 'error'); }
+  };
+  refresh('#models-refresh', 'model list', '/api/models/refresh');
+  refresh('#quotas-refresh', 'usage', '/api/quotas/refresh');
 }
 
 // ---------- live events ----------
@@ -1345,9 +1416,19 @@ function handle(evt) {
       loadState();
       if (inGoal) scheduleRefresh();
       break;
-    case 'agents':
+    case 'agents': {
+      // The finished op's outcome replaces its pop-up, wherever the human is
+      const done = S.opDone?.[evt.name], op = evt.op, res = op?.result || {};
+      if (done && op) {
+        delete S.opDone[evt.name];
+        const what = `${cliName(evt.name)} ${op.op === 'smoke' ? 'smoke test' : 'update'}`;
+        if (op.state === 'failed' || !res.ok) done(`${what}: failed${res.error ? ` (${res.error})` : ''}`, 'error');
+        else if (op.op === 'smoke') done(`${what}: passed`, 'ok');
+        else done(`${what}: updated${res.smoke?.ok ? '' : ', smoke test failed'}`, res.smoke?.ok ? 'ok' : 'warn');
+      }
       if (r.view === 'agents') renderAgents();
       break;
+    }
     case 'quota':
       if (r.view === 'agents' && S.agents) { (S.agents.quotas ||= {})[evt.agent] = evt; renderAgents(false); }
       break;

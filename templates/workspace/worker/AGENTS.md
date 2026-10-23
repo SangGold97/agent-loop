@@ -8,11 +8,11 @@
 - RAM on this machine is shared. Run heavy jobs (training, fine-tuning, large data loads) as
   `loop run -- <cmd>`, after checking `loop infra` for room: it waits while RAM is over 90% used, and above 95%
   the newest heavy process is stopped.
-- Only a job run with `--vram <GB>` sees a GPU (`loop run --vram 12 -- <cmd>`); `$LOOP_VRAM_GB` holds its grant.
+- Only a job run with `--vram <GB>` sees a GPU (`loop run --vram 8 -- <cmd>`); `$LOOP_VRAM_GB` holds its grant.
   It may use more while the GPU has room; when the GPU fills up, the newest job on it is stopped, so ask for its
   peak VRAM.
-- `loop run --detach` (same options) keeps a job running after your turn ends; its result arrives as your next
-  message.
+- `loop run --detach` (same options) runs a job past your turn: use it for any job that may take over 10 minutes,
+  then do other work or end your turn instead of waiting; its result arrives as your next message.
 
 ## Answer rules
 
@@ -26,7 +26,8 @@
 
 ## Coding and editing rules
 
-- Follow PEP 8 for Python. Add a short explanatory comment before any block containing substantial logic.
+- Follow PEP 8 for Python, with lines up to about 88 characters. Before each blocks with substantial logic, add a short descriptive comment.
 - When updating content, completely replace outdated parts without leaving obsolete details behind.
-- Keep code, reports and generated content concise and free of repetition.
-- Minimal code modifications for optimal efficiency.
+- Write code, comments, identifiers and commit messages in English, matching the repo.
+- Before finishing, delete the temporary files, scratch scripts and debug output you created, only keep nessesary files. 
+- Minimal code modifications for optimal efficiency. Edit files with your file-editing tool (such as `Edit` or `apply_patch`) rather than shell commands.

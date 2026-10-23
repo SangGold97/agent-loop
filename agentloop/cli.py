@@ -16,7 +16,7 @@ from pathlib import Path
 HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   spawn   start a new worker session           loop spawn --agent claude --role coder <<'EOF' ... EOF
   send    continue an idle worker              loop send w-1a2b3c <<'EOF' ... EOF
-  advise  request advice; the reply arrives as an event   loop advise <<'EOF' ...question... EOF
+  advise  request advice; the reply arrives as an event   loop advise [--follow-up ma-1a2b3c] <<'EOF' ... EOF
   stop    stop a running worker (and its jobs), or one job   loop stop w-1a2b3c | loop stop j-4d5e6f
   ls      list this goal's workers
   show    worker details / a turn's evidence   loop show w-1a2b3c --turn 2 [--full] [--log]
@@ -166,6 +166,9 @@ def main(argv: list[str] | None = None) -> None:
                           ("advise", sub.add_parser("advise", help="request advice asynchronously"))):
         if name == "send":
             sparser.add_argument("sid")
+        elif name == "advise":
+            sparser.add_argument("--follow-up", dest="follow_up", metavar="SID",
+                                 help="continue an earlier consultation on the same question")
         sparser.add_argument("--prompt")
         sparser.add_argument("--prompt-file", dest="prompt_file")
     for name in ("stop", "merge", "retire"):
@@ -207,6 +210,8 @@ def main(argv: list[str] | None = None) -> None:
             payload.update({"agent": a.agent, "role": a.role})
         elif a.cmd == "send":
             payload["sid"] = a.sid
+        elif a.follow_up:
+            payload["follow_up"] = a.follow_up
     elif a.cmd in ("stop", "merge", "retire"):
         payload = {"sid": a.sid}
     elif a.cmd == "show":

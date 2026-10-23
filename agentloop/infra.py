@@ -168,12 +168,17 @@ class Infra:
                         time.time() - self.gpu_reading[0], exc_info=True)
 
     def gpu_loop(self) -> None:
-        # Every GPU_POLL_S from the start of one poll to the next, however long nvidia-smi takes
+        # Every GPU_POLL_S from the start of one poll to the next, however long nvidia-smi takes. The thread must
+        # never die, or the GPU reading stays stale until a restart: after a slow poll the next tick can already be
+        # past, so the sleep is clamped at zero, and an unexpected error is logged and the loop goes on
         tick = time.monotonic()
         while True:
-            self.poll_gpus()
+            try:
+                self.poll_gpus()
+            except Exception:
+                log.exception("GPU poll failed")
             tick = max(tick + GPU_POLL_S, time.monotonic())
-            time.sleep(tick - time.monotonic())
+            time.sleep(max(0.0, tick - time.monotonic()))
 
     def sample(self) -> dict:
         vm, disk = psutil.virtual_memory(), psutil.disk_usage(self.disk_path)

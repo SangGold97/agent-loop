@@ -37,7 +37,7 @@ def main():
     venv = Path(os.environ["LOOP_WS"]) / ".venv"
     assert os.environ["VIRTUAL_ENV"] == str(venv) and str(venv / "bin") in os.environ["PATH"].split(os.pathsep)
     if role == "meta-advisor":
-        assert resume is None
+        assert (resume is not None) == ("Follow-up" in prompt)  # only a follow-up resumes its consultation
         assert all((gdir / name).read_text() is not None for name in ("spec.md", "goal.md", "plan.md"))
         if "ADVICE_LIMIT" in _spec(gdir):
             text = f"Claude AI usage limit reached|{int(time.time()) + 600}"
@@ -58,7 +58,7 @@ def main():
             else:
                 raise AssertionError(f"advisor executed {cmd}")
         time.sleep(2 if "ADVICE_STOP" in _spec(gdir) else 0.5)
-        text = "Consider a different validation split."
+        text = "Keep the new split." if resume else "Consider a different validation split."
         emit({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
         emit({"type": "result", "subtype": "success", "result": text, "session_id": sid,
               "usage": {"input_tokens": 10, "output_tokens": 5}})
@@ -149,7 +149,12 @@ def main():
             n = int(count.read_text()) if count.exists() else 0
             if n < 2 and "[Budget exhausted" not in prompt:
                 count.write_text(str(n + 1))
-                text = loop("advise", stdin=f"Question {n + 1}: what should we reconsider?")
+                # ADVICE_FOLLOW asks its second question within the first consultation
+                if n == 1 and "ADVICE_FOLLOW" in _spec(gdir):
+                    sid = re.search(r"\[Advice\] (ma-\w+)", prompt).group(1)
+                    text = loop("advise", "--follow-up", sid, stdin="Follow-up: does the split hold?")
+                else:
+                    text = loop("advise", stdin=f"Question {n + 1}: what should we reconsider?")
                 if "budget exhausted" in text or "read-only advisors require" in text:
                     text += "\n" + loop("done", "--status", "partial", stdin=text)
             else:

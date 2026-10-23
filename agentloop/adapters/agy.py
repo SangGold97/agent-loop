@@ -85,14 +85,19 @@ class AgyAdapter(Adapter):
         return out
 
     def finish(self, st: ParseState, s: RunSpec) -> None:
-        # agy streams no usage limits; its /usage command reports them without a model call. A bucket at 0 left
-        # omits remaining_fraction (protobuf JSON), so a missing one is fully used.
-        try:
-            out = subprocess.run(["agy", "-p", "/usage", "--output-format", "json"], cwd=s.cwd, capture_output=True,
-                                 text=True, timeout=30).stdout
-            groups = json.loads(out)["command"]["data"]["groups"]
-            st.quota = [{"name": f"{g['name']} {b['window']}", "used": 1 - float(b.get("remaining_fraction") or 0),
-                         "resets_at": epoch(b.get("reset_time")) or None}
-                        for g in groups for b in g.get("buckets") or []] or st.quota
-        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
-            pass
+        # agy streams no usage limits, so they are read once the turn has ended
+        st.quota = usage_quota(s.cwd) or st.quota
+
+
+def usage_quota(cwd) -> list[dict]:
+    """agy's usage windows from its /usage command, which makes no model call; [] when it cannot be read. A bucket
+    at 0 left omits remaining_fraction (protobuf JSON), so a missing one is fully used."""
+    try:
+        out = subprocess.run(["agy", "-p", "/usage", "--output-format", "json"], cwd=cwd, capture_output=True,
+                             text=True, timeout=30).stdout
+        groups = json.loads(out)["command"]["data"]["groups"]
+        return [{"name": f"{g['name']} {b['window']}", "used": 1 - float(b.get("remaining_fraction") or 0),
+                 "resets_at": epoch(b.get("reset_time")) or None}
+                for g in groups for b in g.get("buckets") or []]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return []

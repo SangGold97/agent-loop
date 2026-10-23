@@ -42,6 +42,7 @@ HEAVY_GB = 1.0  # a tool process or job this large may be stopped to save the po
 GRANT_SAMPLES = ("rss_gb", "peak_gb", "oom", "cpu", "cpu_cores")  # a job's measurements, not kept in its jobs-table record
 AGENT_PROCS = {"claude", "codex", "agy"}  # an agent CLI's own processes, never stopped for RAM
 QUOTA_WARN = 0.9  # share of a CLI's usage window past which running goals hear it is running out
+QUOTA_REFRESH_S = 600  # every CLI's usage windows are reread this often, to count use outside agent-loop
 DISK_WARN_GB = 10  # free disk below which running goals hear it is running out (again once back above twice that)
 CPU_WARN_PCT = 90  # 10-minute mean CPU use from which running goals hear the CPU is saturated (again once below 70)
 CPU_REARM_PCT = 70
@@ -86,20 +87,6 @@ class Bus:
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self.subs.discard(q)
-
-
-def core_ranges(cores: set[int]) -> str:
-    """CPU cores as ranges ("6-8", "0-3,14-15"); "all" when nothing narrows them."""
-    if not cores or len(cores) >= (psutil.cpu_count() or 0):
-        return "all" if cores else ""
-    out, run = [], []
-    for c in sorted(cores):
-        if run and c != run[-1] + 1:
-            out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
-            run = []
-        run.append(c)
-    out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
-    return ",".join(out)
 
 
 class Engine:
@@ -404,6 +391,22 @@ class Engine:
                 log.info("%s: customised harness files kept: %s", name, ", ".join(res["kept"]))
         self.spawn(self.infra_loop())
         self.spawn(agents.refresh_models())  # model lists follow the installed CLI versions
+        self.spawn(self.quota_loop())
+
+    async def refresh_quotas(self) -> None:
+        """Reread every CLI's usage windows (agents.read_quota); a CLI that reports none keeps its last ones."""
+        names = list(agents.UPDATE_CMD)
+        for name, windows in zip(names, await asyncio.gather(*map(agents.read_quota, names))):
+            if windows:
+                self.set_quota(name, windows)
+
+    async def quota_loop(self) -> None:
+        while True:
+            try:
+                await self.refresh_quotas()
+            except Exception:
+                log.exception("quota refresh failed")
+            await asyncio.sleep(QUOTA_REFRESH_S)
 
     async def infra_loop(self) -> None:
         # Samples keep a fixed cadence: the time a sample takes is not added to the wait for the next one. The
@@ -456,7 +459,7 @@ class Engine:
                                              # those still waiting to start
                                              "grants": [{"rss_gb": g["rss_gb"], "vram": g["vram"], "gpu": g.get("gpu")}
                                                         for g in self.grants.values() if g["sid"] == key],
-                                             "waiting": [{"vram": w["vram"], "since": w["since"]}
+                                             "waiting": [{"vram": w["vram"], "since": w["since"], "cmd": w["cmd"]}
                                                          for w in self.ram_waiting.values() if w["sid"] == key]})
                 self.police_ram()
                 self.police_jobs()
@@ -820,16 +823,10 @@ class Engine:
         rows = []
         for g in sorted(self.grants.values(), key=lambda g: g["started"]):
             s = self.db.session(g["sid"]) or {}
-            # The cores the job may run on (e.g. under taskset); its `loop run` helper is not pinned
-            cores: set[int] = set()
-            for pid in self.job_pids(g) - {g["pid"]}:
-                with contextlib.suppress(psutil.Error):
-                    cores |= set(psutil.Process(pid).cpu_affinity())
             rows.append({"sid": g["sid"], "kind": s.get("kind", ""), "role": s.get("role", ""),
                          "ws": s.get("ws", ""), "goal": s.get("goal", ""), "cmd": g.get("cmd_full") or g["cmd"],
                          "started": g["started"], "rss_gb": g["rss_gb"], "cpu_cores": g.get("cpu_cores"),
-                         "cpus": core_ranges(cores), "vram": g["vram"],
-                         "gpu": g.get("gpu"),
+                         "vram": g["vram"], "gpu": g.get("gpu"),
                          "job": g.get("job"), "within": bool(g.get("within"))})
         return rows
 
@@ -982,8 +979,7 @@ class Engine:
         if not lang or lang.lower() == "english":
             return ""
         return (f" LANGUAGE: the human reads {lang}. Write plan.md, notes, reports and chat replies "
-                f"in {lang}. Write worker prompts in English (workers report in English); keep code, identifiers, "
-                "commands and commit messages in the project's usual language.")
+                f"in {lang}. Write worker prompts in English.")
 
     def mode_text(self, sess: dict) -> str:
         ws, gid = sess["ws"], sess["goal"]
@@ -994,8 +990,8 @@ class Engine:
                     f"Workspace root: {p}. Follow the META-WORK section of your AGENTS.md.{lang}")
         if sess["kind"] == "meta-advisor":
             return (f"MODE: META-ADVISOR for goal {gid} in workspace {ws}. Goal directory: {gdir}. "
-                    "Follow the META-ADVISOR section of your AGENTS.md. Read spec.md, goal.md and plan.md to "
-                    "understand the objective and the current state. "
+                    "Follow the META-ADVISOR section of your AGENTS.md. spec.md and goal.md define the "
+                    "objective; plan.md is the meta-work's current view, to be checked rather than assumed. "
                     f"Write your advice in {goal_config(p, gid)['goal'].get('language') or 'English'}.")
         orch = self.goal_row(ws, gid)["meta_work"] or "not started"
         return (f"MODE: META-CHAT for goal {gid} in workspace {ws}. Goal dir: {gdir}. Workspace root: {p}. "
@@ -1053,8 +1049,6 @@ class Engine:
             spec.last_message_file = self.logs(ws, sid)[0].with_name(f"{sid}.t{n}.last.txt")
         elif sess["agent"] == "agy":
             workspace.agy_plugin()
-        if sess["kind"] == "meta-advisor":
-            spec.resume_id = None  # every consultation starts with a fresh context
         return spec
 
     async def run_turn(self, sess: dict, prompt: str, start_commit: str | None = None):
@@ -1122,20 +1116,18 @@ class Engine:
 
     # ---------- goals ----------
     def kickoff_text(self, ws: str, gid: str) -> str:
-        p, gdir = self.wsp(ws), self.gdir(ws, gid)
+        p = self.wsp(ws)
         cfg = goal_config(p, gid)
         mc = cfg["goal"]
         agents = "\n".join(f"  - `--agent {a}`: {c.get('model') or 'default model'} / effort {c.get('effort') or 'default'}"
                            for a, c in mc["workers"].items() if c.get("enabled", True))
         return (f"[Kickoff] Goal \"{mc['title']}\" ({gid}) in workspace {ws}.\n"
-                f"- Goal dir: {gdir}. Read spec.md and goal.md first (human-owned, do not edit). "
-                "You own plan.md there.\n"
-                f"- Project repo: {p / 'repo'} (the human's checkout: read it, do not change it). Integration branch "
-                f"{gitops.int_branch(gid)} is checked out at {gitops.int_worktree(p, gid)}.\n"
+                f"- Project repo: {p / 'repo'} (the human's checkout: read it, do not change it).\n"
                 f"- Worker agents (the human fixed model and effort; you pick the CLI and name the role):\n{agents}\n"
                 f"- Your turns and the workers share a {self.pool_gb()} GB RAM pool; only jobs run with "
                 "`loop run --vram <GB>` see a GPU.\n"
-                f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.")
+                f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.\n"
+                "- Read spec.md and goal.md first (human-owned, do not edit). You own plan.md there.")
 
     async def start_goal(self, ws: str, gid: str) -> None:
         p, m = self.wsp(ws), self.goal_row(ws, gid)
@@ -1177,7 +1169,7 @@ class Engine:
         for s in self.advisors(ws, gid):
             if s["status"] == "queued":
                 self.db.update("sessions", {"id": s["id"]}, status="stopped", updated=time.time())
-                self.advice_result(s, "stopped", "The goal stopped before the consultation started.")
+                self.advice_result(s, s["turns"] + 1, "stopped", "The goal stopped before the consultation started.")
         self.stop_jobs("the goal stopped", ws=ws, goal=gid)
         kinds = ("worker", "meta-work", "meta-advisor") if meta_work else ("worker", "meta-advisor")
         for s in self.db.q("SELECT id, kind FROM sessions WHERE ws=? AND goal=?", ws, gid):
@@ -1456,8 +1448,9 @@ class Engine:
         text = text.strip()
         if not text:
             raise AgentError("empty note")
-        nid = self.db.x("INSERT INTO notes(ws, goal, ts, text, author, status, mode, source_session) "
-                        "VALUES(?,?,?,?,?,?,?,?)", ws, gid, time.time(), text, author, status, mode, source)
+        nid = self.db.x("INSERT INTO notes(ws, goal, ts, text, author, status, mode, source_session, seq) "
+                        "VALUES(?,?,?,?,?,?,?,?,(SELECT COALESCE(MAX(seq), 0) + 1 FROM notes WHERE ws=? AND goal=?))",
+                        ws, gid, time.time(), text, author, status, mode, source, ws, gid)
         if status == "approved":
             self.deliver_note(nid)
         self.publish("note", ws=ws, goal=gid, id=nid, status=status)
@@ -1467,9 +1460,9 @@ class Engine:
         n = self.db.one("SELECT * FROM notes WHERE id=?", nid)
         path = self.gdir(n["ws"], n["goal"]) / "notes.md"
         with path.open("a") as fh:
-            fh.write(f"\n## Note #{nid} · {time.strftime('%Y-%m-%d %H:%M')} · {n['author']}\n\n{n['text']}\n")
-        workspace.commit(self.wsp(n["ws"]), "human", f"human: note #{nid} for {n['goal']}")
-        self.db.push_inbox(n["ws"], n["goal"], "note", {"id": nid, "text": n["text"]},
+            fh.write(f"\n## Note #{n['seq']} · {time.strftime('%Y-%m-%d %H:%M')} · {n['author']}\n\n{n['text']}\n")
+        workspace.commit(self.wsp(n["ws"]), "human", f"human: note #{n['seq']} for {n['goal']}")
+        self.db.push_inbox(n["ws"], n["goal"], "note", {"id": n["seq"], "text": n["text"]},
                            deferred=n["mode"] != "now")
         if n["mode"] == "now":
             self.kick(n["ws"], n["goal"])
@@ -1518,7 +1511,7 @@ class Engine:
         return changed
 
     # ---------- advisor consultations ----------
-    def advise(self, caller: dict, prompt: str) -> str:
+    def advise(self, caller: dict, prompt: str, follow_up: str | None = None) -> str:
         m = self.require_meta_work(caller)
         ws, gid = caller["ws"], caller["goal"]
         if not isinstance(prompt, str) or not prompt.strip():
@@ -1532,22 +1525,36 @@ class Engine:
         if m["final_turn"] or self.exhausted(b) or (b.get("max_meta_turns") and
                                                    b["meta_turns"] + active >= b["max_meta_turns"]):
             raise AgentError("meta turn budget exhausted; finalize with `loop done`")
-        cfg = goal_config(self.wsp(ws), gid)
-        conf = cfg["goal"]["meta_advisor"]
-        errors = agents.config_errors({"meta_advisor": conf})
-        if errors:
-            raise AgentError("; ".join(errors))
-        self.check_limit(conf["agent"])
+        # A follow-up resumes an earlier consultation of this goal, keeping that session's own agent settings
+        if follow_up:
+            sess = self.db.session(follow_up)
+            if not sess or sess["kind"] != "meta-advisor" or (sess["ws"], sess["goal"]) != (ws, gid):
+                raise AgentError(f"no consultation {follow_up} in this goal")
+            if sess["status"] in ("queued", "running"):
+                raise AgentError(f"consultation {follow_up} is still in progress; follow up after its [Advice]")
+            if not sess["vendor_id"]:
+                raise AgentError(f"consultation {follow_up} has no conversation to resume; ask without --follow-up")
+            agent = sess["agent"]
+        else:
+            conf = goal_config(self.wsp(ws), gid)["goal"]["meta_advisor"]
+            errors = agents.config_errors({"meta_advisor": conf})
+            if errors:
+                raise AgentError("; ".join(errors))
+            agent = conf["agent"]
+        self.check_limit(agent)
         self.check_ram(ws, gid)
-        sess = self.new_session(ws, gid, "meta-advisor", "meta-advisor", conf,
-                                self.wsp(ws) / "meta", parent=caller["id"])
+        if not follow_up:
+            sess = self.new_session(ws, gid, "meta-advisor", "meta-advisor", conf,
+                                    self.wsp(ws) / "meta", parent=caller["id"])
         self.db.update("sessions", {"id": sess["id"]}, status="queued")
-        self.db.push_inbox(ws, gid, "advice_request", {"sid": sess["id"], "question": prompt.strip()})
+        self.db.push_inbox(ws, gid, "advice_request", {"sid": sess["id"], "turn": sess["turns"] + 1,
+                                                       "question": prompt.strip()})
         self.db.x("UPDATE goals SET meta_turns=meta_turns+1, idle_streak=0 WHERE ws=? AND id=?", ws, gid)
         self.publish("session_status", ws=ws, goal=gid, session=sess["id"], status="queued")
         # The advisor only reads the project, so it starts now, alongside the turn that asked
         self.dispatch_advice(ws, gid)
-        return f"Consultation {sess['id']} started; the advice arrives as an [Advice] event."
+        started = f"Follow-up to consultation {sess['id']}" if follow_up else f"Consultation {sess['id']}"
+        return f"{started} started; the advice arrives as an [Advice] event."
 
     def dispatch_advice(self, ws: str, gid: str) -> None:
         for item in self.db.q("SELECT * FROM inbox WHERE ws=? AND goal=? AND kind='advice_request' AND consumed=0 "
@@ -1558,36 +1565,42 @@ class Engine:
             if not sess or sess["status"] != "queued":
                 continue
             self.db.update("sessions", {"id": sess["id"]}, status="running", updated=time.time())
-            self.spawn(self.advisor_turn(sess["id"], payload["question"]), goal=(ws, gid))
+            self.spawn(self.advisor_turn(sess["id"], payload["question"], payload.get("turn", 1)), goal=(ws, gid))
 
-    def advice_result(self, sess: dict, status: str, text: str) -> None:
-        """Persist one answer per consultation, including failures and interrupted turns."""
+    def advice_result(self, sess: dict, turn: int, status: str, text: str) -> None:
+        """Persist one answer per consultation turn, including failures and interrupted turns."""
         ws, gid, sid = sess["ws"], sess["goal"], sess["id"]
-        self.db.x("UPDATE inbox SET consumed=1 WHERE ws=? AND goal=? AND kind='advice_request' "
-                  "AND json_extract(payload, '$.sid')=?", ws, gid, sid)
-        payload = json.dumps({"sid": sid, "text": f"[Advice] {sid} · {status}\n{text}"})
+        match = "json_extract(payload, '$.sid')=? AND COALESCE(json_extract(payload, '$.turn'), 1)=?"
+        self.db.x(f"UPDATE inbox SET consumed=1 WHERE ws=? AND goal=? AND kind='advice_request' AND {match}",
+                  ws, gid, sid, turn)
+        head = f"[Advice] {sid}" + (f" · turn {turn}" if turn > 1 else "") + f" · {status}"
+        payload = json.dumps({"sid": sid, "turn": turn, "text": f"{head}\n{text}"})
         self.db.x("INSERT INTO inbox(ws, goal, ts, kind, payload) SELECT ?, ?, ?, 'advice', ? "
-                  "WHERE NOT EXISTS (SELECT 1 FROM inbox WHERE ws=? AND goal=? AND kind='advice' "
-                  "AND json_extract(payload, '$.sid')=?)", ws, gid, time.time(), payload, ws, gid, sid)
+                  f"WHERE NOT EXISTS (SELECT 1 FROM inbox WHERE ws=? AND goal=? AND kind='advice' AND {match})",
+                  ws, gid, time.time(), payload, ws, gid, sid, turn)
 
     def recover_advice(self) -> None:
         # A crash can land between saving the final text and delivering it. Reuse that text, never rerun the
         # consultation; an unfinished turn becomes an interruption notice. Queued requests still dispatch normally.
-        rows = self.db.q("SELECT * FROM sessions s WHERE kind='meta-advisor' AND status!='queued' AND NOT EXISTS "
-                         "(SELECT 1 FROM inbox i WHERE i.kind='advice' AND json_extract(i.payload, '$.sid')=s.id)")
-        for s in rows:
-            turn = self.db.one("SELECT * FROM turns WHERE session=? ORDER BY n DESC LIMIT 1", s["id"])
-            complete = s["status"] == "idle" and turn and turn["ended"]
-            self.advice_result(s, "completed" if complete else s["status"],
+        rows = self.db.q("SELECT * FROM inbox r WHERE kind='advice_request' AND consumed=1 AND NOT EXISTS "
+                         "(SELECT 1 FROM inbox i WHERE i.kind='advice' AND json_extract(i.payload, '$.sid')="
+                         "json_extract(r.payload, '$.sid') AND COALESCE(json_extract(i.payload, '$.turn'), 1)="
+                         "COALESCE(json_extract(r.payload, '$.turn'), 1))")
+        for r in rows:
+            payload = json.loads(r["payload"])
+            s, n = self.db.session(payload["sid"]), payload.get("turn", 1)
+            turn = self.db.one("SELECT * FROM turns WHERE session=? AND n=?", s["id"], n)
+            complete = turn and turn["ended"] and turn["status"] == "idle"
+            self.advice_result(s, n, "completed" if complete else turn["status"] if turn else s["status"],
                                turn["final"] if complete else "The consultation was interrupted before advice was delivered.")
 
-    async def advisor_turn(self, sid: str, question: str) -> None:
+    async def advisor_turn(self, sid: str, question: str, turn: int) -> None:
         sess = self.db.session(sid)
         ws, gid = sess["ws"], sess["goal"]
         try:
             if self.goal_row(ws, gid)["status"] != "running":
                 self.db.update("sessions", {"id": sid}, status="stopped", updated=time.time())
-                self.advice_result(sess, "stopped", "The goal stopped before the consultation started.")
+                self.advice_result(sess, turn, "stopped", "The goal stopped before the consultation started.")
                 return
             prompt = f"[Consultation]\n{question}"  # the mode text goes in as system text (build_spec)
             changed = self.watch_project(ws, gid)
@@ -1605,13 +1618,13 @@ class Engine:
                 text += f"\nThe CLI is at its usage limit until {clock(res.limited_until)}; this turn was not counted."
             if res.leftover:
                 text += "\n" + leftover_note(res.leftover, "the advisor turn")
-            self.advice_result(sess, "stopped" if res.stopped else "failed" if res.error else "completed", text)
+            self.advice_result(sess, turn, "stopped" if res.stopped else "failed" if res.error else "completed", text)
         except Exception as exc:
             log.exception("advisor turn failed for %s", sid)
             self.db.update("sessions", {"id": sid}, status="failed", updated=time.time())
             self.db.x("UPDATE turns SET status='failed', ended=?, final=? WHERE session=? AND status='running'",
                       time.time(), str(exc), sid)
-            self.advice_result(sess, "failed", f"Consultation failed inside the platform: {exc}")
+            self.advice_result(sess, turn, "failed", f"Consultation failed inside the platform: {exc}")
         finally:
             self.publish("session_status", ws=ws, goal=gid, session=sid, status=self.db.session(sid)["status"])
         self.check_budget(ws, gid)
@@ -1737,6 +1750,11 @@ class Engine:
             text += "\n" + leftover_note(res.leftover, "this worker's turn")
         if res.memory:
             text += f"\n[System] Memory in this worker's turn: {res.memory}"
+        # A worker that detached a job and ended its turn is not done: say so, or the meta-work may brief it anew
+        if jobs := self.db.q("SELECT id FROM jobs WHERE session=? AND status='running' ORDER BY started", sid):
+            ids = ", ".join(j["id"] for j in jobs)
+            text += (f"\n[System] Job{'s' * (len(jobs) > 1)} {ids} {'are' if len(jobs) > 1 else 'is'} still "
+                     f"running; {sid} resumes with the result when {'they end' if len(jobs) > 1 else 'it ends'}.")
         if res.limited_until:
             # The CLI refused the turn: it does not count against the worker budget
             self.vendor_limits[sess["agent"]] = res.limited_until

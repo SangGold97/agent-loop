@@ -35,7 +35,7 @@ def server():
     import httpx
     import uvicorn
 
-    from agentloop import workspace
+    from agentloop import agents, workspace
     from agentloop.adapters import ADAPTERS
     from agentloop.adapters.claude import ClaudeAdapter
     from agentloop.server import create_app
@@ -47,6 +47,12 @@ def server():
             return [sys.executable, str(FAKE)] + (["--resume", s.resume_id] if s.resume_id else [])
 
     ADAPTERS["fake"] = FakeAdapter()
+
+    # The real CLIs' usage windows stay out of the tests (their warnings would reach the goals under test)
+    async def no_quota(name):
+        return []
+
+    agents.read_quota = no_quota
     # The shared venv without pip: same layout and activation, without seconds of ensurepip per workspace
     ensure_venv = workspace.ensure_venv
     workspace.ensure_venv = lambda ws, with_pip=False: ensure_venv(ws, with_pip)

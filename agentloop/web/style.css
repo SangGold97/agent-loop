@@ -116,7 +116,7 @@ h3 { font-size: 13px; }
 .btn.danger:hover:not(:disabled) { background: var(--bad); color: var(--bg); }
 .btn.small { padding: 0 8px; font-size: 12px; }
 .btn.del { border-color: var(--border); color: var(--faint); }
-.btn.del:hover:not(:disabled) { border-color: var(--bad); background: var(--bad); color: var(--bg); }
+.btn.del:hover:not(:disabled), .btn.stop:hover:not(:disabled) { border-color: var(--bad); background: var(--bad); color: var(--bg); }
 .btn:disabled { opacity: .45; cursor: default; }
 .advisor-status.dormant { opacity: .45; }
 /* the advisor button reads like the META-WORK title beside it */
@@ -150,7 +150,7 @@ label.inline { display: inline-flex; gap: 6px; align-items: center; color: var(-
 .thinking::after { content: '▍'; animation: blink 1s steps(1) infinite; margin-left: 2px; }
 @keyframes blink { 50% { opacity: 0; } }
 /* eight 45° steps turn the bar into the terminal spinner | / - \ */
-.spin { display: inline-block; width: 1ch; text-align: center; animation: spin .8s steps(8) infinite; }
+.spin { display: inline-block; width: 1ch; text-align: center; animation: spin 1s steps(8) infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .meter { height: 4px; background: var(--border); margin: 4px 0; }
 .meter i { display: block; height: 100%; background: var(--accent); }
@@ -171,6 +171,25 @@ label.inline { display: inline-flex; gap: 6px; align-items: center; color: var(-
 table.t { width: 100%; border-collapse: collapse; }
 .t th { text-align: left; color: var(--faint); font-weight: 400; font-size: 12px; border-bottom: 1px solid var(--border); padding: 3px 8px 3px 0; }
 .t td { border-bottom: 1px dashed var(--border); padding: 4px 8px 4px 0; vertical-align: top; }
+.t th.num, .t td.num { text-align: right; padding: 4px 0 4px 16px; white-space: nowrap; }
+/* A session's jobs are rows of its own table under its row, so their columns line up with the session's: indented,
+   smaller and without rules between them */
+.t tr.has-jobs > td, .t tr.job > td { border-bottom: 0; }
+.t tr.job > td { padding-top: 1px; padding-bottom: 1px; font-size: 12px; color: var(--muted); }
+.t tr.job-head > th { border-bottom: 0; padding-top: 4px; padding-bottom: 0; font-size: 11px; }
+.t tr.job-head > * { border-top: 1px dashed var(--border); }
+.t tr.job code { white-space: nowrap; }
+/* Ids, names and sizes stay on one line; a narrow window scrolls the table instead of breaking them */
+.scroll-x { overflow-x: auto; }
+.t.sessions th, .t.sessions td { white-space: nowrap; }
+/* Each session is a framed entry and its jobs sit inside the frame, set apart from the session row by a faint rule */
+.t.sessions tbody.group { border: 1px solid var(--border-2); }
+.t.sessions tr > :first-child { padding-left: 10px; }
+.t.sessions tr > :last-child { padding-right: 10px; }
+.t.sessions tr.job > :first-child { padding-left: 24px; }
+.t.sessions tbody.group > tr:not(.job) > td { border-bottom: 0; padding-top: 8px; padding-bottom: 8px; }
+.t.sessions tbody.group > tr.has-jobs > td { padding-bottom: 4px; }
+.t.sessions tbody.group > tr.gap > td { padding: 0; height: 6px; }
 
 /* markdown */
 .md { overflow-wrap: anywhere; }
@@ -269,6 +288,7 @@ table.t { width: 100%; border-collapse: collapse; }
   font-size: 11px; padding: 0 8px; cursor: pointer; }
 .tl { margin: 3px 0; overflow-wrap: anywhere; }
 .tl .dotc { color: var(--ok); margin-right: 6px; }
+.feed.running .tl.last .dotc { animation: blink 1s steps(1) infinite; }
 .tl b { font-weight: 600; }
 .tres { color: var(--faint); font-size: 11px; padding-left: 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 3px; }
 .tres.err { color: var(--bad); }
@@ -327,6 +347,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .modal.full:has(> .modal-feed) { display: flex; flex-direction: column; height: 92vh; }
 .modal.full > .modal-feed { flex: 1 1 auto; min-height: 0; height: auto; }
 .modal.full .chat-pop { height: calc(92vh - 70px); }
+.chat-pop .composer textarea { min-height: 96px; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .toasts { position: fixed; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 6px; z-index: 60; }
 .toast { background: var(--panel); border: 1px solid var(--border-2); padding: 6px 10px; max-width: 460px; }

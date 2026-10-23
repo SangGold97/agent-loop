@@ -1,5 +1,7 @@
-"""Advisor consultations share the goal inbox and budget, but never a writable project or a resumed session."""
+"""Advisor consultations share the goal inbox and budget, but never a writable project; only a follow-up resumes one."""
 import json
+import pytest
+from agentloop.engine import AgentError
 from agentloop import agents, guard
 from conftest import wait_for
 
@@ -38,7 +40,6 @@ def test_advice_round_trip_is_fresh_readonly_and_accounted(server):
     for s in sessions:
         turn = engine.db.one("SELECT * FROM turns WHERE session=?", s["id"])
         assert turn["final"] == "Consider a different validation split."
-        assert engine.build_spec(s, "question", 1).resume_id is None
         assert client.post(f"/api/meta-chats/{s['id']}/messages", json={"text": "hello"}).status_code == 400
         events = client.get(f"/api/sessions/{s['id']}/events").json()["events"]
         # The mode text reaches the CLI once, as system text, not again in the message
@@ -49,9 +50,26 @@ def test_advice_round_trip_is_fresh_readonly_and_accounted(server):
     assert all("[Advice]" in json.loads(i["payload"])["text"] for i in inbox if i["kind"] == "advice")
     advice = client.get(f"/api/goals/advice-full/{gid}").json()["advice"]  # the PLAN & ADVICE tab
     text = "Consider a different validation split."
-    assert advice == {s["id"]: {"status": "completed", "text": text} for s in sessions}
+    assert advice == {s["id"]: [{"turn": 1, "status": "completed", "text": text}] for s in sessions}
     assert engine.db.goal("advice-full", gid)["tokens"] == 75
     assert not (engine.wsp("advice-full") / "repo/advisor.txt").exists()
+
+
+def test_follow_up_resumes_the_same_consultation(server):
+    client, engine = server
+    gid = advice_goal(server, "advice-follow", spec="ADVICE_FOLLOW")
+    client.post(f"/api/goals/advice-follow/{gid}/start")
+    finished(client, "advice-follow", gid)
+    wait_for(lambda: engine.db.goal("advice-follow", gid)["meta_turns"] == 5)
+    [s] = engine.db.q("SELECT * FROM sessions WHERE ws='advice-follow' AND kind='meta-advisor'")
+    assert s["turns"] == 2 and s["status"] == "idle"
+    assert engine.build_spec(s, "q", 3).resume_id == s["vendor_id"]
+    texts = [json.loads(i["payload"])["text"] for i in engine.db.q(
+        "SELECT payload FROM inbox WHERE ws='advice-follow' AND kind='advice' ORDER BY id")]
+    assert texts[0].startswith(f"[Advice] {s['id']} · completed\n")
+    assert texts[1] == f"[Advice] {s['id']} · turn 2 · completed\nKeep the new split."
+    advice = client.get(f"/api/goals/advice-follow/{gid}").json()["advice"][s["id"]]
+    assert [a["turn"] for a in advice] == [1, 2]
 
 
 def test_advisor_budget_waits_for_the_answer_before_final_turn(server):
@@ -130,6 +148,17 @@ def test_advisor_guard_and_configuration(tmp_path, monkeypatch):
     for cmd in ("echo bad > plan.md", "git commit -am bad", "cp spec.md plan.md"):
         assert guard.check({"tool_name": "Bash", "cwd": str(tmp_path), "tool_input": {"command": cmd}}, env)
     assert not guard.check({"tool_name": "Bash", "tool_input": {"command": "cat spec.md; git diff"}}, env)
+    # The turn's own TMPDIR is the one writable place, for scratch files and verification scripts
+    scratch = tmp_path / "scratch"
+    env["TMPDIR"] = str(scratch)
+    assert not guard.check({"tool_name": "Write", "tool_input": {"file_path": f"{scratch}/check.py"}}, env)
+    assert not guard.check({"tool_name": "Bash", "cwd": str(tmp_path),
+                            "tool_input": {"command": f"echo x > {scratch}/out.txt"}}, env)
+    patch = f"*** Begin Patch\n*** Add File: {scratch}/a.py\n+x\n*** End Patch"
+    assert not guard.check({"tool_name": "apply_patch", "tool_input": {"input": patch}}, env)
+    assert guard.check({"tool_name": "Write", "tool_input": {"file_path": f"{tmp_path}/repo/x.py"}}, env)
+    assert guard.check({"tool_name": "Write", "tool_input": {"file_path": f"{scratch}/../x.py"}}, env)
+    assert guard.check({"tool_name": "apply_patch", "tool_input": {}}, env)
     monkeypatch.setattr(agents, "load_models", lambda: {"claude": {"version": "test", "models": [
         {"id": "opus", "efforts": ["high"]}]}})
     assert agents.config_errors({"meta_advisor": {"agent": "claude", "model": "opus", "effort": "high"}}) == []
@@ -151,6 +180,9 @@ def test_advisor_recovery_delivers_saved_results_once_and_keeps_queued_requests(
     queued, interrupted, complete = engine.advisors("advice-recovery", gid)
     engine.db.update("sessions", {"id": interrupted["id"]}, status="interrupted", turns=1)
     engine.db.update("sessions", {"id": complete["id"]}, status="idle", turns=1)
+    for s in (interrupted, complete):  # these two were dispatched before the restart
+        engine.db.x("UPDATE inbox SET consumed=1 WHERE kind='advice_request' AND json_extract(payload, '$.sid')=?",
+                    s["id"])
     answer = "Saved advice " * 2000
     engine.db.x("INSERT INTO turns(session, n, ended, status, final) VALUES(?,1,?,'idle',?)",
                 complete["id"], time.time(), answer)
@@ -163,6 +195,15 @@ def test_advisor_recovery_delivers_saved_results_once_and_keeps_queued_requests(
     pending = engine.db.q("SELECT payload FROM inbox WHERE ws='advice-recovery' "
                           "AND kind='advice_request' AND consumed=0")
     assert len(pending) == 1 and json.loads(pending[0]["payload"])["sid"] == queued["id"]
+    # A follow-up needs a finished consultation of this goal with a conversation to resume
+    for sid, error in ((queued["id"], "in progress"), (complete["id"], "no conversation"), ("ma-none", "no consult")):
+        with pytest.raises(AgentError, match=error):
+            engine.advise(meta, "follow-up question", sid)
+    engine.db.update("sessions", {"id": complete["id"]}, vendor_id="vendor-1")
+    assert "Follow-up" in engine.advise(meta, "follow-up question", complete["id"])
+    pending = engine.db.q("SELECT payload FROM inbox WHERE ws='advice-recovery' "
+                          "AND kind='advice_request' AND consumed=0")
+    assert json.loads(pending[-1]["payload"]) == {"sid": complete["id"], "turn": 2, "question": "follow-up question"}
     client.post(f"/api/goals/advice-recovery/{gid}/stop")
     assert engine.db.session(queued["id"])["status"] == "stopped"
     assert not engine.advisors("advice-recovery", gid)

@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS jobs(
 """
 # Columns added after the first release: (table, column, type)
 ADDED_COLUMNS = [("goals", "first_started", "REAL"), ("goals", "base", "TEXT"), ("goals", "pushed", "REAL"),
-                 ("goals", "pr", "TEXT")]
+                 ("goals", "pr", "TEXT"), ("notes", "seq", "INT")]
 # Columns no longer kept: the platform does not track spend, and GPUs go to jobs (`loop run --vram`), not sessions
 DROPPED_COLUMNS = [("goals", "cost"), ("sessions", "cost"), ("turns", "cost"), ("sessions", "gpu")]
 
@@ -59,6 +59,9 @@ class DB:
             for table, col, typ in ADDED_COLUMNS:
                 if col not in [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")]:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            # Notes are numbered per goal; ones from before that get their number in the order they were added
+            self.conn.execute("UPDATE notes SET seq=(SELECT COUNT(*) FROM notes o WHERE o.ws=notes.ws "
+                              "AND o.goal=notes.goal AND o.id<=notes.id) WHERE seq IS NULL")
             for table, col in DROPPED_COLUMNS:
                 if col in [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")]:
                     self.conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")

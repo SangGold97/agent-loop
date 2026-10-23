@@ -7,7 +7,7 @@ from collections import deque, namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agentloop import digest, guard, infra
+from agentloop import agents, digest, guard, infra
 from agentloop.adapters.agy import AgyAdapter
 from agentloop.adapters.base import RunSpec, ParseState, to_tokens, usage_limit_until
 from agentloop.adapters.claude import ClaudeAdapter
@@ -19,12 +19,6 @@ def test_deep_merge():
     out = deep_merge({"workers": {"claude": {"model": "a", "effort": "high"}}, "x": 1},
                      {"workers": {"claude": {"model": "b"}}})
     assert out == {"workers": {"claude": {"model": "b", "effort": "high"}}, "x": 1}
-
-
-def test_core_ranges():
-    from agentloop.engine import core_ranges
-    assert core_ranges({6, 7, 8}) == "6-8" and core_ranges({0, 1, 2, 3, 14, 15, 9}) == "0-3,9,14-15"
-    assert core_ranges(set(range(os.cpu_count()))) == "all" and core_ranges(set()) == ""
 
 
 def test_to_tokens():
@@ -152,6 +146,18 @@ def test_claude_quota_from_rate_limit_event():
         "seven_day_opus": {"utilization": 0.5, "resetsAt": 1792886400}}}}, st)
     assert st.quota == [{"name": "5h", "used": 0.06, "resets_at": 1792314000},
                         {"name": "7d opus", "used": 0.5, "resets_at": 1792886400}]
+
+
+def test_claude_quota_from_usage_command():
+    text = ("You are currently using your subscription to power your Claude Code usage\n\n"
+            "Current session: 26% used · resets Oct 23, 5:20pm (Asia/Bangkok)\n"
+            "Current week (all models): 39% used · resets Oct 25, 7am (Asia/Bangkok)\n"
+            "Current week (Fable): 7% used\n")
+    now = datetime(2026, 10, 23, 8, 0, tzinfo=timezone.utc).timestamp()
+    assert agents.claude_usage(text, now) == [
+        {"name": "5h", "used": 0.26, "resets_at": datetime(2026, 10, 23, 10, 20, tzinfo=timezone.utc).timestamp()},
+        {"name": "7d", "used": 0.39, "resets_at": datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc).timestamp()},
+        {"name": "7d fable", "used": 0.07, "resets_at": None}]
 
 
 def test_agy_quota_from_usage_command(tmp_path, monkeypatch):
@@ -472,7 +478,7 @@ def test_language_rule():
     from agentloop.engine import Engine
     assert Engine.language_rule("English") == "" and Engine.language_rule(None) == ""
     rule = Engine.language_rule("Vietnamese")
-    assert "chat replies in Vietnamese" in rule and "worker prompts in English" in rule and "commit messages" in rule
+    assert "chat replies in Vietnamese" in rule and rule.endswith("Write worker prompts in English.")
 
 
 def test_slug_transliterates():

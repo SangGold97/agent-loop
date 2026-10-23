@@ -35,7 +35,7 @@ To run it on another machine and use the UI from this one, see [remote/README.md
 | **Goal** (`goals/<slug>/`) | `spec.md`, `goal.md`, `goal.yaml` (human-owned), `plan.md` (meta-work: the current state, including what was ruled out), `notes.md`, `report.md`, `runs/<worker>/` evidence. The slug of the title is the goal id, also used in its branches `loop/<slug>/*` and its integration worktree `wt/<slug>/`, so a title whose slug is already taken in the workspace is refused. |
 | **Meta-work** | One meta session per goal, driven by events (kickoff, worker finished, note, goal changed, budget). It does simple work itself in the integration worktree, where the platform commits its changes as `meta-work(<sid>)` (before a spawn, merge or `loop done` and after each turn), and delegates the rest to workers. |
 | **Meta-chat** | Prompt-by-prompt chat bound to a goal (agent/model/effort chosen per chat); runs commands and tools freely but does not change project code, and steers the goal only through notes you approve. A chat is stored once you send its first message and can be deleted from its bar. |
-| **Meta-advisor** | Consulted through `loop advise`, with agent/model/effort from `goal.yaml → meta_advisor`. Each question starts a new read-only session for one turn right away, while the meta-work turn that asked goes on. Its final text returns to the meta-work inbox as `[Advice]`; the Advisor button beside META-WORK opens its session log, without a chat composer. |
+| **Meta-advisor** | Consulted through `loop advise`, with agent/model/effort from `goal.yaml → meta_advisor`. Each question starts a new read-only session right away, while the meta-work turn that asked goes on; `loop advise --follow-up <sid>` instead resumes that consultation's session for one more turn on the same question. Its final text returns to the meta-work inbox as `[Advice]`; the Advisor button beside META-WORK opens its session log, without a chat composer. |
 | **Worker** | A Claude Code, Codex or agy session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<role>-<sid>`; accepted work is merged into `loop/<goal>/integration`. It receives the meta-work's prompt as is and a generic `worker/AGENTS.md`, nothing about the platform; `.venv/` and `.artifacts/` stay out of git, and `.artifacts/` is kept in `runs/<sid>/artifacts/`. `loop retire W` removes a finished worker's worktree but keeps its branch and log; a worker without a worktree shows as retired and can no longer be sent. |
 | **Digest** | What a finished worker turn sends to the meta-work: a line naming the worker, role and turn, then its final reply as is (kept in `runs/<sid>/t<n>.out.md`). Its changes and the commands it ran are pulled on demand, with git and `loop show W --log`. |
 | **goal.md** | Success criteria, free text. Lines `- verify: \`cmd\`` are run on the committed integration branch before a `success` close (a run that edits tracked files is rejected and its edits and new files are undone); everything else is judged by the meta-work. |
@@ -70,9 +70,11 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   after each turn; after three turns in a row that leave the integration branch unchanged, the goal pauses.
 - A CLI's usage limit is not a failure: the meta-work waits for the announced reset while workers on the other
   CLI keep running, a refused worker turn is not counted, and spawns on that CLI are refused until the reset.
-  After each turn the platform records how much of the CLI's usage windows is used (Claude's `rate_limit_event`,
-  Codex's rollout, `agy -p /usage`) and shows it on the Agent CLIs page and in `loop infra`; once a window passes
-  90%, every running goal's meta-work is told so with its next turn.
+  The platform records how much of each CLI's usage windows is used after every turn (Claude's
+  `rate_limit_event`, Codex's rollout, `agy -p /usage`) and, so that use outside agent-loop counts too, every 10
+  minutes and on the Agent CLIs page's refresh button without a model call (`claude -p /usage`, `codex app-server`,
+  `agy -p /usage`). It shows them on that page and in `loop infra`; once a window passes 90%, every running goal's
+  meta-work is told so with its next turn.
 - A meta-work turn carries its events and nothing else: the `[Budget]` line joins only once 80% of the worker or
   meta turns are spent, and resources reach it as events when they run low (RAM refusals, free disk under 10 GB,
   usage limits); `loop infra` and `loop budget` show the rest on demand.
@@ -99,8 +101,10 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   least 2) and `OMP_WAIT_POLICY=PASSIVE`, unless its environment sets them. When the CPU averages 90% or more over
   10 minutes, running goals hear it once (again after it falls below 70%); `loop infra` shows that average.
 - `loop run --detach` runs the job's helper as a user service outside the turn's scope and returns at once, so
-  the agent ends its turn instead of polling. The job stays in the pool, survives a platform restart and is stopped
-  after `job_timeout_h` (9 h); a `loop run` inside it belongs to the job, not to the turn. When it ends, the platform resumes the worker with its exit status and log tail,
+  the agent ends its turn instead of polling; meta and worker instructions send every job that may take over
+  10 minutes this way. The job stays in the pool, survives a platform restart and is stopped after `job_timeout_h`
+  (9 h); a `loop run` inside it belongs to the job, not to the turn. A worker's digest names its jobs still running
+  at the end of its turn. When a job ends, the platform resumes the worker with its exit status and log tail,
   right after its turn if one is running; when that turn cannot start (budget, RAM, usage limit), or the job is
   the meta-work's, the result goes to the meta-work as an event. `loop stop` stops one job, or a worker with its
   jobs, and a goal that stops stops its jobs.
@@ -114,10 +118,10 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   read every 10 s on their own thread (CPU, RAM and disk every 2 s); while `nvidia-smi` hangs, the infra page marks the last reading stale and no job is
   stopped on it.
 - Events handed to a meta-work turn stay "in flight" until it completes; a crash, restart or stop puts them back.
-- The advisor is read-only like a meta-chat: the guard blocks its edits, its `loop` token permits read commands
-  only, and a turn that still changes `repo/` or the integration worktree raises an alert. A stopped or
-  interrupted consultation reports its status back to the inbox and is never resumed; queued requests survive a
-  server restart. A quota-refused consultation is refunded from the shared meta turn budget.
+- The advisor is read-only like a meta-chat: the guard blocks its edits outside its turn's `$TMPDIR` (scratch
+  files and verification scripts), its `loop` token permits read commands only, and a turn that still changes
+  `repo/` or the integration worktree raises an alert. A stopped or interrupted consultation reports its status
+  back to the inbox and is never rerun by the platform; queued requests survive a server restart. A quota-refused consultation is refunded from the shared meta turn budget.
 - The API accepts writes only from the UI's own origin or non-browser clients. CLI updates (Agent CLIs page) are
   refused while sessions of that CLI are running, and each update is followed by a smoke turn.
 

@@ -79,8 +79,12 @@ def test_full_goal(server):
     adv = client.post(f"/api/goals/demo/{gid}/meta-chats", json={"text": "How is it going?"}).json()["id"]
     msgs = wait_for(lambda: len(m := client.get(f"/api/meta-chats/{adv}/messages").json()["messages"]) == 2 and m)
     assert "Proposed note" in msgs[1]["text"]
-    pending = [n for n in client.get(f"/api/goals/demo/{gid}").json()["notes"] if n["status"] == "pending"]
+    notes = client.get(f"/api/goals/demo/{gid}").json()["notes"]
+    pending = [n for n in notes if n["status"] == "pending"]
     assert pending and client.post(f"/api/notes/{pending[0]['id']}/approve", json={"mode": "queue"}).status_code == 200
+    # Notes are numbered within their goal
+    assert pending[0]["seq"] == len(notes) and f"Proposed note #{len(notes)};" in msgs[1]["text"]
+    assert f"## Note #{len(notes)} " in (ws / "goals" / gid / "notes.md").read_text()
     assert "Consider adding a test" in (ws / "goals" / gid / "notes.md").read_text()
     # Deleting the chat drops its session, messages and logs; the note it proposed stays
     assert client.delete(f"/api/meta-chats/{adv}").status_code == 200
@@ -557,6 +561,10 @@ def test_detached_job_outlives_its_turn_and_resumes_the_worker(server):
     assert "ended] exit 0" in resumed and f"detached job output {jobs_tmp_root()}" in resumed
     digests = engine.db.q("SELECT payload FROM inbox WHERE ws='detach' AND kind='worker_done' ORDER BY id")
     assert len(digests) == 2 and "result of j-" in digests[1]["payload"]
+    # Both digests tell the meta-work that the long job still runs and the worker resumes with its result
+    long_job = engine.db.one("SELECT id FROM jobs WHERE ws='detach' AND cmd='sleep 300'")["id"]
+    assert all(long_job in d["payload"] and f"still running; {sid} resumes" in d["payload"] for d in digests)
+    assert f"Job {long_job} is still running" in digests[1]["payload"]
     # Closing the goal stopped the long job; no grant, process or scratch dir is left
     assert sorted(j["status"] for j in engine.db.q("SELECT status FROM jobs WHERE ws='detach'")) == ["done", "stopped"]
     assert not engine.grants

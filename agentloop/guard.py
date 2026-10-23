@@ -49,9 +49,14 @@ def edit_paths(tool: str, inp: dict) -> list[str]:
     return []
 
 
+ADVISOR_READ_ONLY = "the advisor writes only in $TMPDIR; return advice in your final reply"
+
+
 def check_path(path: Path, env: dict) -> str | None:
+    # The advisor's only writable place is its turn's own TMPDIR, which the platform removes after the turn
     if env.get("LOOP_ROLE") == "meta-advisor":
-        return "the advisor is read-only; return advice in your final reply"
+        tmp = env.get("TMPDIR")
+        return None if tmp and path.resolve().is_relative_to(Path(tmp).resolve()) else ADVISOR_READ_ONLY
     ws = Path(env["LOOP_WS"]).resolve()
     path = path.resolve()
     if not path.is_relative_to(ws):
@@ -220,8 +225,10 @@ def check(event: dict, env: dict) -> str | None:
     if "toolCall" in event:  # agy names the call differently and runs its hooks in the plugin dir, not the cwd
         tool, inp = event["toolCall"].get("name", ""), event["toolCall"].get("args") or {}
         cwd = Path(inp.get("Cwd") or (event.get("workspacePaths") or [cwd])[0])
-    if env.get("LOOP_ROLE") == "meta-advisor" and tool in EDIT_TOOLS | {"apply_patch"}:
-        return "the advisor is read-only; return advice in your final reply"
+    # An advisor edit whose target cannot be read from the call is refused rather than let through
+    if env.get("LOOP_ROLE") == "meta-advisor" and tool in EDIT_TOOLS | {"apply_patch"} and \
+            not edit_paths(tool, inp):
+        return ADVISOR_READ_ONLY
     if tool in SHELL_TOOLS:
         cmd = inp.get("command") or inp.get("cmd") or inp.get("CommandLine") or ""
         return check_command(" ".join(cmd) if isinstance(cmd, list) else str(cmd), env, cwd)

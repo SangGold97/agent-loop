@@ -6,10 +6,14 @@ import json
 import re
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from . import gitops
 from .adapters import ADAPTERS, RunSpec
+from .adapters.agy import usage_quota
+from .adapters.codex import quota_windows
 from .config import state_dir
 from .runner import Runner, child_env
 
@@ -18,10 +22,10 @@ SMOKE_MODEL = {"claude": ("haiku", None), "codex": (None, "low"), "agy": ("gemin
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
-async def run_cmd(argv: list[str], timeout: float = 30) -> tuple[int, str]:
+async def run_cmd(argv: list[str], timeout: float = 30, cwd: Path | None = None) -> tuple[int, str]:
     if not shutil.which(argv[0]):
         return 127, f"{argv[0]} not found"
-    proc = await asyncio.create_subprocess_exec(*argv, env=child_env({}), stdout=asyncio.subprocess.PIPE,
+    proc = await asyncio.create_subprocess_exec(*argv, env=child_env({}), cwd=cwd, stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.STDOUT)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
@@ -136,6 +140,75 @@ async def refresh_models() -> dict:
                "agy": {"version": vers["agy"], "models": await _agy_catalog()}, "fetched": time.time()}
     models_path().write_text(json.dumps(catalog, indent=1))
     return catalog
+
+
+CLAUDE_USAGE_RE = re.compile(r"^Current (session|week)(?: \((.+?)\))?: (\d+)% used(?: · resets (.+?) \((.+?)\))?$",
+                             re.M)
+
+
+async def read_quota(name: str) -> list[dict]:
+    """A CLI's usage windows, read without a model call; [] when the CLI cannot report them."""
+    try:
+        if name == "claude":
+            code, text = await run_cmd(["claude", "-p", "/usage", "--output-format", "json",
+                                        "--no-session-persistence"], timeout=60, cwd=state_dir())
+            return claude_usage(json.loads(text)["result"]) if code == 0 else []
+        if name == "codex":
+            return await _codex_quota()
+        return await asyncio.to_thread(usage_quota, state_dir())
+    except (OSError, ValueError, KeyError, TypeError, TimeoutError):
+        return []
+
+
+def claude_usage(text: str, now: float | None = None) -> list[dict]:
+    """Windows from what `claude -p /usage` prints ("Current week (Fable): 7% used · resets Oct 25, 7am
+    (Asia/Bangkok)"), named as the stream's rate_limit_event names them (5h, 7d, 7d fable)."""
+    now = time.time() if now is None else now
+    out = []
+    for kind, scope, pct, stamp, tz in CLAUDE_USAGE_RE.findall(text):
+        name = "5h" if kind == "session" else "7d" if scope in ("", "all models") else f"7d {scope.lower()}"
+        out.append({"name": name, "used": int(pct) / 100, "resets_at": _local_epoch(stamp, tz, now) if stamp else None})
+    return out
+
+
+def _local_epoch(stamp: str, tz: str, now: float) -> float | None:
+    """'Oct 25, 7am' or '5:20pm' in zone `tz` as epoch seconds; None when it does not parse."""
+    try:
+        zone = ZoneInfo(tz)
+        today = datetime.fromtimestamp(now, zone)
+        stamp = stamp if "," in stamp else f"{today:%b} {today.day}, {stamp}"
+        if ":" not in stamp:
+            stamp = f"{stamp[:-2]}:00{stamp[-2:]}"
+        at = datetime.strptime(f"{today.year} {stamp}", "%Y %b %d, %I:%M%p").replace(tzinfo=zone)
+    except (KeyError, ValueError):
+        return None
+    # A reset lies ahead, so one dated well before now belongs to next year (read late in December)
+    return (at.replace(year=at.year + 1) if at.timestamp() < now - 86400 else at).timestamp()
+
+
+async def _codex_quota() -> list[dict]:
+    """The account's rate limits from `codex app-server` (JSON-RPC over stdio: initialize, then
+    account/rateLimits/read), in the rollout's field names for quota_windows."""
+    msgs = [{"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "agentloop", "version": "0"}}},
+            {"method": "initialized"}, {"id": 2, "method": "account/rateLimits/read"}]
+    proc = await asyncio.create_subprocess_exec("codex", "app-server", env=child_env({}), cwd=state_dir(),
+                                                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.DEVNULL)
+    proc.stdin.write("".join(json.dumps({"jsonrpc": "2.0", **m}) + "\n" for m in msgs).encode())
+    try:
+        async with asyncio.timeout(30):
+            while line := await proc.stdout.readline():
+                msg = json.loads(line)
+                if msg.get("id") == 2:
+                    limits = (msg.get("result") or {}).get("rateLimits") or {}
+                    return quota_windows({key: {"used_percent": w.get("usedPercent"), "resets_at": w.get("resetsAt"),
+                                                "window_minutes": w.get("windowDurationMins")}
+                                          for key, w in limits.items() if isinstance(w, dict)})
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+    return []
 
 
 def check_agent_conf(agent: str, conf: dict, catalog: dict) -> str | None:

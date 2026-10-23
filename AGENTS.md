@@ -24,8 +24,10 @@ sessions, merges their work and closes the goal; the human steers from the web U
   goes into the goal's `inbox` table. `Engine.meta_loop` drains it into one meta-work turn; items stay in flight
   (`consumed=2`) until the turn ends and go back to the queue on crash or restart.
 - **Advisor**: `loop advise` queues a question in the same inbox and at once dispatches a new `meta-advisor`
-  session for one turn, alongside the asking meta-work turn; its final text returns as `[Advice]`. Consultations
-  share `max_meta_turns` and are read-only like a meta-chat (guard, `loop` API, change report after the turn).
+  session for one turn, alongside the asking meta-work turn; its final text returns as `[Advice]`.
+  `--follow-up <sid>` resumes an idle consultation for one more turn instead. Consultations
+  share `max_meta_turns` and are read-only like a meta-chat (guard, `loop` API, change report after the turn),
+  except for scratch files in the turn's `$TMPDIR`.
 - **Worker turn**: runs in its own worktree on `loop/<goal>/<role>-<sid>`, is snapshot-committed, and its final
   reply becomes a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
   `loop/<goal>/integration`, checked out at `wt/<goal>` (`gitops.py`). The meta-work may also change code
@@ -64,23 +66,13 @@ sessions, merges their work and closes the goal; the human steers from the web U
 `fake` adapter that runs `tests/fake_agent.py`. That script emits Claude stream-json and drives the platform through
 `loop`, so changes to the meta/worker protocol usually need a matching change there.
 
-## Coding rules
+## Coding and editing rules
 
-- Follow PEP 8 for Python, with lines up to about 120 characters as in the existing code. Before any block with
-  substantial logic, add a short comment saying why it exists or what it guarantees, like the comments in
-  `engine.py`, so the next reader does not have to reconstruct the intent.
+- Follow PEP 8 for Python, with lines up to about 88 characters. Before each blocks with substantial logic, add a short descriptive comment.
+- When updating content, completely replace outdated parts without leaving obsolete details behind.
 - Write code, comments, identifiers and commit messages in English, matching the repo.
-- Before finishing, delete the temporary files, scratch scripts and debug output you created, so the diff holds only
-  what the change needs.
-- Change only what the user asked for and keep the behaviour of other modules as it is. If the request seems to
-  need a change elsewhere, say so and ask first. Template and prompt-text changes count as behaviour changes because
-  they alter what live agents do.
-
-## Editing content
-
-- When information changes (README, templates, docstrings, comments, this file), rewrite it so only the current
-  truth remains. Remove outdated statements instead of leaving them next to the new ones.
-- Keep replies, code and generated content concise, and say each thing once.
+- Before finishing, delete the temporary files, scratch scripts and debug output you created, only keep nessesary files. 
+- Minimal code modifications for optimal efficiency. Edit files with your file-editing tool (such as `Edit` or `apply_patch`) rather than shell commands.
 
 ## Answers
 
