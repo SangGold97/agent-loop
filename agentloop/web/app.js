@@ -655,7 +655,8 @@ function renderStats() {
     seg('plan', `${c.done}/${c.total}`, c.total ? planBar(c) : '<span class="s">no checklist</span>', 'checklist items in plan.md checked by the meta-work')
     + seg('workers', `${running} running`, '', `${workers.length} total, at most ${lim(b.max_concurrent_workers)} at once`)
     + seg('turns', `worker ${b.worker_turns}/${lim(b.max_worker_turns)} · meta ${b.meta_turns}/${lim(b.max_meta_turns)}`)
-    + seg('time', fmtDur(b.hours) + (b.from ? ` · ${fmtTime(b.from)} → ${b.to ? fmtTime(b.to) : 'now'}` : ''), '', 'active time of the goal');
+    + seg('time', fmtDur(b.hours) + (b.from ? ` · ${fmtTime(b.from)} → ${b.to ? fmtTime(b.to) : 'now'}` : ''), '', 'active time of the goal')
+    + seg('total tokens', fmtTok(M.row.tokens), '', 'tokens used by the meta-work, advisor and worker turns (meta-chats excluded)');
 }
 // One segment per checklist item: done items green, open ones grey
 function planBar(c) {
