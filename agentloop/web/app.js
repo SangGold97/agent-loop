@@ -712,14 +712,23 @@ function renderConfigTab(force) {
   };
   // The config form, edited most often, comes first; the documents scroll in their own boxes below it
   // Save sits in the form's bottom-right corner, so it takes no extra row; spec and goal fill the rest of the window
-  const save = `<button class="btn small primary" id="cfg-save" title="Changing the meta-work agent starts a fresh meta-work session (the plan carries over).">save config</button>`;
+  const save = `<button class="btn small primary" id="cfg-save" disabled title="Changing the meta-work agent starts a fresh meta-work session (the plan carries over).">save config</button>`;
   keepScroll(() => { el.innerHTML = `${box(`agents · budget · git <span class="x">applies from the next turn</span><span class="dirty" id="cfg-dirty"></span>`,
       `<div id="ov-cfg">${configForm(M.config, save)}</div>`)}
-    <div class="grid cols-2 fit" style="margin-top:18px">${doc('spec', 'spec', 'read-only for agents; a running meta-work is notified with the diff')}
+    <div class="grid cols-2 fit" style="margin-top:18px">${doc('spec', 'spec', 'read-only for agents; a running meta-work gets the new text')}
       ${doc('goal', 'goal','lines like - verify: `pytest -q` are executed by the platform')}</div>`; });
   fitTab();
   S.cfgDirty = false;
-  wireAgentRows($('#ov-cfg'), () => { S.cfgDirty = true; $('#cfg-dirty').textContent = 'unsaved'; });
+  // Save is enabled only while the form differs from the saved config, so an edit undone disables it again
+  // An invalid form (no worker enabled) counts as changed, and save reports why it is refused
+  const formKey = () => { try { return JSON.stringify(readConfigForm($('#ov-cfg'))); } catch { return null; } };
+  const saved = formKey();
+  wireAgentRows($('#ov-cfg'), () => {
+    const now = formKey();
+    S.cfgDirty = now === null || now !== saved;
+    $('#cfg-dirty').textContent = S.cfgDirty ? 'unsaved' : '';
+    $('#cfg-save').disabled = !S.cfgDirty;
+  });
   $('#cfg-save').onclick = () => act(async () => {
     const { ws, gid } = S.route;
     const created = (M.files['goal.yaml'].match(/^created:\s*(.+)$/m) || [])[1];
@@ -744,6 +753,8 @@ const firstLines = (s, n) => String(s || '').split('\n').filter(l => l.trim()).s
 function turnSender(e, who) {
   if (who.prompt === 'meta-work → worker' && /^(\[System\] The `loop run` job|\[Job j-)/.test(e.prompt || ''))
     return 'platform → worker (loop run)';
+  if (who.prompt === '→ meta-advisor' && /^\[Consultation\]\n\[System\] The `loop run` job/.test(e.prompt || ''))
+    return 'platform → meta-advisor (loop run)';
   if (who.prompt !== 'platform → meta-work') return who.prompt;
   const senders = [...new Set([...String(e.prompt || '').matchAll(/^\[(?:Worker \S+ · role ([^\]·]+?)\s*[·\]]|Advice\] )/gm)]
     .map(m => m[1] ? `worker ${m[1]}` : 'meta-advisor'))];

@@ -25,15 +25,20 @@ sessions, merges their work and closes the goal; the human steers from the web U
   (`consumed=2`) until the turn ends and go back to the queue on crash or restart.
 - **Advisor**: `loop advise` queues a question in the same inbox and at once dispatches a new `meta-advisor`
   session for one turn, alongside the asking meta-work turn; its final text returns as `[Advice]`.
-  `--follow-up <sid>` resumes an idle consultation for one more turn instead. Consultations
-  share `max_meta_turns` and are read-only like a meta-chat (guard, `loop` API, change report after the turn),
-  except for scratch files in the turn's `$TMPDIR`.
+  `--follow-up <sid>` resumes an idle consultation for one more turn instead, unless `meta_advisor` now
+  names another CLI (`Engine.check_agent_current`, which also refuses to resume a worker of a disabled CLI). Consultations
+  share `max_meta_turns` and take no worker slot. An advisor builds in its own worktree `wt/<sid>` on
+  `loop/<goal>/advisor-<sid>` (`Engine.advisor_tree`, snapshot after each turn, `loop merge`/`retire` by the
+  meta-work) and may `loop run`, whose result resumes the consultation; elsewhere it is read-only like a
+  meta-chat (guard, `loop` API without steering commands, change report after the turn).
 - **Worker turn**: runs in its own worktree on `loop/<goal>/<role>-<sid>`, is snapshot-committed, and its final
   reply becomes a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
   `loop/<goal>/integration`, checked out at `wt/<goal>` (`gitops.py`). The meta-work may also change code
   there; `Engine.checkpoint` commits those changes before a spawn, merge or `loop done` and after each turn.
 - **Jobs**: `loop run` runs its helper as a user service outside the turn's scope (`jobs`
   table); `Engine.wake_for_jobs` delivers the result as a worker turn or a meta-work event.
+- **Usage limits**: a turn the CLI refuses for its usage limit is not counted. At the reset, `wake_at` resumes the
+  meta-work and `Engine.resume_limited` gives cut-off workers and advisors their task again (`sessions.resume_at`).
 - **Running a CLI**: `runner.py` starts each turn in `systemd-run --user --scope` (anything left in the scope when
   the CLI exits is killed and reported as `TurnResult.leftover`), inside the workspace's shared `.venv`
   (`workspace.ensure_venv`) and with its own `TMPDIR` under `runner.scratch_root()` that `Engine.run_turn` removes
@@ -49,7 +54,8 @@ sessions, merges their work and closes the goal; the human steers from the web U
 - **Config layering** (`config.py`): `DEFAULTS` < workspace `loop.yaml` < goal `goal.yaml` (only `GOAL_KEYS`).
 - **Prompts sent to agents** live in code as well as templates: `Engine.kickoff_text`, `mode_text`,
   `language_rule`, the inbox messages pushed in `engine.py` (`[System]`, `[Budget exhausted]`, `[Handoff]`),
-  `digest.envelope`, and the `loop` help text in `cli.py`.
+  `digest.envelope`, and the `loop` help text in `cli.py`. `Engine.brief_text` quotes spec.md and goal.md in the
+  kickoff, handoff, restart message and after a human edit of spec, goal or goal.yaml.
 
 ### Templates and live data
 

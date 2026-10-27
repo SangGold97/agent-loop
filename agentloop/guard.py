@@ -54,16 +54,16 @@ def edit_paths(tool: str, inp: dict) -> list[str]:
     return []
 
 
-ADVISOR_READ_ONLY = "the advisor writes only in $TMPDIR; return advice in your final reply"
+ADVISOR_SCOPE = ("in the workspace the advisor writes only in its own worktree and data/; "
+                 "return advice in your final reply")
 
 
 def check_path(path: Path, env: dict) -> str | None:
-    # The advisor's only writable place is its turn's own TMPDIR, which the platform removes after the turn
-    if env.get("LOOP_ROLE") == "meta-advisor":
-        tmp = env.get("TMPDIR")
-        return None if tmp and path.resolve().is_relative_to(Path(tmp).resolve()) else ADVISOR_READ_ONLY
     ws = Path(env["LOOP_WS"]).resolve()
     path = path.resolve()
+    if env.get("LOOP_ROLE") == "meta-advisor" and env.get("TMPDIR") and \
+            path.is_relative_to(Path(env["TMPDIR"]).resolve()):
+        return None
     if not path.is_relative_to(ws):
         return None
     rel = path.relative_to(ws)
@@ -72,10 +72,12 @@ def check_path(path: Path, env: dict) -> str | None:
     if PROTECTED_RE.match(rel.as_posix()):
         return (f"{path} is read-only" if worker
                 else f"{rel} is human-owned; propose changes in your plan or report instead")
-    if worker:
+    # A worker and an advisor each build in their own worktree and share data/
+    if worker or role == "meta-advisor":
         data = ws / "data"
         if not any(path.is_relative_to(o) for o in (ws / "wt" / env.get("LOOP_SESSION", "?"), data)):
-            return f"writes are limited to the current checkout, {data} and /tmp (not {path})"
+            return f"writes are limited to the current checkout, {data} and /tmp (not {path})" if worker \
+                else ADVISOR_SCOPE
     elif rel.parts and rel.parts[0] in ("repo", "wt"):
         own = Path("wt") / env.get("LOOP_GOAL", "?")
         if role == "meta-chat":
@@ -238,7 +240,7 @@ def check(event: dict, env: dict) -> str | None:
     # An advisor edit whose target cannot be read from the call is refused rather than let through
     if env.get("LOOP_ROLE") == "meta-advisor" and tool in EDIT_TOOLS | {"apply_patch"} and \
             not edit_paths(tool, inp):
-        return ADVISOR_READ_ONLY
+        return ADVISOR_SCOPE
     if tool in SHELL_TOOLS:
         cmd = inp.get("command") or inp.get("cmd") or inp.get("CommandLine") or ""
         return check_command(" ".join(cmd) if isinstance(cmd, list) else str(cmd), env, cwd)

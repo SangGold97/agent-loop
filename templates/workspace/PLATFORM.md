@@ -23,4 +23,5 @@ This workspace is run by agent-loop. The workspace root is `$LOOP_WS`; paths bel
 Memory: `meta/memory/` holds cross-goal lessons for meta-agents, `worker/memory/` for workers.
 Keep one short file per lesson and list it in that folder's `README.md`.
 
-The advisor reads the workspace and returns advice through the inbox; it does not write project or harness files.
+The advisor can prototype in its own worktree and `loop run` jobs, and returns advice through the inbox; it does
+not write other project or harness files.

@@ -36,11 +36,33 @@ def main():
     # Every session runs in the workspace's shared venv
     venv = Path(os.environ["LOOP_WS"]) / ".venv"
     assert os.environ["VIRTUAL_ENV"] == str(venv) and str(venv / "bin") in os.environ["PATH"].split(os.pathsep)
+    if role == "meta-advisor" and "ADVICE_BUILD" in _spec(gdir):
+        # Builds a prototype in its own worktree and scores it with a detached job, whose result resumes it
+        own = Path(os.environ["LOOP_WS"]) / "wt" / os.environ["LOOP_SESSION"]
+        if "[System] The `loop run` job is done" in prompt:
+            # The result names the job's log instead of quoting it
+            log = re.search(r"^Output: (\S+)", prompt, re.M).group(1)
+            assert resume and "proto score 42" in Path(log).read_text()
+            text = "Prototype scored 42; merge it."
+        else:
+            (own / "proto.py").write_text("print('proto score 42')\n")
+            out = subprocess.run(["loop", "run", "--", sys.executable, "-c",
+                                  "import time; time.sleep(3); exec(open('proto.py').read())"],
+                                 cwd=own, capture_output=True, text=True)
+            assert "is running in the background" in out.stdout + out.stderr, out
+            text = "Prototype is being scored."
+        emit({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+        emit({"type": "result", "subtype": "success", "result": text, "session_id": sid})
+        return
     if role == "meta-advisor":
-        assert (resume is not None) == ("Follow-up" in prompt)  # only a follow-up resumes its consultation
+        # Only a follow-up, or the platform after a usage limit, resumes its consultation
+        assert (resume is not None) == ("Follow-up" in prompt or "cut off by the" in prompt)
         assert all((gdir / name).read_text() is not None for name in ("spec.md", "goal.md", "plan.md"))
-        if "ADVICE_LIMIT" in _spec(gdir):
-            text = f"Claude AI usage limit reached|{int(time.time()) + 600}"
+        # ADVICE_LIMIT_SOON hits a limit once, which resets at once
+        soon = "ADVICE_LIMIT_SOON" in _spec(gdir)
+        if "ADVICE_LIMIT" in _spec(gdir) and not (soon and (gdir / ".limit-advisor").exists()):
+            (gdir / ".limit-advisor").write_text("")
+            text = f"Claude AI usage limit reached|{int(time.time()) + (1 if soon else 600)}"
             emit({"type": "result", "subtype": "success", "is_error": True, "result": text, "session_id": sid})
             return
         if "ADVICE_FAIL" in _spec(gdir):
@@ -54,7 +76,7 @@ def main():
             try:
                 call(cmd, {"text": "forbidden", "prompt": "forbidden"})
             except SystemExit as exc:
-                assert "read-only" in str(exc)
+                assert "does not steer" in str(exc)
             else:
                 raise AssertionError(f"advisor executed {cmd}")
         time.sleep(2 if "ADVICE_STOP" in _spec(gdir) else 0.5)
@@ -67,8 +89,10 @@ def main():
     if "ADVICE" not in _spec(gdir) and "LIMIT" in prompt + _spec(gdir) and not (gdir / f".limit-{role}").exists() and \
             (role == "worker") == ("WLIMIT" in _spec(gdir)):
         (gdir / f".limit-{role}").write_text("")
-        # The meta-work's limit resets at once so its goal can finish; a worker's lasts while the test checks it
-        text = f"Claude AI usage limit reached|{int(time.time()) + (600 if role == 'worker' else 1)}"
+        # The meta-work's limit resets at once so its goal can finish; a worker's lasts while the test checks it,
+        # unless WLIMIT_SOON lets the platform resume the worker
+        late = role == "worker" and "WLIMIT_SOON" not in _spec(gdir)
+        text = f"Claude AI usage limit reached|{int(time.time()) + (600 if late else 1)}"
         emit({"type": "result", "subtype": "success", "is_error": True, "result": text, "session_id": sid})
         return
     if role == "worker":
@@ -132,7 +156,16 @@ def main():
             emit({"type": "user", "message": {"content": [{"type": "tool_result", "content": "hello"}]}})
             text = "**Result:** created hello.py\n**Evidence:** python hello.py -> hello"
     elif role == "meta-work":
-        if "ADVICE" in _spec(gdir):
+        if "ADVICE_BUILD" in _spec(gdir):
+            # One consultation; its job-woken follow-up brings the prototype, which the meta-work merges
+            if "[Kickoff]" in prompt:
+                text = loop("advise", stdin="Prototype and score the idea.")
+            elif m := re.search(r"\[Advice\] (ma-\w+) · turn 2", prompt):
+                text = loop("merge", m.group(1))
+                text += "\n" + loop("done", "--status", "success", stdin="Prototype merged.")
+            else:
+                text = "Waiting for the prototype's score."
+        elif "ADVICE" in _spec(gdir):
             count = gdir / ".advice-count"
             n = int(count.read_text()) if count.exists() else 0
             if n < 2 and "[Budget exhausted" not in prompt:

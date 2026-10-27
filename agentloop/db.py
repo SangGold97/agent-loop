@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS jobs(
 """
 # Columns added after the first release: (table, column, type)
 ADDED_COLUMNS = [("goals", "first_started", "REAL"), ("goals", "base", "TEXT"), ("goals", "pushed", "REAL"),
-                 ("goals", "pr", "TEXT"), ("notes", "seq", "INT"), ("jobs", "rc", "INT")]
+                 ("goals", "pr", "TEXT"), ("notes", "seq", "INT"), ("jobs", "rc", "INT"),
+                 ("sessions", "resume_at", "REAL"), ("sessions", "resume_prompt", "TEXT")]
 # Columns no longer kept: the platform does not track spend, and GPUs go to jobs (`loop run --vram`), not sessions
 DROPPED_COLUMNS = [("goals", "cost"), ("sessions", "cost"), ("turns", "cost"), ("sessions", "gpu")]
 

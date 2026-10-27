@@ -64,6 +64,15 @@ def leftover_note(cmds: tuple[str, ...], whose: str) -> str:
             "incomplete: " + "; ".join(f"`{c}`" for c in cmds[:5]) + more)
 
 
+def resumed_task(agent: str, task: str) -> str:
+    """The prompt that resumes a turn a usage limit cut off: the same task, wrapped once."""
+    head = "[System] Your last turn was cut off by the "
+    if task.startswith(head):
+        return task
+    return (f"{head}{agent} usage limit, which has now reset. Continue the same task from where it stopped; "
+            f"your uncommitted work was saved on your branch. The task was:\n\n{task}")
+
+
 class AgentError(Exception):
     """A refused agent/human request; the message is returned verbatim."""
 
@@ -101,6 +110,7 @@ class Engine:
         self.meta_active: set[tuple[str, str]] = set()
         self.vendor_limits: dict[str, float] = {}  # agent CLI -> when its usage limit resets
         self.waking: set[tuple[str, str]] = set()  # goals whose meta-work waits for a usage-limit reset
+        self.resuming: dict[str, float] = {}  # agent CLI -> the reset its cut-off workers and advisors wait for
         # Each CLI's usage-limit windows as its last turn reported them, kept across restarts; the windows over
         # QUOTA_WARN that running goals were already told about
         try:
@@ -262,6 +272,60 @@ class Engine:
                 self.kick(ws, gid)
         self.spawn(wake())
 
+    def wake_limited(self, agent: str, until: float) -> None:
+        """Resume the workers and advisors a usage limit of `agent` cut off once it resets, at the same time
+        as a meta-work waiting for it (wake_at)."""
+        if self.resuming.get(agent, float("inf")) <= until:
+            return
+        self.resuming[agent] = until
+
+        async def wake():
+            await asyncio.sleep(max(0.0, until - time.time()) + LIMIT_SLACK_S)
+            if self.resuming.get(agent) == until:
+                self.resuming.pop(agent)
+            self.resume_limited(agent)
+        self.spawn(wake())
+
+    def resume_limited(self, agent: str) -> None:
+        """Give each session a reset usage limit cut off the task of its cut-off turn again; the meta-work
+        hears of one that cannot go on."""
+        if until := self.limit_until(agent):  # a later turn hit the limit again
+            self.wake_limited(agent, until)
+            return
+        for s in self.db.q("SELECT * FROM sessions WHERE agent=? AND resume_at IS NOT NULL ORDER BY created",
+                           agent):
+            if s["resume_at"] > time.time():  # cut off by a later limit
+                self.wake_limited(agent, s["resume_at"])
+                continue
+            sid, ws, gid, prompt = s["id"], s["ws"], s["goal"], s["resume_prompt"]
+            self.db.update("sessions", {"id": sid}, resume_at=None, resume_prompt=None)
+            m = self.db.goal(ws, gid)
+            if not m or s["status"] in ("running", "queued"):  # gone, or the meta-work sent it again
+                continue
+            # The same checks as a send or follow-up by the meta-work, the limit aside
+            try:
+                if m["status"] != "running":
+                    raise AgentError("the goal is not running")
+                self.check_agent_current(s)
+                if s["kind"] == "worker":
+                    if not Path(s["cwd"]).exists():
+                        raise AgentError("its worktree no longer exists")
+                    self.check_dispatch(ws, gid)
+                else:
+                    self.check_meta_turns(ws, gid)
+            except AgentError as exc:
+                self.db.push_inbox(ws, gid, "system", {"text": (
+                    f"[System] {sid} was not resumed after the {agent} usage limit reset ({exc}); pass its task "
+                    "on again if it is still needed.")})
+                self.kick(ws, gid)
+                continue
+            if s["kind"] == "worker":
+                self.db.update("sessions", {"id": sid}, status="running")
+                self._count_dispatch(ws, gid)
+                self.spawn(self.worker_turn(sid, prompt), goal=(ws, gid))
+            else:
+                self.queue_advice(ws, gid, s, prompt)
+
     def publish(self, kind: str, **data) -> None:
         self.bus.publish({"type": kind, **data})
 
@@ -354,6 +418,11 @@ class Engine:
                 self.db.update("turns", {"id": t["id"]}, status="interrupted", ended=time.time())
             self.db.update("sessions", {"id": s["id"]}, status="interrupted", turns=s["turns"] + len(cut))
         self.recover_advice()
+        # Turns a usage limit cut off still resume at its reset, which spawns on that CLI wait for as well
+        for r in self.db.q("SELECT agent, MAX(resume_at) t FROM sessions WHERE resume_at IS NOT NULL GROUP BY agent"):
+            if r["t"] > time.time():
+                self.vendor_limits[r["agent"]] = r["t"]
+            self.wake_limited(r["agent"], r["t"])
         # Detached jobs outlive a restart, so their records come back and the pool keeps watching them; one whose
         # helper is gone is ended by `police_jobs`. The record holds no measurements; the sampler takes them anew
         for j in self.db.q("SELECT * FROM jobs WHERE status='running' AND grant_info IS NOT NULL"):
@@ -382,7 +451,7 @@ class Engine:
                            active_s=(m["active_s"] or 0) + gained)
             self.db.push_inbox(m["ws"], m["id"], "system", {"text": (
                 "[System] The platform restarted. " + (f"Interrupted workers: {', '.join(names)} "
-                "(continue them with `loop send`)." if names else "No workers were interrupted."))})
+                "(continue them with `loop send`)." if names else "No workers were interrupted.")), "brief": True})
             self.kick(m["ws"], m["id"])
         # Harness prompts follow the platform templates unless the human customised them; every workspace has
         # the shared venv its sessions run in
@@ -755,8 +824,8 @@ class Engine:
         GPU when asked, waiting up to `wait_s`; one job starts per sample, so the next sees what the last one took.
         Only a job granted VRAM sees a GPU, and only that one. The job runs in its own scope in the pool, where
         `police_ram` can stop it. A detached `job` outlives the turn, and so does a `loop run` run `within` one."""
-        if caller["kind"] not in ("worker", "meta-work"):
-            raise AgentError("`loop run` belongs to workers and the meta-work")
+        if caller["kind"] not in ("worker", "meta-work", "meta-advisor"):
+            raise AgentError("`loop run` belongs to workers, the meta-work and the advisor")
         if job or within:
             jrow = self.db.one("SELECT unit FROM jobs WHERE id=? AND session=? AND status='running'", job or within,
                                caller["id"])
@@ -879,8 +948,8 @@ class Engine:
         """Record a job before its `loop run` helper starts outside the caller's turn. The job may outlive the
         turn and a platform restart; its result goes back to the caller when it ends (`job_end`), unless its
         `loop run` still shows it then (`job_wait`)."""
-        if caller["kind"] not in ("worker", "meta-work"):
-            raise AgentError("`loop run` belongs to workers and the meta-work")
+        if caller["kind"] not in ("worker", "meta-work", "meta-advisor"):
+            raise AgentError("`loop run` belongs to workers, the meta-work and the advisor")
         jid = f"j-{secrets.token_hex(3)}"
         log_path = self.gdir(caller["ws"], caller["goal"]) / "runs" / caller["id"] / "artifacts" / "jobs" / f"{jid}.log"
         unit = job_unit(jid) if systemd_available() else None
@@ -923,16 +992,12 @@ class Engine:
             return
         self.db.update("jobs", {"id": jid}, status="done", ended=time.time(), rc=rc)
         shutil.rmtree(jobs_tmp_root() / jid, ignore_errors=True)
-        try:
-            with open(j["log"], "rb") as fh:
-                fh.seek(max(0, fh.seek(0, os.SEEK_END) - 4000))
-                tail = fh.read().decode(errors="replace").splitlines()[-20:]
-        except OSError:
-            tail = []
         mins = (time.time() - j["started"]) / 60
         took = f"{mins:.0f} min" if mins < 90 else f"{mins / 60:.1f} h"
-        log_text = f"End of {j['log']}:\n```\n" + "\n".join(tail) + "\n```" if tail else f"{j['log']} is empty."
-        self.db.update("jobs", {"id": jid}, result=f"[Job {jid} ended] {how} after {took}: `{j['cmd']}`\n{log_text}")
+        # The result names the log rather than quoting it; the session reads what it needs from there
+        empty = not os.path.exists(j["log"]) or not os.path.getsize(j["log"])
+        output = f"Output: {j['log']}" + (" (empty)" if empty else "")
+        self.db.update("jobs", {"id": jid}, result=f"[Job {jid} ended] {how} after {took}: `{j['cmd']}`\n{output}")
         if jid not in self.job_watched:
             self.wake_for_jobs(j["session"])
 
@@ -969,13 +1034,13 @@ class Engine:
 
     def wake_for_jobs(self, sid: str) -> None:
         """Hand a session the results of its ended detached jobs: a worker gets them as a turn of its own once
-        it is idle, or the meta-work gets them as an event when that turn cannot start; the meta-work gets its
-        own as an event."""
+        it is idle, or the meta-work gets them as an event when that turn cannot start; an advisor gets them
+        the same way, as a follow-up of its consultation; the meta-work gets its own as an event."""
         s = self.db.session(sid)
         jobs = self.db.q("SELECT id, result FROM jobs WHERE session=? AND status='done' AND reported=0 "
                          "ORDER BY ended", sid)
-        if not s or not jobs or (s["kind"] == "worker" and s["status"] == "running"):
-            return  # a worker in a turn gets them when that turn ends (worker_turn)
+        if not s or not jobs or (s["kind"] in ("worker", "meta-advisor") and s["status"] in ("running", "queued")):
+            return  # a session in a turn gets them when that turn ends (worker_turn, advisor_turn)
         ws, gid = s["ws"], s["goal"]
         if self.goal_row(ws, gid)["status"] != "running":
             return
@@ -988,15 +1053,28 @@ class Engine:
             try:
                 if not Path(s["cwd"]).exists():
                     raise AgentError("its worktree no longer exists")
+                self.check_agent_current(s)
                 self.check_limit(s["agent"])
                 self.check_dispatch(ws, gid)
             except AgentError as exc:
                 text = (f"[System] {sid} was not resumed with the result of its job ({exc}); pass it on with "
-                        f"`loop send {sid}` if it is still needed.\n{text}")
+                        f"`loop send {sid}` or to a new worker if it is still needed.\n{text}")
             else:
                 self.db.update("sessions", {"id": sid}, status="running")
                 self._count_dispatch(ws, gid)
                 self.spawn(self.worker_turn(sid, f"{done}\n\n{text}", woken=woken), goal=(ws, gid))
+                return
+        elif s["kind"] == "meta-advisor":
+            # The consultation goes on with the result, and its next answer reaches the meta-work as advice
+            try:
+                self.check_agent_current(s)
+                self.check_limit(s["agent"])
+                self.check_meta_turns(ws, gid)
+            except AgentError as exc:
+                text = (f"[System] {sid} was not resumed with the result of its job ({exc}); pass it on with "
+                        f"`loop advise [--follow-up {sid}]` if it is still needed.\n{text}")
+            else:
+                self.queue_advice(ws, gid, s, f"{done}\n\n{text}")
                 return
         else:
             text = f"{done}\n\n{text}"
@@ -1020,7 +1098,8 @@ class Engine:
             return (f"MODE: META-WORK for goal {gid} in workspace {ws}. Goal dir: {gdir}. "
                     f"Workspace root: {p}. Follow the META-WORK section of your AGENTS.md.{lang}")
         if sess["kind"] == "meta-advisor":
-            return (f"MODE: META-ADVISOR for goal {gid} in workspace {ws}. Goal directory: {gdir}. "
+            tree = f"Your worktree: {self.tree(sess)} (branch {sess['branch']}). " if sess["branch"] else ""
+            return (f"MODE: META-ADVISOR for goal {gid} in workspace {ws}. Goal directory: {gdir}. {tree}"
                     "Follow the META-ADVISOR section of your AGENTS.md. spec.md and goal.md define the "
                     "objective; plan.md is the meta-work's current view, to be checked rather than assumed. "
                     f"Write your advice in {goal_config(p, gid)['goal'].get('language') or 'English'}.")
@@ -1030,13 +1109,14 @@ class Engine:
                 f"worker coordination belongs to the meta-work, steer it with `loop note`.{lang}")
 
     def session_conf(self, sess: dict) -> dict:
-        """Agent settings for the next turn: fixed by the human config for meta-work and workers,
+        """Agent settings for the next turn: fixed by the human config for meta-work, advisor and workers,
         chosen at creation for a meta-chat."""
         keys = ("model", "effort", "autocompact")
-        if sess["kind"] in ("meta-chat", "meta-advisor"):
+        if sess["kind"] == "meta-chat":
             return {k: sess[k] for k in keys}
         mc = goal_config(self.wsp(sess["ws"]), sess["goal"])["goal"]
-        conf = mc["meta_work"] if sess["kind"] == "meta-work" else mc["workers"].get(sess["agent"], {})
+        conf = (mc[sess["kind"].replace("-", "_")] if sess["kind"] in ("meta-work", "meta-advisor")
+                else mc["workers"].get(sess["agent"], {}))
         return {k: None if conf.get(k) is None else str(conf[k]) for k in keys}
 
     def build_spec(self, sess: dict, prompt: str, n: int) -> RunSpec:
@@ -1088,7 +1168,9 @@ class Engine:
         spec = self.build_spec(sess, prompt, n)
         raw, events = self.logs(ws, sid)
         cfg = goal_config(self.wsp(ws), gid)
-        self.db.update("sessions", {"id": sid}, status="running", updated=time.time())
+        # A new turn supersedes a resume still pending from a usage limit
+        self.db.update("sessions", {"id": sid}, status="running", updated=time.time(), resume_at=None,
+                       resume_prompt=None)
         turn_id = self.db.x("INSERT INTO turns(session, n, started, status, start_commit) VALUES(?,?,?,?,?)",
                             sid, n, time.time(), "running", start_commit)
         self.publish("session_status", ws=ws, goal=gid, session=sid, status="running", turn=n)
@@ -1158,8 +1240,16 @@ class Engine:
                 f"- Your turns and the workers share a {self.pool_gb()} GB RAM pool; only jobs run with "
                 "`loop run --vram <GB>` see a GPU.\n"
                 f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}; read its "
-                "README.md first, then the files that bear on this goal.\n"
-                "- Read spec.md and goal.md first (human-owned, do not edit). You own plan.md there.")
+                "README.md first, then the files that bear on this goal.\n\n" + self.brief_text(ws, gid))
+
+    def brief_text(self, ws: str, gid: str) -> str:
+        """The spec and goal as the human wrote them, quoted in the prompt so the meta-work reasons from them."""
+        gdir = self.gdir(ws, gid)
+
+        def read(name: str) -> str:
+            return (gdir / name).read_text().strip() if (gdir / name).exists() else "(empty)"
+        return (f"SPEC:\n{read('spec.md')}\n\nGOAL:\n{read('goal.md')}\n\n"
+                "Read spec.md and goal.md for detail (human-owned, do not edit). You own plan.md there.")
 
     async def start_goal(self, ws: str, gid: str) -> None:
         p, m = self.wsp(ws), self.goal_row(ws, gid)
@@ -1280,7 +1370,8 @@ class Engine:
         # The turn carries its events; resources and budget come only when they matter (the budget once mostly
         # spent; RAM, disk and usage limits as events when they run low), and `loop infra` / `loop budget` on demand
         b = self.budget(ws, gid)
-        text = digest.envelope(items, digest.budget_line(b) if digest.budget_low(b) else None)
+        text = digest.envelope(items, digest.budget_line(b) if digest.budget_low(b) else None,
+                               self.brief_text(ws, gid))
         wt = gitops.int_worktree(p, gid)
         start = gitops.head(wt) if wt.exists() else None
         repo_before = self.checkout_state(p / "repo")
@@ -1359,7 +1450,8 @@ class Engine:
         self.check_budget(ws, gid)
         pending = self.db.one("SELECT id FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0", ws, gid)
         jobs = self.db.one("SELECT 1 FROM jobs WHERE ws=? AND goal=? AND status='running'", ws, gid)
-        if self.workers(ws, gid, running_only=True) or self.advisors(ws, gid) or pending or jobs \
+        resumes = self.db.one("SELECT 1 FROM sessions WHERE ws=? AND goal=? AND resume_at IS NOT NULL", ws, gid)
+        if self.workers(ws, gid, running_only=True) or self.advisors(ws, gid) or pending or jobs or resumes \
                 or self.goal_row(ws, gid)["final_turn"]:
             if progressed:  # work the meta-work did itself next to running workers counts too
                 self.set_goal(ws, gid, idle_streak=0)
@@ -1395,7 +1487,10 @@ class Engine:
         p, m = self.wsp(ws), self.goal_row(ws, gid)
         if m["status"] != "awaiting_review":
             raise AgentError("only a goal awaiting review can be accepted")
-        tags = gitops.cleanup(p, gid, self.workers(ws, gid))
+        trees = [{**s, "cwd": self.tree(s)} for s in self.db.q(
+            "SELECT * FROM sessions WHERE ws=? AND goal=? AND kind IN ('worker', 'meta-advisor') ORDER BY created",
+            ws, gid)]
+        tags = gitops.cleanup(p, gid, trees)
         self.set_goal(ws, gid, status="done")
         workspace.commit(p, "human", f"human: accepted {gid}")
         return tags
@@ -1462,7 +1557,8 @@ class Engine:
         p = self.wsp(ws)
         self.goal_row(ws, gid)
         sessions = await self._quiesce(ws, [gid])
-        await asyncio.to_thread(gitops.remove_goal, p, gid, [s for s in sessions if s["kind"] == "worker"])
+        await asyncio.to_thread(gitops.remove_goal, p, gid, [{**s, "cwd": self.tree(s)} for s in sessions
+                                                             if s["kind"] in ("worker", "meta-advisor")])
         workspace.delete_goal_dir(p, gid)
         for s in sessions:
             raw, events = self.logs(ws, s["id"])
@@ -1589,14 +1685,8 @@ class Engine:
             raise AgentError("empty consultation")
         if caller["id"] != m["meta_work"]:
             raise AgentError("only the current meta-work can request advice")
-        b = self.budget(ws, gid)
-        # Reserve the advisor turn now, including the caller's unfinished turn in the admission check.
-        active = self.db.one("SELECT COUNT(*) c FROM turns t JOIN sessions s ON s.id=t.session "
-                             "WHERE s.ws=? AND s.goal=? AND s.kind='meta-work' AND t.status='running'", ws, gid)["c"]
-        if m["final_turn"] or self.exhausted(b) or (b.get("max_meta_turns") and
-                                                   b["meta_turns"] + active >= b["max_meta_turns"]):
-            raise AgentError("meta turn budget exhausted; finalize with `loop done`")
-        # A follow-up resumes an earlier consultation of this goal, keeping that session's own agent settings
+        self.check_meta_turns(ws, gid)
+        # A follow-up resumes an earlier consultation of this goal, on the advisor CLI the config still names
         if follow_up:
             sess = self.db.session(follow_up)
             if not sess or sess["kind"] != "meta-advisor" or (sess["ws"], sess["goal"]) != (ws, gid):
@@ -1605,6 +1695,7 @@ class Engine:
                 raise AgentError(f"consultation {follow_up} is still in progress; follow up after its [Advice]")
             if not sess["vendor_id"]:
                 raise AgentError(f"consultation {follow_up} has no conversation to resume; ask without --follow-up")
+            self.check_agent_current(sess)
             agent = sess["agent"]
         else:
             conf = goal_config(self.wsp(ws), gid)["goal"]["meta_advisor"]
@@ -1617,15 +1708,43 @@ class Engine:
         if not follow_up:
             sess = self.new_session(ws, gid, "meta-advisor", "meta-advisor", conf,
                                     self.wsp(ws) / "meta", parent=caller["id"])
-        self.db.update("sessions", {"id": sess["id"]}, status="queued")
-        self.db.push_inbox(ws, gid, "advice_request", {"sid": sess["id"], "turn": sess["turns"] + 1,
-                                                       "question": prompt.strip()})
-        self.db.x("UPDATE goals SET meta_turns=meta_turns+1, idle_streak=0 WHERE ws=? AND id=?", ws, gid)
-        self.publish("session_status", ws=ws, goal=gid, session=sess["id"], status="queued")
-        # The advisor only reads the project, so it starts now, alongside the turn that asked
-        self.dispatch_advice(ws, gid)
+        self.queue_advice(ws, gid, sess, prompt.strip())
         started = f"Follow-up to consultation {sess['id']}" if follow_up else f"Consultation {sess['id']}"
         return f"{started} started; the advice arrives as an [Advice] event."
+
+    def check_meta_turns(self, ws: str, gid: str) -> None:
+        """Refuse an advisor turn the meta turn budget has no room for, counting the meta-work's unfinished turn."""
+        m, b = self.goal_row(ws, gid), self.budget(ws, gid)
+        active = self.db.one("SELECT COUNT(*) c FROM turns t JOIN sessions s ON s.id=t.session "
+                             "WHERE s.ws=? AND s.goal=? AND s.kind='meta-work' AND t.status='running'", ws, gid)["c"]
+        if m["final_turn"] or self.exhausted(b) or (b.get("max_meta_turns") and
+                                                   b["meta_turns"] + active >= b["max_meta_turns"]):
+            raise AgentError("meta turn budget exhausted; finalize with `loop done`")
+
+    def queue_advice(self, ws: str, gid: str, sess: dict, question: str) -> None:
+        """Reserve the consultation's next turn and start it at once, alongside the meta-work turn."""
+        self.db.update("sessions", {"id": sess["id"]}, status="queued")
+        self.db.push_inbox(ws, gid, "advice_request", {"sid": sess["id"], "turn": sess["turns"] + 1,
+                                                       "question": question})
+        self.db.x("UPDATE goals SET meta_turns=meta_turns+1, idle_streak=0 WHERE ws=? AND id=?", ws, gid)
+        self.publish("session_status", ws=ws, goal=gid, session=sess["id"], status="queued")
+        self.dispatch_advice(ws, gid)
+
+    async def advisor_tree(self, sess: dict) -> Path:
+        """The consultation's own worktree: a new branch from the meta-work's current integration state, or its
+        branch checked out again after `loop retire`."""
+        ws, gid, sid = sess["ws"], sess["goal"], sess["id"]
+        p, wt = self.wsp(ws), self.tree(sess)
+        if wt.exists():
+            return wt
+        async with self.int_lock(ws, gid):
+            if sess["branch"] and gitops.branch_exists(p / "repo", sess["branch"]):
+                gitops.git(p / "repo", "worktree", "add", str(wt), sess["branch"])
+            else:
+                self.checkpoint(ws, gid, sess["parent"] or "meta-work", f"changes before consultation {sid}")
+                _, branch = gitops.add_worker_worktree(p, gid, sid, "advisor")
+                self.db.update("sessions", {"id": sid}, branch=branch)
+        return wt
 
     def dispatch_advice(self, ws: str, gid: str) -> None:
         for item in self.db.q("SELECT * FROM inbox WHERE ws=? AND goal=? AND kind='advice_request' AND consumed=0 "
@@ -1674,21 +1793,48 @@ class Engine:
                 self.advice_result(sess, turn, "stopped", "The goal stopped before the consultation started.")
                 return
             prompt = f"[Consultation]\n{question}"  # the mode text goes in as system text (build_spec)
+            try:
+                wt = await self.advisor_tree(sess)
+            except (AgentError, RuntimeError) as exc:  # the consultation still runs, without a place to build
+                wt, prompt = None, f"{prompt}\n\n[System] Your worktree could not be created: {exc}"
+            sess = self.db.session(sid)
             changed = self.watch_project(ws, gid)
             res, _ = await self.run_turn(sess, prompt)
             if hit := changed():
                 self.publish("alert", ws=ws, goal=gid, text=f"Advisor {sid} changed {', '.join(hit)}; please check it.")
+            # Like a worker's: uncommitted work is saved on the branch, kept outputs outlive the worktree
+            if wt and wt.exists():
+                try:
+                    gitops.snapshot(wt, "WIP: uncommitted changes at end of turn")
+                except RuntimeError as exc:
+                    log.warning("snapshot failed for %s: %s", sid, exc)
+                if (wt / ".artifacts").is_dir():
+                    shutil.copytree(wt / ".artifacts", self.gdir(ws, gid) / "runs" / sid / "artifacts",
+                                    dirs_exist_ok=True)
             workspace.enforce_protected(self.wsp(ws))
             self.db.x("UPDATE goals SET tokens=tokens+? WHERE ws=? AND id=?", res.tokens, ws, gid)
             text = res.final or res.error or "The advisor returned no advice."
             if res.error and res.final:
                 text = f"{res.error}\n\n{text}"
             if res.limited_until:
+                # Refunded, and the same question goes to the consultation again at the reset
                 self.vendor_limits[sess["agent"]] = res.limited_until
                 self.db.x("UPDATE goals SET meta_turns=MAX(0, meta_turns-1) WHERE ws=? AND id=?", ws, gid)
-                text += f"\nThe CLI is at its usage limit until {clock(res.limited_until)}; this turn was not counted."
+                self.db.update("sessions", {"id": sid}, resume_at=res.limited_until,
+                               resume_prompt=resumed_task(sess["agent"], question))
+                self.wake_limited(sess["agent"], res.limited_until)
+                text += (f"\nThe CLI is at its usage limit until {clock(res.limited_until)}; this turn was not "
+                         "counted, and the platform resumes this consultation then, so its advice follows in a later turn.")
             if res.leftover:
                 text += "\n" + leftover_note(res.leftover, "the advisor turn")
+            branch, repo = self.db.session(sid)["branch"], self.wsp(ws) / "repo"
+            if branch and gitops.branch_exists(repo, branch) and not gitops.is_merged(repo, branch,
+                                                                                     gitops.int_branch(gid)):
+                text += f"\n[System] Its branch {branch} holds work the integration branch lacks; `loop merge {sid}` takes it."
+            if jobs :=self.db.q("SELECT id FROM jobs WHERE session=? AND status='running' ORDER BY started", sid):
+                ids = ", ".join(j["id"] for j in jobs)
+                text += (f"\n[System] Job{'s' * (len(jobs) > 1)} {ids} {'are' if len(jobs) > 1 else 'is'} still "
+                         f"running; {sid} follows up with the result when {'they end' if len(jobs) > 1 else 'it ends'}.")
             self.advice_result(sess, turn, "stopped" if res.stopped else "failed" if res.error else "completed", text)
         except Exception as exc:
             log.exception("advisor turn failed for %s", sid)
@@ -1698,6 +1844,7 @@ class Engine:
             self.advice_result(sess, turn, "failed", f"Consultation failed inside the platform: {exc}")
         finally:
             self.publish("session_status", ws=ws, goal=gid, session=sid, status=self.db.session(sid)["status"])
+        self.wake_for_jobs(sid)  # detached jobs that ended during the turn
         self.check_budget(ws, gid)
         self.kick(ws, gid)
 
@@ -1708,11 +1855,15 @@ class Engine:
             raise AgentError("unknown session token (only sessions started by agent-loop may use `loop`)")
         return sess
 
-    def own_worker(self, caller: dict, sid: str) -> dict:
+    def own_worker(self, caller: dict, sid: str, kinds: tuple[str, ...] = ("worker",)) -> dict:
         w = self.db.session(sid)
-        if not w or w["kind"] != "worker" or w["goal"] != caller["goal"] or w["ws"] != caller["ws"]:
+        if not w or w["kind"] not in kinds or w["goal"] != caller["goal"] or w["ws"] != caller["ws"]:
             raise AgentError(f"no worker {sid} in this goal (see `loop ls`)")
         return w
+
+    def tree(self, s: dict) -> Path:
+        """A session's worktree: a worker runs in its own, an advisor runs in meta/ next to its own."""
+        return self.wsp(s["ws"]) / "wt" / s["id"] if s["kind"] == "meta-advisor" else Path(s["cwd"])
 
     def require_meta_work(self, caller: dict) -> dict:
         if caller["kind"] != "meta-work":
@@ -1753,6 +1904,7 @@ class Engine:
     async def send_worker(self, caller: dict, sid: str, prompt: str) -> str:
         self.require_meta_work(caller)
         w = self.own_worker(caller, sid)
+        self.check_agent_current(w)
         if w["status"] == "running":
             raise AgentError(f"{sid} is still running; wait for its report")
         if not Path(w["cwd"]).exists():
@@ -1766,6 +1918,18 @@ class Engine:
         self._count_dispatch(caller["ws"], caller["goal"])
         self.spawn(self.worker_turn(sid, prompt), goal=(caller["ws"], caller["goal"]))
         return f"Sent turn {w['turns'] + 1} to {sid}; it reports as an event when its turn ends."
+
+    def check_agent_current(self, s: dict) -> None:
+        """Refuse to resume an advisor or worker whose CLI the human config no longer gives that role; a
+        vendor session cannot move between CLIs, so the work goes on in a new session instead."""
+        mc = goal_config(self.wsp(s["ws"]), s["goal"])["goal"]
+        if s["kind"] == "meta-advisor":
+            if s["agent"] != (now := mc["meta_advisor"]["agent"]):
+                raise AgentError(f"consultation {s['id']} ran on {s['agent']}, but the advisor is now {now}; "
+                                 "ask without --follow-up")
+        elif not mc["workers"].get(s["agent"], {}).get("enabled", True):
+            raise AgentError(f"{s['id']} runs on {s['agent']}, which is no longer enabled for workers; spawn a "
+                             f"new worker, which can build on its branch {s['branch']}")
 
     def check_limit(self, agent: str) -> None:
         if until := self.limit_until(agent):
@@ -1793,7 +1957,9 @@ class Engine:
             n = cur["turns"]
             text = (f"[Worker {sid} · role {cur['role']}] turn failed inside the platform: {exc!r}. Its worktree "
                     f"{cur['cwd']} is intact; retry with `loop send {sid}` or spawn a new worker.")
-        self.db.push_inbox(ws, gid, "worker_done", {"text": text, "sid": sid, "turn": n})
+        # A turn the platform resumes after a usage limit leaves the meta-work nothing to do yet
+        self.db.push_inbox(ws, gid, "worker_done", {"text": text, "sid": sid, "turn": n},
+                           deferred=bool(self.db.session(sid)["resume_at"]))
         self.wake_for_jobs(sid)  # detached jobs that ended during the turn
         self.check_budget(ws, gid)
         self.kick(ws, gid)
@@ -1828,11 +1994,15 @@ class Engine:
             text += (f"\n[System] Job{'s' * (len(jobs) > 1)} {ids} {'are' if len(jobs) > 1 else 'is'} still "
                      f"running; {sid} resumes with the result when {'they end' if len(jobs) > 1 else 'it ends'}.")
         if res.limited_until:
-            # The CLI refused the turn: it does not count against the worker budget
+            # The CLI refused the turn: it does not count against the worker budget and resumes at the reset
             self.vendor_limits[sess["agent"]] = res.limited_until
             self.set_goal(ws, gid, worker_turns=max(0, self.goal_row(ws, gid)["worker_turns"] - 1))
+            self.db.update("sessions", {"id": sid}, resume_at=res.limited_until,
+                           resume_prompt=resumed_task(sess["agent"], prompt))
+            self.wake_limited(sess["agent"], res.limited_until)
             text += (f"\n[System] {sess['agent']} is at its usage limit until {clock(res.limited_until)}; this turn "
-                     f"was not counted, and `--agent {sess['agent']}` spawns and sends are refused until then.")
+                     f"was not counted, and the platform resumes {sid} with the same task then. "
+                     f"`--agent {sess['agent']}` spawns and sends are refused until the reset.")
         if reverted:
             text += "\n[System] Reverted this worker's edits to human-owned files: " + ", ".join(reverted)
             self.publish("alert", ws=ws, goal=gid, text=f"Reverted {sid}'s edits to human-owned files (backup in "
@@ -1856,9 +2026,11 @@ class Engine:
 
     def merge_worker(self, caller: dict, sid: str) -> str:
         self.require_meta_work(caller)
-        w = self.own_worker(caller, sid)
-        if w["status"] == "running":
+        w = self.own_worker(caller, sid, ("worker", "meta-advisor"))
+        if w["status"] in ("running", "queued"):
             raise AgentError(f"{sid} is still running")
+        if not w["branch"]:
+            raise AgentError(f"{sid} has no branch to merge")
         # Merges, checkpoints and verify runs would interleave in the single integration worktree
         with self.int_locks.setdefault((w["ws"], w["goal"]), threading.Lock()):
             self.checkpoint(w["ws"], w["goal"], caller["id"], f"changes before merging {sid}")
@@ -1875,19 +2047,22 @@ class Engine:
         """Free a finished worker's disk: remove its worktree, keep its branch, row, log and artifacts. A worker
         counts as retired while its worktree is missing (worker_status), however it was removed."""
         self.require_meta_work(caller)
-        w = self.own_worker(caller, sid)
-        if w["status"] == "running" or self.runner.running(sid):
+        w = self.own_worker(caller, sid, ("worker", "meta-advisor"))
+        if w["status"] in ("running", "queued") or self.runner.running(sid):
             raise AgentError(f"{sid} is still running")
-        if not Path(w["cwd"]).exists():
+        wt = self.tree(w)
+        if not wt.exists():
             return f"{sid} is already retired."
         jobs = self.db.q("SELECT id FROM jobs WHERE session=? AND status='running'", sid)
         if jobs:
             raise AgentError(f"{sid} still has running jobs ({', '.join(j['id'] for j in jobs)}); wait or stop them")
         try:
-            gitops.retire_worktree(self.wsp(w["ws"]), Path(w["cwd"]))
+            gitops.retire_worktree(self.wsp(w["ws"]), wt)
         except RuntimeError as exc:
             raise AgentError(f"could not remove {sid}'s worktree: {exc}") from None
         self.publish("session_status", ws=w["ws"], goal=w["goal"], session=sid, status=w["status"])
+        if w["kind"] == "meta-advisor":  # a follow-up checks the branch out again
+            return f"Retired {sid}: removed its worktree; its branch {w['branch']}, log and artifacts stay."
         return (f"Retired {sid}: removed its worktree; its branch {w['branch']}, log and artifacts stay. "
                 "It can no longer be sent.")
 

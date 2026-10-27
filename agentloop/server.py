@@ -297,8 +297,11 @@ def create_app(api_url: str) -> FastAPI:
         # Workers only use the RAM pool; steering the goal stays with the meta-work
         if caller["kind"] == "worker" and cmd not in ("ram", "ram-release", "infra", "job", "job-wait", "job-end"):
             raise AgentError("workers can only use `loop run` and `loop infra`")
-        if caller["kind"] == "meta-advisor" and cmd not in ("ls", "show", "status", "budget", "infra"):
-            raise AgentError("the advisor has read-only access; return advice to the meta-work in your final reply")
+        # The advisor reads the goal and runs its own jobs; steering workers and the goal stays with the meta-work
+        if caller["kind"] == "meta-advisor" and cmd not in ("ls", "show", "status", "budget", "infra", "ram",
+                                                           "ram-release", "job", "job-wait", "job-end"):
+            raise AgentError("the advisor does not steer workers or the goal; return advice to the meta-work "
+                             "in your final reply")
         if cmd in ("spawn", "send", "stop", "merge", "retire", "done", "advise") and caller["kind"] != "meta-work":
             raise AgentError(f"`loop {cmd}` belongs to the meta-work; propose a note with `loop note` instead")
         if cmd == "spawn":

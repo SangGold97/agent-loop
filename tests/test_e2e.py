@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -256,6 +257,9 @@ def test_fixed_agent_settings(server):
         raise AssertionError("disabled agent was accepted")
     except Exception as exc:
         assert "not enabled" in str(exc)
+    # An existing worker of that CLI cannot be resumed either
+    with pytest.raises(AgentError, match="no longer enabled"):
+        asyncio.run(engine.send_worker(caller, worker["id"], "go on"))
     # Model/effort follow the human config at the next turn
     cfg["workers"]["fake"].update(enabled=True, model="m2", effort="low")
     client.put(f"/api/goals/fixed/{gid}/files/goal.yaml", json={"text": yaml.safe_dump({"title": "Fixed", **cfg})})
@@ -387,8 +391,9 @@ def test_meta_usage_limit_waits_for_reset(server, monkeypatch):
     client.post(f"/api/goals/quota/{gid}/start")
     # The refused attempt costs no meta turn and no failure; the kickoff is redelivered after the reset
     wait_for(lambda: client.get(f"/api/goals/quota/{gid}").json()["row"]["status"] == "awaiting_review")
-    row = client.get(f"/api/goals/quota/{gid}").json()["row"]
-    assert row["meta_turns"] == 2 and row["fail_streak"] == 0
+    # The closing turn is counted once it ends, just after `loop done`
+    row = wait_for(lambda: (r := client.get(f"/api/goals/quota/{gid}").json()["row"])["meta_turns"] == 2 and r)
+    assert row["fail_streak"] == 0
 
 
 def test_worker_usage_limit_is_reported_and_refunded(server):
@@ -407,6 +412,24 @@ def test_worker_usage_limit_is_reported_and_refunded(server):
     finally:
         client.post(f"/api/goals/wquota/{gid}/stop")
         engine.vendor_limits.clear()  # the fake CLI serves the other tests
+
+
+def test_worker_cut_off_by_usage_limit_resumes_at_reset(server, monkeypatch):
+    client, engine = server
+    monkeypatch.setattr("agentloop.engine.LIMIT_SLACK_S", 0)
+    client.post("/api/workspaces", json={"name": "wresume"})
+    gid = client.post("/api/workspaces/wresume/goals", json={
+        "title": "Worker resume", "spec": "Create hello.py WLIMIT_SOON", "goal": "- hello.py exists",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/wresume/{gid}/start")
+    # The platform resumes the worker with its task at the reset; only that turn counts
+    wait_for(lambda: client.get(f"/api/goals/wresume/{gid}").json()["row"]["status"] == "awaiting_review")
+    w = engine.db.one("SELECT * FROM sessions WHERE ws='wresume' AND kind='worker'")
+    assert w["turns"] == 2 and w["resume_at"] is None
+    assert engine.db.goal("wresume", gid)["worker_turns"] == 1
+    prompt = (engine.gdir("wresume", gid) / "runs" / w["id"] / "t2.prompt.md").read_text()
+    assert prompt.startswith("[System] Your last turn was cut off by the fake usage limit") and \
+        prompt.endswith("Create hello.py")
 
 
 def int_git(ws: Path, gid: str, *args: str) -> str:
@@ -563,7 +586,10 @@ def test_long_job_outlives_its_turn_and_resumes_the_worker(server, monkeypatch):
     assert (gdir / ".ls.txt").read_text().count(f"| {sid} |") == 2
     # The short job outlived the turn that started it, and its result started the worker's next turn
     resumed = (gdir / "runs" / sid / "artifacts" / "job.txt").read_text()
-    assert "ended] exit 0" in resumed and f"detached job output {jobs_tmp_root()}" in resumed
+    # It names the job's log, which holds the output, instead of quoting it
+    log = re.search(r"^Output: (\S+)$", resumed, re.M).group(1)
+    assert "ended] exit 0" in resumed and resumed.endswith(f"Output: {log}")
+    assert f"detached job output {jobs_tmp_root()}" in Path(log).read_text()
     assert resumed.startswith("[System] The `loop run` job is done with the result of j-")
     digests = engine.db.q("SELECT payload FROM inbox WHERE ws='detach' AND kind='worker_done' ORDER BY id")
     assert len(digests) == 2 and "result of j-" in digests[1]["payload"]

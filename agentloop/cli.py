@@ -21,7 +21,7 @@ HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   stop    stop a running worker (and its jobs), or one job   loop stop w-1a2b3c | loop stop j-4d5e6f
   ls      list this goal's workers
   show    worker details / a turn's evidence   loop show w-1a2b3c --turn 2 [--full] [--log]
-  merge   merge a worker branch into loop/<goal>/integration
+  merge   merge a worker's or advisor's branch into loop/<goal>/integration
   retire  remove a finished worker's worktree to free disk; its branch stays   loop retire w-1a2b3c
   done    close the goal with a report      loop done --status success <<'EOF' ... EOF
   status  goal overview (meta-chat)

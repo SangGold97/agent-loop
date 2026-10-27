@@ -1,8 +1,10 @@
-"""Advisor consultations share the goal inbox and budget, but never a writable project; only a follow-up resumes one."""
+"""Advisor consultations share the goal inbox and budget and build only in their own worktree; only a follow-up
+resumes one."""
 import json
 import pytest
+import yaml
 from agentloop.engine import AgentError
-from agentloop import agents, guard
+from agentloop import agents, engine as engine_mod, gitops, guard
 from conftest import wait_for
 
 
@@ -24,7 +26,7 @@ def finished(client, ws, gid):
                     == "awaiting_review" and v)
 
 
-def test_advice_round_trip_is_fresh_readonly_and_accounted(server):
+def test_advice_round_trip_is_fresh_and_accounted(server):
     client, engine = server
     gid = advice_goal(server, "advice-full", autocompact="300k")
     assert client.post(f"/api/goals/advice-full/{gid}/start").status_code == 200
@@ -127,8 +129,44 @@ def test_advisor_quota_is_refunded_and_reported(server, monkeypatch):
         engine.vendor_limits.pop("fake-advice", None)
 
 
+def test_advisor_cut_off_by_usage_limit_resumes_at_reset(server, monkeypatch):
+    client, engine = server
+    monkeypatch.setattr(engine_mod, "LIMIT_SLACK_S", 0)
+    gid = advice_goal(server, "advice-resume", spec="ADVICE_LIMIT_SOON")
+    client.post(f"/api/goals/advice-resume/{gid}/start")
+    # The same consultation gets its question again at the reset, and its advice arrives as turn 2
+    wait_for(lambda: engine.db.one("SELECT id FROM inbox WHERE ws='advice-resume' AND kind='advice' "
+                                   "AND json_extract(payload, '$.turn')=2 AND payload LIKE '%completed%'"))
+    s = engine.db.q("SELECT * FROM sessions WHERE ws='advice-resume' AND kind='meta-advisor' ORDER BY created")[0]
+    turn = engine.db.one("SELECT * FROM turns WHERE session=? AND n=2", s["id"])
+    assert turn["status"] == "idle" and s["resume_at"] is None
+    events = client.get(f"/api/sessions/{s['id']}/events").json()["events"]
+    prompt = [e["prompt"] for e in events if e.get("type") == "turn" and e.get("n") == 2][0]
+    assert "cut off by the fake usage limit" in prompt and "Question 1" in prompt
+    client.post(f"/api/goals/advice-resume/{gid}/stop")
+
+
+def test_advisor_builds_in_its_worktree_and_resumes_with_its_job(server, monkeypatch):
+    client, engine = server
+    monkeypatch.setattr(engine_mod, "JOB_WAIT_S", 1)  # `loop run` leaves its job to the background at once
+    gid = advice_goal(server, "advice-build", spec="ADVICE_BUILD")
+    client.post(f"/api/goals/advice-build/{gid}/start")
+    finished(client, "advice-build", gid)
+    [s] = engine.db.q("SELECT * FROM sessions WHERE ws='advice-build' AND kind='meta-advisor'")
+    p = engine.wsp("advice-build")
+    assert s["turns"] == 2 and s["branch"] == f"loop/{gid}/advisor-{s['id']}" and s["cwd"] == str(p / "meta")
+    texts = [json.loads(i["payload"])["text"] for i in engine.db.q(
+        "SELECT payload FROM inbox WHERE ws='advice-build' AND kind='advice' ORDER BY id")]
+    assert "is still running" in texts[0] and f"`loop merge {s['id']}`" in texts[0]
+    assert texts[1].startswith(f"[Advice] {s['id']} · turn 2 · completed\nPrototype scored 42; merge it.")
+    # The prototype was snapshotted on the advisor's branch and merged by the meta-work
+    assert (p / "wt" / gid / "proto.py").exists() and engine.db.session(s["id"])["merged"] == 1
+    assert client.post(f"/api/goals/advice-build/{gid}/accept").status_code == 200
+    assert not (p / "wt" / s["id"]).exists() and not gitops.branch_exists(p / "repo", s["branch"])
+
+
 def test_advisor_change_to_project_is_reported(server, monkeypatch):
-    # Like a meta-chat, the advisor only reads the project; a write the guard missed is reported, not reverted.
+    # The advisor writes only in its own worktree; a write the guard missed is reported, not reverted.
     # It runs alongside the meta-work turn that asked, so only repo/ is watched (see Engine.watch_project)
     client, engine = server
     gid = advice_goal(server, "advice-write", spec="ADVICE_WRITE")
@@ -142,13 +180,20 @@ def test_advisor_change_to_project_is_reported(server, monkeypatch):
 
 
 def test_advisor_guard_and_configuration(tmp_path, monkeypatch):
-    env = {"LOOP_WS": str(tmp_path), "LOOP_ROLE": "meta-advisor"}
-    assert guard.check({"tool_name": "Edit", "tool_input": {"file_path": "/tmp/anything"}}, env)
+    env = {"LOOP_WS": str(tmp_path), "LOOP_ROLE": "meta-advisor", "LOOP_SESSION": "ma-1", "LOOP_GOAL": "g"}
+    assert not guard.check({"tool_name": "Edit", "tool_input": {"file_path": "/tmp/anything"}}, env)
     assert guard.check({"tool_name": "apply_patch", "tool_input": {}}, env)
+    # Its own worktree and data/ are writable; the meta-work's integration worktree is not
+    own = tmp_path / "wt" / "ma-1"
+    assert not guard.check({"tool_name": "Write", "tool_input": {"file_path": f"{own}/proto.py"}}, env)
+    assert not guard.check({"tool_name": "Write", "tool_input": {"file_path": f"{tmp_path}/data/x.csv"}}, env)
+    assert not guard.check({"tool_name": "Bash", "cwd": str(own), "tool_input": {"command": "git commit -am x"}}, env)
+    assert guard.check({"tool_name": "Write", "tool_input": {"file_path": f"{tmp_path}/wt/g/x.py"}}, env)
+    assert guard.check({"tool_name": "Write", "tool_input": {"file_path": f"{tmp_path}/meta/memory/x.md"}}, env)
     for cmd in ("echo bad > plan.md", "git commit -am bad", "cp spec.md plan.md"):
         assert guard.check({"tool_name": "Bash", "cwd": str(tmp_path), "tool_input": {"command": cmd}}, env)
     assert not guard.check({"tool_name": "Bash", "tool_input": {"command": "cat spec.md; git diff"}}, env)
-    # The turn's own TMPDIR is the one writable place, for scratch files and verification scripts
+    # The turn's own TMPDIR is writable too, for scratch files and verification scripts
     scratch = tmp_path / "scratch"
     env["TMPDIR"] = str(scratch)
     assert not guard.check({"tool_name": "Write", "tool_input": {"file_path": f"{scratch}/check.py"}}, env)
@@ -204,6 +249,14 @@ def test_advisor_recovery_delivers_saved_results_once_and_keeps_queued_requests(
     pending = engine.db.q("SELECT payload FROM inbox WHERE ws='advice-recovery' "
                           "AND kind='advice_request' AND consumed=0")
     assert json.loads(pending[-1]["payload"]) == {"sid": complete["id"], "turn": 2, "question": "follow-up question"}
+    # Once the human moves the advisor to another CLI, its earlier consultations cannot be followed up
+    engine.db.update("sessions", {"id": complete["id"]}, status="idle")
+    goal_yaml = engine.gdir("advice-recovery", gid) / "goal.yaml"
+    cfg = yaml.safe_load(goal_yaml.read_text())
+    cfg["meta_advisor"]["agent"] = "claude"
+    goal_yaml.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(AgentError, match="the advisor is now claude"):
+        engine.advise(meta, "another follow-up", complete["id"])
     client.post(f"/api/goals/advice-recovery/{gid}/stop")
     assert engine.db.session(queued["id"])["status"] == "stopped"
     assert not engine.advisors("advice-recovery", gid)

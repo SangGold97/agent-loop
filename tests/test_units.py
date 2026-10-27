@@ -205,6 +205,19 @@ def test_envelope_carries_events_and_budget_only_when_low():
     assert digest.envelope([]) == "[System] No new events."
 
 
+def test_envelope_quotes_spec_and_goal_once_after_a_restart_or_human_edit():
+    ev = lambda kind, **p: {"kind": kind, "payload": json.dumps(p)}
+    brief = "SPEC:\ns\n\nGOAL:\ng"
+    assert digest.envelope([ev("worker_done", text="[Worker w-1] done")], brief=brief) == "[Worker w-1] done"
+    out = digest.envelope([ev("system", text="[System] The platform restarted.", brief=True),
+                           ev("file_changed", name="spec.md"), ev("file_changed", name="goal.yaml")], brief=brief)
+    assert out.endswith("[goal.yaml changed by the human]\n\n" + brief) and out.count("SPEC:") == 1
+    assert digest.envelope([ev("file_changed", name="plan.md")], brief=brief) == "[plan.md changed by the human]"
+    # A kickoff or handoff already quotes them
+    assert digest.envelope([ev("handoff", text="[Handoff] x"), ev("file_changed", name="goal.md")],
+                           brief=brief) == "[Handoff] x\n\n[goal.md changed by the human]"
+
+
 def test_worker_digest_is_the_reply_as_is():
     from types import SimpleNamespace
     sess = {"id": "w-1", "role": "reviewer"}
@@ -315,7 +328,8 @@ def test_guard_agy_payload(tmp_path, monkeypatch, capsys):
     assert not guard.check(ev("run_command", CommandLine="pytest -q"), w)
     assert guard.check(ev("write_to_file", TargetFile=str(tmp_path / "goals/m1/goal.md")), w)
     assert not guard.check(ev("replace_file_content", TargetFile=str(tmp_path / "wt/w-1/app.py")), w)
-    assert guard.check(ev("write_to_file", TargetFile="/x"), guard_env(tmp_path, "meta-advisor"))
+    assert guard.check(ev("write_to_file", TargetFile=str(tmp_path / "goals/m1/plan.md")),
+                       guard_env(tmp_path, "meta-advisor"))
     # A denial is a JSON decision on stdout, not an exit code
     for key, val in w.items():
         monkeypatch.setenv(key, val)
