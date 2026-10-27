@@ -32,7 +32,7 @@ sessions, merges their work and closes the goal; the human steers from the web U
   reply becomes a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
   `loop/<goal>/integration`, checked out at `wt/<goal>` (`gitops.py`). The meta-work may also change code
   there; `Engine.checkpoint` commits those changes before a spawn, merge or `loop done` and after each turn.
-- **Detached jobs**: `loop run --detach` runs its helper as a user service outside the turn's scope (`jobs`
+- **Jobs**: `loop run` runs its helper as a user service outside the turn's scope (`jobs`
   table); `Engine.wake_for_jobs` delivers the result as a worker turn or a meta-work event.
 - **Running a CLI**: `runner.py` starts each turn in `systemd-run --user --scope` (anything left in the scope when
   the CLI exits is killed and reported as `TurnResult.leftover`), inside the workspace's shared `.venv`

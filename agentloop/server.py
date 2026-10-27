@@ -194,7 +194,9 @@ def create_app(api_url: str) -> FastAPI:
     async def review_note(nid: int, verdict: str, req: Request):
         b = await body(req)
         note = engine.db.one("SELECT * FROM notes WHERE id=?", nid)
-        if verdict == "approve" and b.get("reopen") and note:
+        if verdict == "deliver":
+            engine.deliver_now(nid)
+        elif verdict == "approve" and b.get("reopen") and note:
             await engine.reopen(note["ws"], note["goal"], b.get("text") or note["text"], nid=nid)
         else:
             engine.review_note(nid, verdict == "approve", b.get("mode", "queue"), b.get("text"))
@@ -293,7 +295,7 @@ def create_app(api_url: str) -> FastAPI:
     async def agent_cmd(cmd: str, req: Request, x_loop_token: str | None = Header(None)):
         caller, b = engine.caller(x_loop_token), await body(req)
         # Workers only use the RAM pool; steering the goal stays with the meta-work
-        if caller["kind"] == "worker" and cmd not in ("ram", "ram-release", "infra", "job", "job-end"):
+        if caller["kind"] == "worker" and cmd not in ("ram", "ram-release", "infra", "job", "job-wait", "job-end"):
             raise AgentError("workers can only use `loop run` and `loop infra`")
         if caller["kind"] == "meta-advisor" and cmd not in ("ls", "show", "status", "budget", "infra"):
             raise AgentError("the advisor has read-only access; return advice to the meta-work in your final reply")
@@ -338,8 +340,10 @@ def create_app(api_url: str) -> FastAPI:
             return engine.ram_release(caller, int(b.get("grant") or 0), bool(b.get("killed")), b.get("job"))
         elif cmd == "job":
             return engine.job_register(caller, str(b.get("cmd", "")))
+        elif cmd == "job-wait":
+            return await engine.job_wait(caller, str(b.get("job", "")))
         elif cmd == "job-end":
-            text = engine.job_report(caller, str(b.get("job", "")), str(b.get("text", "")))
+            text = engine.job_report(caller, str(b.get("job", "")), str(b.get("text", "")), b.get("rc"))
         else:
             raise HTTPException(404, f"unknown command {cmd}")
         return {"text": text}

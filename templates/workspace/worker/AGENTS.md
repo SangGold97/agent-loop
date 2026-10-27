@@ -5,14 +5,15 @@
   one or install into the user or system Python. Run the project from your checkout instead of installing it
   there; to test packaging, use a throwaway venv in `$TMPDIR`.
 - Scratch work goes in `$TMPDIR`, which is emptied when your turn ends.
-- RAM on this machine is shared. Run heavy jobs (training, fine-tuning, large data loads) as
-  `loop run -- <cmd>`, after checking `loop infra` for room: it waits while RAM is over 90% used, and above 95%
-  the newest heavy process is stopped.
+- RAM on this machine is shared. Run heavy jobs (training, fine-tuning, large data loads) and any command that
+  may take over 2 minutes as `loop run -- <cmd>`, after checking `loop infra` for room: it waits while RAM is
+  over 90% used, and above 95% the newest heavy process is stopped. Short, light commands run as usual.
 - Only a job run with `--vram <GB>` sees a GPU (`loop run --vram 8 -- <cmd>`); `$LOOP_VRAM_GB` holds its grant.
   It may use more while the GPU has room; when the GPU fills up, the newest job on it is stopped, so ask for its
   peak VRAM.
-- `loop run --detach` (same options) runs a job past your turn: use it for any job that may take over 10 minutes,
-  then do other work or end your turn instead of waiting; its result arrives as your next message.
+- `loop run` shows the job's output and returns its exit code if it ends within 90 seconds; otherwise the job keeps
+  running in the background, past your turn, and its result arrives as a new message when it ends. Never poll it
+  (no `sleep` loops, no repeated reads of its log).
 
 ## Answer rules
 
@@ -22,7 +23,7 @@
 - Deliver what the prompt asks for, at the scope it intends. If a better approach or a real problem outside
   that scope turns up, say so in your final answer instead of widening the work.
 - Your work ends when you send your final answer, which is also where any question for the requester goes;
-  processes still running then are stopped, except `loop run --detach` jobs.
+  processes still running then are stopped, except `loop run` jobs.
 
 ## Coding and editing rules
 

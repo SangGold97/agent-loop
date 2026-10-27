@@ -79,6 +79,7 @@ class TurnResult:
     limited_until: float | None = None  # the vendor refused the turn for a usage limit that resets then
     memory: str = ""  # the engine's note on the turn's memory peak and kills; empty when unremarkable
     quota: list[dict] | None = None  # the CLI's usage-limit windows, when it reported them (ParseState.quota)
+    quota_ts: float = 0.0  # when it reported them (ParseState.quota_ts)
 
 
 def systemd_available() -> bool:
@@ -267,7 +268,7 @@ class Runner:
         final = adapter.final_text(st, spec) or ""
         limited = usage_limit_until(f"{error}\n{final}") if error and not (stopped or timed_out) else None
         return TurnResult(st.vendor_id, final, st.tokens, st.context, rc, error, stopped, leftover, limited,
-                          quota=st.quota)
+                          quota=st.quota, quota_ts=st.quota_ts)
 
     def running(self, key: str) -> bool:
         return key in self.procs

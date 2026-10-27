@@ -92,7 +92,7 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   1 GB or more; never an agent CLI or a `loop run` helper) is stopped, one every 5 s, so the jobs that were there
   first keep running; its `loop run` prints why. The kernel's OOM killer, should the pool run out between
   samples, takes them in the same order (`oom_score_adj` from 1000 for the newest heavy one, 200 for other tool
-  processes, 0 for CLIs and helpers). If the helper dies, the platform stops the job with it. Processes outside
+  processes, 0 for CLIs; helpers and light jobs keep their user service's default). If the helper dies, the platform stops the job with it. Processes outside
   the platform can still exhaust the host's reserve. The digest reports a turn's memory peak and kills.
 - CPU is shared by weight, never reserved or waited for: an idle core goes to whoever wants it. Every turn and job
   scope has the same `CPUWeight`, so under contention busy jobs split the CPU per scope rather than per thread, and
@@ -100,11 +100,12 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   `OMP_NUM_THREADS`, `MKL_NUM_THREADS` and `OPENBLAS_NUM_THREADS` set to the cores the running jobs leave free (at
   least 2) and `OMP_WAIT_POLICY=PASSIVE`, unless its environment sets them. When the CPU averages 90% or more over
   10 minutes, running goals hear it once (again after it falls below 70%); `loop infra` shows that average.
-- `loop run --detach` runs the job's helper as a user service outside the turn's scope and returns at once, so
-  the agent ends its turn instead of polling; meta and worker instructions send every job that may take over
-  10 minutes this way. The job stays in the pool, survives a platform restart and is stopped after `job_timeout_h`
-  (9 h); a `loop run` inside it belongs to the job, not to the turn. A worker's digest names its jobs still running
-  at the end of its turn. When a job ends, the platform resumes the worker with its exit status and log tail,
+- `loop run` runs the job's helper as a user service outside the turn's scope and shows its output for up to
+  90 seconds: a job that ends by then returns its exit code; a longer one runs on in the background and the agent
+  continues its work or ends its turn instead of polling. Meta and worker instructions send heavy jobs and any
+  command that may take over 2 minutes this way; short commands run as usual. The job stays in the pool, survives
+  a platform restart and is stopped after `job_timeout_h` (9 h); a `loop run` inside it belongs to the job. A
+  worker's digest names its jobs still running at the end of its turn. When a job ends, the platform resumes the worker with its exit status and log tail,
   right after its turn if one is running; when that turn cannot start (budget, RAM, usage limit), or the job is
   the meta-work's, the result goes to the meta-work as an event. `loop stop` stops one job, or a worker with its
   jobs, and a goal that stops stops its jobs.

@@ -9,6 +9,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -27,7 +28,7 @@ HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   note    propose a note to the human (meta-chat)  loop note "try X instead of Y"
   budget  budget usage
   infra   host resources, the RAM pool and GPU VRAM (workers too)
-  run     run a RAM-heavy or GPU job (workers too)   loop run [--vram 8] [--detach] -- CMD"""
+  run     run a heavy, GPU or long job (workers too)   loop run [--vram 8] -- CMD"""
 
 
 def call(cmd: str, payload: dict, full: bool = False):
@@ -112,15 +113,16 @@ def run_job(vram: float, wait_min: float, cmd: list[str], job: str | None = None
     return rc
 
 
-def detach_job(vram: float, wait_min: float, cmd: list[str]) -> int:
-    """`loop run --detach`: start the job under a `loop run` helper of its own, outside this turn, and return at
-    once. When the job ends, the platform hands its result to this session in a new turn (an event for the
-    meta-work)."""
+def start_job(vram: float, wait_min: float, cmd: list[str]) -> int:
+    """`loop run`: start the job under a `loop run` helper of its own, outside this turn, and show its output
+    until it ends or the platform stops waiting (90 s). A job that ends by then returns its exit code; a longer
+    one keeps running, and the platform hands its result to this session as a new message when it ends."""
     if not cmd:
-        sys.exit("loop run: give the command after --, e.g. loop run --detach -- python train.py")
+        sys.exit("loop run: give the command after --, e.g. loop run -- python train.py")
     job = call("job", {"vram": vram, "cmd": shlex.join(cmd)}, full=True)
     log, tmp = Path(job["log"]), Path(job["tmp"])
     log.parent.mkdir(parents=True, exist_ok=True)
+    log.touch()
     tmp.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "TMPDIR": str(tmp)}
     argv = [sys.executable, "-m", "agentloop.cli", "run", "--job", job["id"], "--vram", str(vram),
@@ -139,12 +141,26 @@ def detach_job(vram: float, wait_min: float, cmd: list[str]) -> int:
                                  start_new_session=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         sys.exit(f"loop run: cannot start job {job['id']}: {exc}")
-    print(job["text"])
-    return 0
+    # Show the log while the platform waits for the job to end
+    ended: dict = {}
+    waiter = threading.Thread(target=lambda: ended.update(call("job-wait", {"job": job["id"]}, full=True)),
+                              daemon=True)
+    waiter.start()
+    with log.open("rb") as fh:
+        while waiter.is_alive():
+            waiter.join(0.5)
+            sys.stdout.buffer.write(fh.read())
+            sys.stdout.flush()
+    if not ended.get("done"):
+        print(job["text"])
+        return 0
+    if ended["rc"] is None:  # stopped, or its helper died: the platform says why
+        print(ended["text"])
+    return 1 if ended["rc"] is None else ended["rc"]
 
 
 def job_helper(job: str, vram: float, wait_min: float, cmd: list[str]) -> int:
-    """The detached side of `loop run --detach`: run the job as `loop run` does, then report how it ended."""
+    """The detached side of `loop run`: run the job, then report how it ended."""
     try:
         rc = run_job(vram, wait_min, cmd, job)
         text = f"exit {rc}"
@@ -152,7 +168,7 @@ def job_helper(job: str, vram: float, wait_min: float, cmd: list[str]) -> int:
         print(exc.code, file=sys.stderr, flush=True)
         rc, text = 1, f"not started ({exc.code})"
     with contextlib.suppress(SystemExit):
-        call("job-end", {"job": job, "text": text})
+        call("job-end", {"job": job, "text": text, "rc": rc})
     return rc
 
 
@@ -185,15 +201,14 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("note").add_argument("text")
     for name in ("ls", "status", "budget", "infra"):
         sub.add_parser(name)
-    run = sub.add_parser("run", help="run a RAM-heavy or GPU job")
+    run = sub.add_parser("run", help="run a heavy, GPU or long job; its output shows for up to 90 s, then it "
+                         "runs on in the background and its result comes back as a new message")
     run.add_argument("--ram", type=float, help=argparse.SUPPRESS)  # no longer granted; accepted from older habits
     run.add_argument("--vram", type=float, default=0, help="GB of GPU memory the job needs at its peak; "
                      "only a job given --vram sees a GPU")
     run.add_argument("--wait", type=float, default=30, help="minutes to wait for room in the RAM pool and for the "
                      "VRAM (max 30)")
-    run.add_argument("--detach", action="store_true", help="run the job in the background, past the end of this "
-                     "turn; its result comes back as a new message when it ends")
-    run.add_argument("--job", help=argparse.SUPPRESS)  # the detached job's helper
+    run.add_argument("--job", help=argparse.SUPPRESS)  # the job's helper
     run.add_argument("command", nargs=argparse.REMAINDER, help="-- command and its arguments")
     a = p.parse_args(argv)
 
@@ -203,7 +218,8 @@ def main(argv: list[str] | None = None) -> None:
             print("loop run: --ram is ignored; the platform watches the shared RAM pool instead", file=sys.stderr)
         if a.job:
             sys.exit(job_helper(a.job, a.vram, a.wait, cmd))
-        sys.exit((detach_job if a.detach else run_job)(a.vram, a.wait, cmd))
+        # Inside a job (its helper sets LOOP_JOB) a `loop run` runs in place, as part of that job
+        sys.exit((run_job if os.environ.get("LOOP_JOB") else start_job)(a.vram, a.wait, cmd))
     if a.cmd in ("spawn", "send", "advise"):
         payload = {"prompt": text_arg(a, "prompt")}
         if a.cmd == "spawn":

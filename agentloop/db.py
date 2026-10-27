@@ -33,11 +33,11 @@ CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY, session TEXT, ts REAL, role TEXT, text TEXT);
 CREATE TABLE IF NOT EXISTS jobs(
   id TEXT PRIMARY KEY, session TEXT, ws TEXT, goal TEXT, cmd TEXT, log TEXT, unit TEXT, pid INT,
-  grant_info TEXT, started REAL, ended REAL, status TEXT, result TEXT, reported INT DEFAULT 0);
+  grant_info TEXT, started REAL, ended REAL, status TEXT, result TEXT, reported INT DEFAULT 0, rc INT);
 """
 # Columns added after the first release: (table, column, type)
 ADDED_COLUMNS = [("goals", "first_started", "REAL"), ("goals", "base", "TEXT"), ("goals", "pushed", "REAL"),
-                 ("goals", "pr", "TEXT"), ("notes", "seq", "INT")]
+                 ("goals", "pr", "TEXT"), ("notes", "seq", "INT"), ("jobs", "rc", "INT")]
 # Columns no longer kept: the platform does not track spend, and GPUs go to jobs (`loop run --vram`), not sessions
 DROPPED_COLUMNS = [("goals", "cost"), ("sessions", "cost"), ("turns", "cost"), ("sessions", "gpu")]
 
@@ -62,6 +62,11 @@ class DB:
             # Notes are numbered per goal; ones from before that get their number in the order they were added
             self.conn.execute("UPDATE notes SET seq=(SELECT COUNT(*) FROM notes o WHERE o.ws=notes.ws "
                               "AND o.goal=notes.goal AND o.id<=notes.id) WHERE seq IS NULL")
+            # Approved notes from before the queued/delivered split: queued while their inbox event waits
+            self.conn.execute("UPDATE notes SET status=CASE WHEN EXISTS(SELECT 1 FROM inbox i WHERE i.ws=notes.ws "
+                              "AND i.goal=notes.goal AND i.kind='note' AND i.consumed=0 "
+                              "AND json_extract(i.payload, '$.id')=notes.seq) THEN 'queued' ELSE 'delivered' END "
+                              "WHERE status='approved'")
             for table, col in DROPPED_COLUMNS:
                 if col in [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")]:
                     self.conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")

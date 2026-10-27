@@ -121,7 +121,8 @@ class CodexAdapter(Adapter):
                 if payload.get("info"):
                     total = payload["info"].get("total_token_usage") or total
                     last = payload["info"].get("last_token_usage") or last
-                st.quota = quota_windows(payload.get("rate_limits") or {}) or st.quota
+                if quota := quota_windows(payload.get("rate_limits") or {}):
+                    st.quota, st.quota_ts = quota, epoch(o.get("timestamp"))
         if last:
             st.context = last.get("total_tokens") or st.context
         if in_turn and total:

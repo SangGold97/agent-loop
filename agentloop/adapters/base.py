@@ -48,6 +48,7 @@ class ParseState:
     steps: dict = field(default_factory=dict)                # per-step scratch of adapters that stream steps
     # The plan's usage-limit windows as the CLI last reported them: {name, used (0-1), resets_at (epoch)}
     quota: list[dict] | None = None
+    quota_ts: float = 0.0  # when the CLI reported `quota`; 0 means at the turn's end
     limit_reset: float | None = None  # when a usage limit that refused this turn resets, as the CLI reported it
 
 

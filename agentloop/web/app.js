@@ -738,9 +738,18 @@ function renderConfigTab(force) {
 const FEED_TAIL = 400;  // events kept per overview pane; the log window shows the whole session
 const cliName = a => a === 'claude' ? 'claude code' : a;
 const firstLines = (s, n) => String(s || '').split('\n').filter(l => l.trim()).slice(0, n).join('\n').slice(0, 400);
+// A meta-work turn carrying worker replies ("[Worker <sid> · role <role> ...]") or advice ("[Advice] <sid> ...") is
+// labelled by those senders; one of platform events alone keeps who.prompt
+function turnSender(e, who) {
+  if (who.prompt !== 'platform → meta-work') return who.prompt;
+  const senders = [...new Set([...String(e.prompt || '').matchAll(/^\[(?:Worker \S+ · role ([^\]·]+?)\s*[·\]]|Advice\] )/gm)]
+    .map(m => m[1] ? `worker ${m[1]}` : 'meta-advisor'))];
+  return senders.length ? `${senders.join(', ')} → meta-work` : who.prompt;
+}
 function tuiEvent(e, who) {
   switch (e.type) {
-    case 'turn': return `<div class="fr prompt"><div class="fl"><span>▶ ${esc(who.prompt)}</span><span class="faint">turn ${e.n} · ${hhmm(e.ts)}</span></div><div class="md">${md(e.prompt)}</div></div>`;
+    case 'turn': return `<div class="fr prompt"><div class="fl"><span>▶ ${esc(turnSender(e, who))}</span>
+      <span class="spacer"></span><span class="faint">turn ${e.n} · ${hhmm(e.ts)}</span></div><div class="md">${md(e.prompt)}</div></div>`;
     case 'text': return `<div class="fr reply"><div class="fl">◀ ${esc(e.sub ? 'subagent' : who.reply)}</div><div class="md">${md(e.text)}</div></div>`;
     case 'tool': return `<div class="tl"><span class="dotc">⏺</span><b>${esc(e.name)}</b> ${esc(e.detail || '')}</div>`;
     case 'tool_result': return e.text ? `<div class="tres ${e.error ? 'err' : ''}">⎿ ${esc(firstLines(e.text, 3))}</div>` : '';
@@ -781,7 +790,8 @@ function feedSource(key) {
   if (key === 'modal') {
     const s = S.goal?.sessions.find(x => x.id === S.modal.sid) || {};
     return { ...foldTurns(S.modal.evs, S.modal.sid), sids: [S.modal.sid], sig: S.modal.sid, who: s.kind === 'worker'
-      ? { prompt: 'meta-work → worker', reply: cliName(s.agent) } : { prompt: `→ ${s.kind || 'session'}`, reply: s.kind || 'session' } };
+      ? { prompt: 'meta-work → worker', reply: cliName(s.agent) }
+      : { prompt: s.kind === 'meta-work' ? 'platform → meta-work' : `→ ${s.kind || 'session'}`, reply: s.kind || 'session' } };
   }
   if (key === 'meta-work') {
     const ids = S.goal.sessions.filter(s => s.kind === 'meta-work' && S.feeds[s.id]).map(s => s.id);
@@ -1130,16 +1140,18 @@ function planHtml() {
 }
 function renderNotes(update = false) {
   const el = $('#m-tab'), notes = S.goal.notes, review = S.goal.row.status === 'awaiting_review';
-  const list = notes.length ? notes.map(n => `<div class="advice-item"><div class="row small"><b>note #${n.seq}</b>
-        <span class="chip ${n.author === 'human' ? 'human' : 'meta-chat'}">${esc(n.author)}</span>${pill(n.status)}</div>
-      <div class="row small faint">${n.status === 'approved' ? (n.mode === 'now' ? 'delivered immediately' : 'queued with the next event') : ''}<span class="spacer"></span>${fmtTime(n.ts)}</div>
+  const list = notes.length ? notes.map(n => `<div class="advice-item"><div class="row small note-head"><b>note #${n.seq}</b><span class="sep">|</span>
+        <span class="chip ${n.author === 'human' ? 'human' : 'meta-chat'}">${esc(n.author)}</span><span class="sep">|</span>${pill(n.status)}<span class="spacer"></span>
+        ${n.status === 'queued' ? `<button class="btn small danger" data-note="${n.id}" data-v="reject">reject</button>
+          <button class="btn small primary" data-note="${n.id}" data-v="deliver">deliver now</button>` : ''}
+        <span class="faint">${fmtTime(n.ts)}</span></div>
       ${n.status === 'pending' ? `<textarea data-note-text="${n.id}" style="margin-top:6px;min-height:70px">${esc(n.text)}</textarea>
         <div class="row" style="margin-top:6px"><span class="hint">proposed by a meta-chat; approve to send it to the meta-work</span><span class="spacer"></span>
         <button class="btn small danger" data-note="${n.id}" data-v="reject">reject</button>
         ${review ? `<button class="btn small primary" data-note="${n.id}" data-v="approve" data-reopen="1">approve & reopen goal</button>`
           : `<button class="btn small" data-note="${n.id}" data-v="approve" data-mode="queue">approve (queue)</button>
         <button class="btn small primary" data-note="${n.id}" data-v="approve" data-mode="now">approve & deliver now</button>`}</div>`
-      : clamp(`note-${n.id}`, `<div class="md doc" style="margin-top:4px">${md(n.text)}</div>`, n === notes[0])}</div>`).join('')
+      : clamp(`note-${n.id}`, `<div class="md doc note-text">${md(n.text)}</div>`, n === notes[0])}</div>`).join('')
     : '<div class="empty">No notes yet.</div>';
   if (update && $('#notes-list')) {
     keepScroll(() => { $('#notes-list').innerHTML = list; });
@@ -1175,7 +1187,8 @@ function renderNotes(update = false) {
       await api(`/api/notes/${b.dataset.note}/${b.dataset.v}`, { body: { mode: b.dataset.mode || 'queue', text, reopen: !!b.dataset.reopen } });
       if (b.dataset.reopen) await loadState();
       await refreshGoal(true);
-    }, b.dataset.reopen ? 'Note approved; goal reopened' : b.dataset.v === 'approve' ? 'Note approved' : 'Note rejected');
+    }, b.dataset.reopen ? 'Note approved; goal reopened'
+      : { approve: 'Note approved', deliver: 'Note delivered', reject: 'Note rejected' }[b.dataset.v]);
   };
 }
 async function renderGit() {
@@ -1228,23 +1241,22 @@ document.addEventListener('click', e => {
   if (!jobsFolded.delete(id)) jobsFolded.add(id);
   renderInfra();
 });
-// A session's `loop run` jobs under its row, with headings of their own in the session table's columns: job and
-// detached under session and kind, the command across role to goal, then memory, cpu and time where the session has
-// memory, VRAM and jobs (its VRAM covers its jobs). Jobs still waiting for room in the pool or on a GPU come last
+// A session's `loop run` jobs under its row, with headings of their own in the session table's columns: job under
+// session, the command across kind to goal, then memory, cpu and time where the session has memory, VRAM and jobs
+// (its VRAM covers its jobs). Jobs still waiting for room in the pool or on a GPU come last
 function jobRows(jobs, waiting) {
   const since = t => fmtDur((S.infra.ts - t) / 3600);
-  const detached = j => !j.job ? 'no' : j.within ? 'inside job' : 'yes';
-  const cmd = c => `<td colspan="3"><code class="small" title="${esc(c)}">${esc(shortCmd(c))}</code></td>`;
+  const cmd = c => `<td colspan="4"><code class="small" title="${esc(c)}">${esc(shortCmd(c))}</code></td>`;
   const tr = cells => `<tr class="job">${cells}</tr>`;
-  return `<tr class="job job-head"><th>job</th><th>detached</th><th colspan="3">command</th><th class="num">memory</th>
+  return `<tr class="job job-head"><th>job</th><th colspan="4">command</th><th class="num">memory</th>
       <th class="num">cpu</th><th class="num">time</th></tr>`
-    + jobs.map(j => tr(`<td>${esc(j.job || '—')}</td><td>${detached(j)}</td>${cmd(j.cmd)}
+    + jobs.map(j => tr(`<td>${esc(j.job || '—')}</td>${cmd(j.cmd)}
       <td class="num">${j.rss_gb.toFixed(1)} GB</td><td class="num">${j.cpu_cores == null ? '' : `${j.cpu_cores.toFixed(1)} cores`}</td>
       <td class="num">${since(j.started)}</td>`)).join('')
-    + waiting.map(w => tr(`<td>—</td><td style="color:var(--warn)">waiting</td>${cmd(w.cmd || '')}
+    + waiting.map(w => tr(`<td style="color:var(--warn)">waiting</td>${cmd(w.cmd || '')}
       <td></td><td></td><td class="num">${since(w.since)}</td>`)).join('');
 }
-// Sessions in a turn, plus idle ones whose detached jobs still run, each followed by its jobs
+// Sessions in a turn, plus idle ones whose jobs still run, each followed by its jobs
 function sessionsTable(s) {
   const rows = (s.sessions || []).map(x => ({ ...x, jobs: [] }));
   for (const j of s.jobs || []) {

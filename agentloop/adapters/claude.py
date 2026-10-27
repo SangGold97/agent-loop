@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from .base import Adapter, ParseState, RunSpec, billed_tokens, short, to_tokens, tool_result
@@ -77,7 +78,8 @@ class ClaudeAdapter(Adapter):
                         name = name.replace(long, brief)
                     quota.append({"name": name.replace("_", " "), "used": float(w["utilization"]),
                                   "resets_at": w.get("resetsAt")})
-            st.quota = quota or st.quota
+            if quota:
+                st.quota, st.quota_ts = quota, time.time()
         elif kind == "stream_event":
             # Token deltas of the main agent's reply: live preview only (the full message follows)
             ev = o.get("event") or {}

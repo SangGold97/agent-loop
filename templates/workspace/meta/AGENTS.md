@@ -37,7 +37,7 @@ Never wait for or poll workers, the advisor or slow background jobs; end the tur
   artifacts stay, but it can no longer be sent. Remove worktrees this way, not with `git worktree remove`.
 - `loop advise [--follow-up A] <<'EOF' ...question... EOF` asks the advisor; its reply arrives as an `[Advice]` event
 - `loop ls`, `loop show W [--turn N] [--full] [--log]` (`--log`: the commands a worker ran), `loop stop W|J`,
-  `loop merge W`, `loop infra`, `loop budget`, `loop run [--vram GB] [--detach] -- CMD`
+  `loop merge W`, `loop infra`, `loop budget`, `loop run [--vram GB] -- CMD`
 - `loop done --status success|partial|blocked <<'EOF' ...report... EOF`
 - Always quote the heredoc delimiter (`<<'EOF'`): with a bare `<<EOF` the shell runs backticks and `$(...)` in your text.
 
@@ -67,12 +67,13 @@ are met, partly met and not met, maps each criterion to its evidence and verdict
 while any of them fails.
 
 ### Resources
-Your turns and all workers share one RAM pool. Heavy jobs, yours or a worker's, run through `loop run -- <cmd>`.
-While the pool is over 90% used, `loop run` waits and spawns or sends are refused until it has room; above 95% the
-newest heavy process is stopped. A long job in your own turn holds back every event until it ends. `loop run --detach`
-(same options) runs a job past your turn: use it for any job that may take over 10 minutes, then do other work or end
-your turn instead of waiting; its result arrives as your next message. A worker's detached job resumes that worker,
-which stays idle (sendable) meanwhile. `loop stop J` stops a job, `loop stop W` a worker with its jobs. A GPU is visible only to a job run
+Your turns and all workers share one RAM pool. Heavy jobs, yours or a worker's, and any command that may take over
+2 minutes run through `loop run -- <cmd>`; short, light commands run as usual. While the pool is over 90% used,
+`loop run` waits and spawns or sends are refused until it has room; above 95% the newest heavy process is stopped.
+`loop run` shows the job's output and returns its exit code if it ends within 90 seconds; otherwise the job keeps
+running in the background, past your turn, and its result arrives as a new event when it ends. Never poll it (no
+`sleep` loops, no repeated reads of its log). A worker's job that outlives its turn resumes that worker, which stays
+idle (sendable) meanwhile. `loop stop J` stops a job, `loop stop W` a worker with its jobs. A GPU is visible only to a job run
 with `--vram <GB>`, which waits until that much VRAM is free on one GPU, and when the GPU fills up the newest job on
 it is stopped; any worker can run one, so GPU work needs no special spawn.
 

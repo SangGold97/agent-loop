@@ -113,27 +113,15 @@ def main():
                 # An agent used to granting RAM is told the flag is gone; steering is refused to a worker
                 old = loop("run", "--ram", "4", "--", "true")
                 spawn = loop("spawn", "--agent", "fake", "--role", "x", "--prompt", "x")
-                # The job of a killed `loop run` helper is stopped with it, not left running unwatched
-                helper = subprocess.Popen(["loop", "run", "--", "sleep", "30"],
-                                          stderr=subprocess.PIPE, text=True)
-                helper.stderr.readline()
-                time.sleep(0.5)
-                job = psutil.Process(helper.pid).children()[0]
-                helper.kill()
-                helper.wait()
-                try:
-                    job.wait(timeout=10)
-                    orphan = "job stopped"
-                except psutil.TimeoutExpired:
-                    orphan = "job still running"
-                Path(".artifacts/ram.txt").write_text("\n---\n".join([adj, ok, old, spawn, orphan, gpu, threads]))
+                Path(".artifacts/ram.txt").write_text("\n---\n".join([adj, ok, old, spawn, gpu, threads]))
             if "DETACH" in prompt:
-                # One job ends soon after this turn, through a `loop run` of its own that has started before the turn
-                # ends and must not end with it; the other runs until the goal closes
-                out = [loop("run", "--detach", "--", "loop", "run", "--", sys.executable, "-c",
+                # Both jobs outlast the wait of their `loop run`: one ends soon after this turn, through a `loop run`
+                # of its own that has started before the turn ends and must not end with it; the other runs until
+                # the goal closes
+                out = [loop("run", "--", "loop", "run", "--", sys.executable, "-c",
                             "import os, pathlib, time; pathlib.Path('.artifacts/nested.txt').touch(); time.sleep(3); "
                             "print('detached job output', os.environ['TMPDIR'])"),
-                       loop("run", "--detach", "--", "sleep", "300")]
+                       loop("run", "--", "sleep", "300")]
                 for _ in range(100):
                     if Path(".artifacts/nested.txt").exists():
                         break

@@ -7,6 +7,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -42,11 +43,12 @@ HEAVY_GB = 1.0  # a tool process or job this large may be stopped to save the po
 GRANT_SAMPLES = ("rss_gb", "peak_gb", "oom", "cpu", "cpu_cores")  # a job's measurements, not kept in its jobs-table record
 AGENT_PROCS = {"claude", "codex", "agy"}  # an agent CLI's own processes, never stopped for RAM
 QUOTA_WARN = 0.9  # share of a CLI's usage window past which running goals hear it is running out
-QUOTA_REFRESH_S = 600  # every CLI's usage windows are reread this often, to count use outside agent-loop
+QUOTA_REFRESH_S = 180  # every CLI's usage windows are reread this often, to count use outside agent-loop
 DISK_WARN_GB = 10  # free disk below which running goals hear it is running out (again once back above twice that)
 CPU_WARN_PCT = 90  # 10-minute mean CPU use from which running goals hear the CPU is saturated (again once below 70)
 CPU_REARM_PCT = 70
 MIN_JOB_THREADS = 2  # fewest BLAS/OpenMP threads a `loop run` job gets by default, however busy the CPU is
+JOB_WAIT_S = 90  # how long `loop run` shows a job's output before leaving it to run in the background
 
 
 def clock(ts: float) -> str:
@@ -129,6 +131,7 @@ class Engine:
         # reports)
         self.vram_base: dict[int, float] = {}
         self.stopped: dict[int, tuple[str, str]] = {}
+        self.job_watched: set[str] = set()  # jobs whose `loop run` still shows them, which reports their end
         self.vram_settle: dict[int, float] = {}  # GPU index -> until when it is left alone after a stop
         self.ram_settle = 0.0  # until when the RAM pool is left alone after a stop
         self.bin_dir = state_dir() / "bin"
@@ -161,11 +164,16 @@ class Engine:
         self.vendor_limits.pop(agent, None)
         return None
 
-    def set_quota(self, agent: str, windows: list[dict]) -> None:
-        """Keep a CLI's latest usage-limit windows. When one passes QUOTA_WARN, every running goal hears it once
-        (deferred, so no meta turn is spent on it) and can move new workers to another CLI before this one refuses
-        them; it hears again only after the window has dropped below QUOTA_WARN."""
-        self.quotas[agent] = {"ts": time.time(), "windows": windows}
+    def set_quota(self, agent: str, windows: list[dict], ts: float = 0.0) -> None:
+        """Keep a CLI's latest usage-limit windows, reported at `ts` (0: now). A report older than the kept one is
+        dropped; windows it leaves out keep their last reading. When one passes QUOTA_WARN, every running goal
+        hears it once (deferred, so no meta turn is spent on it) and can move new workers to another CLI before
+        this one refuses them; it hears again only after the window has dropped below QUOTA_WARN."""
+        ts, old = ts or time.time(), self.quotas.get(agent) or {}
+        if ts < old.get("ts", 0):
+            return
+        merged = {w["name"]: w for w in old.get("windows", [])} | {w["name"]: w for w in windows}
+        self.quotas[agent] = {"ts": ts, "windows": list(merged.values())}
         with contextlib.suppress(OSError):
             (state_dir() / "quotas.json").write_text(json.dumps(self.quotas))
         self.publish("quota", agent=agent, **self.quotas[agent])
@@ -394,11 +402,12 @@ class Engine:
         self.spawn(self.quota_loop())
 
     async def refresh_quotas(self) -> None:
-        """Reread every CLI's usage windows (agents.read_quota); a CLI that reports none keeps its last ones."""
-        names = list(agents.UPDATE_CMD)
-        for name, windows in zip(names, await asyncio.gather(*map(agents.read_quota, names))):
-            if windows:
+        """Reread every CLI's usage windows (agents.read_quota), each kept as soon as its CLI answers; a CLI that
+        reports none keeps its last ones."""
+        async def read(name: str) -> None:
+            if windows := await agents.read_quota(name):
                 self.set_quota(name, windows)
+        await asyncio.gather(*map(read, agents.UPDATE_CMD))
 
     async def quota_loop(self) -> None:
         while True:
@@ -818,8 +827,7 @@ class Engine:
             self.ram_waiting.pop(key, None)
 
     def jobs_view(self) -> list[dict]:
-        """Running `loop run` jobs for the infra page, oldest first: whose they are, what they use, and whether they
-        outlive their session's turn (detached, or run within a detached job)."""
+        """Running `loop run` jobs for the infra page, oldest first: whose they are and what they use."""
         rows = []
         for g in sorted(self.grants.values(), key=lambda g: g["started"]):
             s = self.db.session(g["sid"]) or {}
@@ -827,7 +835,7 @@ class Engine:
                          "ws": s.get("ws", ""), "goal": s.get("goal", ""), "cmd": g.get("cmd_full") or g["cmd"],
                          "started": g["started"], "rss_gb": g["rss_gb"], "cpu_cores": g.get("cpu_cores"),
                          "vram": g["vram"], "gpu": g.get("gpu"),
-                         "job": g.get("job"), "within": bool(g.get("within"))})
+                         "job": g.get("job")})
         return rows
 
     def ram_release(self, caller: dict, key: int, killed: bool = False, job: str | None = None) -> dict:
@@ -866,11 +874,11 @@ class Engine:
         parts += mem.get("over", [])
         return "; ".join(parts)
 
-    # ---------- detached jobs (`loop run --detach`) ----------
+    # ---------- jobs (`loop run`) ----------
     def job_register(self, caller: dict, cmd: str) -> dict:
-        """Record a detached job before its `loop run` helper starts outside the caller's turn. The helper asks
-        to start like any `loop run`; the job may outlive the turn and a platform restart, and its result
-        goes back to the caller when it ends (`job_end`)."""
+        """Record a job before its `loop run` helper starts outside the caller's turn. The job may outlive the
+        turn and a platform restart; its result goes back to the caller when it ends (`job_end`), unless its
+        `loop run` still shows it then (`job_wait`)."""
         if caller["kind"] not in ("worker", "meta-work"):
             raise AgentError("`loop run` belongs to workers and the meta-work")
         jid = f"j-{secrets.token_hex(3)}"
@@ -881,22 +889,39 @@ class Engine:
                   "running")
         hours = workspace_config(self.wsp(caller["ws"]))["job_timeout_h"]
         return {"id": jid, "log": str(log_path), "tmp": str(jobs_tmp_root() / jid), "unit": unit,
-                "text": f"Started job {jid} in the background (output: {log_path}; stopped after {hours} h). End "
-                        "your turn now instead of waiting: when the job ends, its result arrives as a new message."}
+                "text": f"loop run: job {jid} is running in the background (output: {log_path}; stopped after "
+                        f"{hours} h). Continue your work or end your turn instead of polling the job; its result "
+                        "arrives as a new message when it ends."}
 
-    def job_report(self, caller: dict, jid: str, text: str) -> str:
+    async def job_wait(self, caller: dict, jid: str) -> dict:
+        """Wait up to JOB_WAIT_S for a job to end while its `loop run` shows its output. A job that ends by then
+        is reported there, not handed to the session again."""
+        deadline = time.time() + JOB_WAIT_S
+        self.job_watched.add(jid)
+        try:
+            while (j := self.db.one("SELECT * FROM jobs WHERE id=? AND session=?", jid, caller["id"])) \
+                    and j["status"] == "running" and time.time() < deadline:
+                await asyncio.sleep(0.5)
+        finally:
+            self.job_watched.discard(jid)
+        if not j or j["status"] == "running":
+            return {"done": False}
+        self.db.update("jobs", {"id": jid}, reported=1)
+        return {"done": True, "rc": j["rc"], "text": j["result"]}
+
+    def job_report(self, caller: dict, jid: str, text: str, rc: int | None = None) -> str:
         if not self.db.one("SELECT 1 FROM jobs WHERE id=? AND session=?", jid, caller["id"]):
             raise AgentError(f"no job {jid} of this session")
-        self.job_end(jid, text)
+        self.job_end(jid, text, rc)
         return "reported"
 
-    def job_end(self, jid: str, how: str) -> None:
-        """Close a running detached job once, whichever comes first (its helper's report, a helper gone without
-        one, job_timeout_h), and hand its result to its session."""
+    def job_end(self, jid: str, how: str, rc: int | None = None) -> None:
+        """Close a running job once, whichever comes first (its helper's report, a helper gone without one,
+        job_timeout_h), and hand its result to its session unless its `loop run` still shows it."""
         j = self.db.one("SELECT * FROM jobs WHERE id=? AND status='running'", jid)
         if not j:
             return
-        self.db.update("jobs", {"id": jid}, status="done", ended=time.time())
+        self.db.update("jobs", {"id": jid}, status="done", ended=time.time(), rc=rc)
         shutil.rmtree(jobs_tmp_root() / jid, ignore_errors=True)
         try:
             with open(j["log"], "rb") as fh:
@@ -908,7 +933,8 @@ class Engine:
         took = f"{mins:.0f} min" if mins < 90 else f"{mins / 60:.1f} h"
         log_text = f"End of {j['log']}:\n```\n" + "\n".join(tail) + "\n```" if tail else f"{j['log']} is empty."
         self.db.update("jobs", {"id": jid}, result=f"[Job {jid} ended] {how} after {took}: `{j['cmd']}`\n{log_text}")
-        self.wake_for_jobs(j["session"])
+        if jid not in self.job_watched:
+            self.wake_for_jobs(j["session"])
 
     def police_jobs(self) -> None:
         """End detached jobs whose helper is gone without a report, and stop those past job_timeout_h."""
@@ -1091,7 +1117,7 @@ class Engine:
             res_mem = self.turn_mem.pop(sid, {})
         res.memory = self.mem_note(res_mem)
         if res.quota:
-            self.set_quota(sess["agent"], res.quota)
+            self.set_quota(sess["agent"], res.quota, res.quota_ts)
         # `loop run` jobs have scopes of their own, so the turn's scope did not list them among its leftovers
         if not res.stopped:
             res.leftover = (*res.leftover, *(c for c in jobs if c not in res.leftover))
@@ -1126,7 +1152,8 @@ class Engine:
                 f"- Worker agents (the human fixed model and effort; you pick the CLI and name the role):\n{agents}\n"
                 f"- Your turns and the workers share a {self.pool_gb()} GB RAM pool; only jobs run with "
                 "`loop run --vram <GB>` see a GPU.\n"
-                f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}.\n"
+                f"- Workspace map: {p / 'PLATFORM.md'}. Cross-goal memory: {p / 'meta' / 'memory'}; read its "
+                "README.md first, then the files that bear on this goal.\n"
                 "- Read spec.md and goal.md first (human-owned, do not edit). You own plan.md there.")
 
     async def start_goal(self, ws: str, gid: str) -> None:
@@ -1206,6 +1233,12 @@ class Engine:
                 # Items stay in flight (2) until the turn completes; failures put them back (0)
                 ids = ",".join(str(i["id"]) for i in items)
                 self.db.x(f"UPDATE inbox SET consumed=2 WHERE id IN ({ids})")
+                # Queued notes reach the meta-work with this turn
+                if any(i["kind"] == "note" for i in items):
+                    self.db.x("UPDATE notes SET status='delivered' WHERE ws=? AND goal=? AND status='queued' AND seq IN "
+                              f"(SELECT json_extract(payload, '$.id') FROM inbox WHERE id IN ({ids}) AND kind='note')",
+                              ws, gid)
+                    self.publish("note", ws=ws, goal=gid)
                 try:
                     progressed = await self.meta_turn(ws, gid, items)
                 except Exception as exc:
@@ -1381,7 +1414,7 @@ class Engine:
         return res
 
     async def reopen(self, ws: str, gid: str, text: str, nid: int | None = None) -> None:
-        """Back to running after review; the human's note (new, or an approved pending one) is delivered now."""
+        """Back to running after review; the human's note (new, or a pending one approved) is delivered now."""
         m = self.goal_row(ws, gid)
         if m["status"] != "awaiting_review":
             raise AgentError("only a goal awaiting review can be reopened")
@@ -1444,14 +1477,14 @@ class Engine:
 
     # ---------- notes and human edits ----------
     def add_note(self, ws: str, gid: str, text: str, author: str = "human", mode: str = "queue",
-                 status: str = "approved", source: str | None = None) -> int:
+                 status: str = "queued", source: str | None = None) -> int:
         text = text.strip()
         if not text:
             raise AgentError("empty note")
         nid = self.db.x("INSERT INTO notes(ws, goal, ts, text, author, status, mode, source_session, seq) "
                         "VALUES(?,?,?,?,?,?,?,?,(SELECT COALESCE(MAX(seq), 0) + 1 FROM notes WHERE ws=? AND goal=?))",
                         ws, gid, time.time(), text, author, status, mode, source, ws, gid)
-        if status == "approved":
+        if status != "pending":
             self.deliver_note(nid)
         self.publish("note", ws=ws, goal=gid, id=nid, status=status)
         return nid
@@ -1464,17 +1497,48 @@ class Engine:
         workspace.commit(self.wsp(n["ws"]), "human", f"human: note #{n['seq']} for {n['goal']}")
         self.db.push_inbox(n["ws"], n["goal"], "note", {"id": n["seq"], "text": n["text"]},
                            deferred=n["mode"] != "now")
+        # A queued note turns delivered when a meta-work turn takes it (meta_loop) or on `deliver_now`
+        self.db.update("notes", {"id": nid}, status="delivered" if n["mode"] == "now" else "queued")
         if n["mode"] == "now":
             self.kick(n["ws"], n["goal"])
 
+    def queued_note(self, nid: int, change: str) -> dict:
+        """A queued note, its inbox event updated with `change` (SQL SET clause)."""
+        n = self.db.one("SELECT * FROM notes WHERE id=?", nid)
+        if not n or n["status"] != "queued":
+            raise AgentError("note is not queued")
+        self.db.x(f"UPDATE inbox SET {change} WHERE ws=? AND goal=? AND kind='note' AND consumed=0 "
+                  "AND json_extract(payload, '$.id')=?", n["ws"], n["goal"], n["seq"])
+        return n
+
+    def deliver_now(self, nid: int) -> None:
+        """Wake the meta-work for a queued note, as if it had been added with mode now."""
+        n = self.queued_note(nid, "deferred=0")
+        self.db.update("notes", {"id": nid}, status="delivered", mode="now")
+        self.kick(n["ws"], n["goal"])
+        self.publish("note", ws=n["ws"], goal=n["goal"], id=nid)
+
+    def withdraw_note(self, nid: int) -> None:
+        """Reject a queued note: drop its inbox event and its section of notes.md before the meta-work gets it."""
+        n = self.queued_note(nid, "consumed=1")
+        path = self.gdir(n["ws"], n["goal"]) / "notes.md"
+        section = rf"\n## Note #{n['seq']} · [^\n]*\n\n{re.escape(n['text'])}\n"
+        path.write_text(re.sub(section, "", path.read_text(), count=1))
+        workspace.commit(self.wsp(n["ws"]), "human", f"human: withdraw note #{n['seq']} for {n['goal']}")
+        self.db.update("notes", {"id": nid}, status="rejected")
+        self.publish("note", ws=n["ws"], goal=n["goal"], id=nid)
+
     def review_note(self, nid: int, approve: bool, mode: str = "queue", text: str | None = None) -> None:
         n = self.db.one("SELECT * FROM notes WHERE id=?", nid)
+        if n and n["status"] == "queued" and not approve:
+            return self.withdraw_note(nid)
         if not n or n["status"] != "pending":
             raise AgentError("note is not pending")
-        self.db.update("notes", {"id": nid}, status="approved" if approve else "rejected", mode=mode,
-                       text=(text or n["text"]).strip())
+        self.db.update("notes", {"id": nid}, mode=mode, text=(text or n["text"]).strip())
         if approve:
             self.deliver_note(nid)
+        else:
+            self.db.update("notes", {"id": nid}, status="rejected")
         self.publish("note", ws=n["ws"], goal=n["goal"], id=nid)
 
     def human_edit(self, ws: str, rel: str, text: str) -> None:
@@ -1750,7 +1814,7 @@ class Engine:
             text += "\n" + leftover_note(res.leftover, "this worker's turn")
         if res.memory:
             text += f"\n[System] Memory in this worker's turn: {res.memory}"
-        # A worker that detached a job and ended its turn is not done: say so, or the meta-work may brief it anew
+        # A worker whose job outlives its turn is not done: say so, or the meta-work may brief it anew
         if jobs := self.db.q("SELECT id FROM jobs WHERE session=? AND status='running' ORDER BY started", sid):
             ids = ", ".join(j["id"] for j in jobs)
             text += (f"\n[System] Job{'s' * (len(jobs) > 1)} {ids} {'are' if len(jobs) > 1 else 'is'} still "
@@ -1874,7 +1938,7 @@ class Engine:
         jobs = self.db.q("SELECT * FROM jobs WHERE ws=? AND goal=? AND status='running' ORDER BY started",
                          caller["ws"], caller["goal"])
         if jobs:
-            out += ["", "Running jobs (`loop run --detach`): id | session | running for | command"]
+            out += ["", "Running jobs (`loop run`): id | session | running for | command"]
             out += [f"{j['id']} | {j['session']} | {(time.time() - j['started']) / 3600:.1f} h | `{j['cmd'][:120]}`"
                     for j in jobs]
         return "\n".join(out)

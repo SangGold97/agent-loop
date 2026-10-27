@@ -509,7 +509,7 @@ def test_goal_id_is_the_title_slug_and_must_be_new(server):
     assert workspace.list_goals(ws) == ["another-goal", "loc-tu-theo-tan-suat"]
 
 
-def test_loop_run_starts_jobs_in_the_pool_and_stops_them_with_their_helper(server):
+def test_loop_run_starts_jobs_in_the_pool_and_reports_short_ones_in_place(server):
     client, engine = server
     client.post("/api/workspaces", json={"name": "ram"})
     ws = Path(engine.wsp("ram"))
@@ -521,8 +521,8 @@ def test_loop_run_starts_jobs_in_the_pool_and_stops_them_with_their_helper(serve
                     == "awaiting_review" and v)
     sid = next(s["id"] for s in view["sessions"] if s["kind"] == "worker")
     out = (ws / "goals" / gid / "runs" / sid / "artifacts" / "ram.txt").read_text().split("\n---\n")
-    adj, ok, old, spawn, orphan, gpu, threads = out
-    assert "started with the RAM pool" in ok and "job ran, adj 0 cuda ''" in ok and "done (exit 0)" in ok
+    adj, ok, old, spawn, gpu, threads = out
+    assert "started with the RAM pool" in ok and "cuda ''" in ok and "done (exit 0)" in ok
     # The job's own OMP_NUM_THREADS wins over the default; what it leaves unset gets the defaults
     own, default = [line.split() for line in threads.splitlines() if line.startswith("threads")]
     assert own[1] == "3" and int(own[2]) >= 2 and own[3] == "PASSIVE"
@@ -535,14 +535,18 @@ def test_loop_run_starts_jobs_in_the_pool_and_stops_them_with_their_helper(serve
         assert "no GPU on this host" in gpu
     assert "workers can only use" in spawn
     assert not engine.grants and not engine.ram_waiting
+    # Jobs that ended while their `loop run` showed them were reported there, not by resuming the worker
+    assert all(j["reported"] for j in engine.db.q("SELECT reported FROM jobs WHERE ws='ram'"))
+    assert engine.db.session(sid)["turns"] == 1
     if systemd_available():  # the pool, the job scopes and the OOM order need systemd
-        assert adj == "0 200" and orphan == "job stopped"
+        assert adj == "0 200"
         # Jobs share the CPU per scope at equal weight; the pool slice yields to its siblings
         assert default[5:] == ["100", str(runner_mod.POOL_CPU_WEIGHT)]
 
 
-def test_detached_job_outlives_its_turn_and_resumes_the_worker(server):
+def test_long_job_outlives_its_turn_and_resumes_the_worker(server, monkeypatch):
     client, engine = server
+    monkeypatch.setattr(engine_mod, "JOB_WAIT_S", 1)  # `loop run` leaves its job to the background at once
     client.post("/api/workspaces", json={"name": "detach"})
     ws = Path(engine.wsp("detach"))
     gid = client.post("/api/workspaces/detach/goals", json={
@@ -553,7 +557,7 @@ def test_detached_job_outlives_its_turn_and_resumes_the_worker(server):
     gdir = ws / "goals" / gid
     sid = engine.db.one("SELECT id FROM sessions WHERE ws='detach' AND kind='worker'")["id"]
     started = (gdir / "runs" / sid / "artifacts" / "detach.txt").read_text()
-    assert started.count("Started job j-") == 2 and "End your turn now" in started
+    assert started.count("is running in the background") == 2 and "instead of polling the job" in started
     # While the worker was idle, the meta-work saw its jobs running
     assert (gdir / ".ls.txt").read_text().count(f"| {sid} |") == 2
     # The short job outlived the turn that started it, and its result started the worker's next turn
@@ -603,6 +607,17 @@ def test_cli_usage_limits_are_kept_shown_and_warned(server, monkeypatch):
     assert [w["name"] for w in engine.quotas["fake"]["windows"]] == ["5h"]
     assert "CLI usage limits: fake 5h 25%" in engine.infra_text()
     assert client.get("/api/agents").json()["quotas"]["fake"]["windows"][0]["used"] == 0.25
+    # A queued note waits until the human delivers it now
+    nid = client.post(f"/api/goals/usage/{gid}/notes", json={"text": "later", "mode": "queue"}).json()["id"]
+    note = lambda: next(n for n in client.get(f"/api/goals/usage/{gid}").json()["notes"] if n["id"] == nid)
+    assert note()["status"] == "queued"
+    assert client.post(f"/api/notes/{nid}/deliver", json={}).status_code == 200
+    assert note()["status"] == "delivered" and client.post(f"/api/notes/{nid}/deliver", json={}).status_code == 400
+    # ...or rejects it, which takes it out of notes.md before the meta-work reads it
+    nid = client.post(f"/api/goals/usage/{gid}/notes", json={"text": "never mind", "mode": "queue"}).json()["id"]
+    assert client.post(f"/api/notes/{nid}/reject", json={}).status_code == 200
+    notes_md = (engine.wsp("usage") / "goals" / gid / "notes.md").read_text()
+    assert note()["status"] == "rejected" and "never mind" not in notes_md and "later" in notes_md
     # Past QUOTA_WARN, running goals hear it once, deferred, until the window drops below it again
     engine.db.x("UPDATE goals SET status='running' WHERE ws='usage' AND id=?", gid)
     try:

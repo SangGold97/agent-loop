@@ -152,7 +152,9 @@ async def read_quota(name: str) -> list[dict]:
         if name == "claude":
             code, text = await run_cmd(["claude", "-p", "/usage", "--output-format", "json",
                                         "--no-session-persistence"], timeout=60, cwd=state_dir())
-            return claude_usage(json.loads(text)["result"]) if code == 0 else []
+            # stderr is merged in (e.g. a failing plugin hook), so only the JSON line is parsed
+            line = next((ln for ln in text.splitlines() if ln.startswith("{")), "")
+            return claude_usage(json.loads(line)["result"]) if code == 0 else []
         if name == "codex":
             return await _codex_quota()
         return await asyncio.to_thread(usage_quota, state_dir())
