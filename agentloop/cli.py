@@ -130,7 +130,9 @@ def start_job(vram: float, wait_min: float, cmd: list[str]) -> int:
     try:
         if job["unit"]:
             # A user service is outside this turn's scope, so it outlives the turn and a platform restart
-            subprocess.run(["systemd-run", "--user", "--quiet", "--collect", f"--unit={job['unit']}",
+            # --expand-environment=no: systemd would otherwise expand ${VAR} in the job's own command
+            subprocess.run(["systemd-run", "--user", "--quiet", "--collect", "--expand-environment=no",
+                            f"--unit={job['unit']}",
                             f"--working-directory={os.getcwd()}", "-p", f"StandardOutput=append:{log}",
                             "-p", f"StandardError=append:{log}",
                             *(f"--setenv={k}={v}" for k, v in env.items() if "\n" not in v), "--", *argv],
