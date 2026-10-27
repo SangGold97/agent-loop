@@ -294,6 +294,7 @@ def test_delete_goal_and_workspace(server):
     wait_for(lambda: client.get(f"/api/goals/trash/{gid}").json()["row"]["status"] == "awaiting_review")
     sids = [s["id"] for s in engine.db.q("SELECT id FROM sessions WHERE ws='trash' AND goal=?", gid)]
     assert sids
+    (ws / ".loop" / "sessions" / f"{sids[0]}.t1.last.txt").write_text("last")  # as Codex writes it
 
     # A goal goes with its sessions, worktrees, branches, files and rows; other goals stay
     assert client.delete(f"/api/goals/trash/{gid}").json() == {"ok": True}

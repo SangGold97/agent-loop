@@ -1460,7 +1460,9 @@ class Engine:
         await asyncio.to_thread(gitops.remove_goal, p, gid, [s for s in sessions if s["kind"] == "worker"])
         workspace.delete_goal_dir(p, gid)
         for s in sessions:
-            for path in self.logs(ws, s["id"]):
+            raw, events = self.logs(ws, s["id"])
+            # The per-turn last-message files (Codex) go with the session's logs
+            for path in (raw, events, *raw.parent.glob(f"{s['id']}.t*.last.txt")):
                 path.unlink(missing_ok=True)
         self._forget(ws, gid)
         self.publish("deleted", ws=ws, goal=gid)
