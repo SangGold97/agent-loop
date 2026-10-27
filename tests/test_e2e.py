@@ -564,6 +564,7 @@ def test_long_job_outlives_its_turn_and_resumes_the_worker(server, monkeypatch):
     # The short job outlived the turn that started it, and its result started the worker's next turn
     resumed = (gdir / "runs" / sid / "artifacts" / "job.txt").read_text()
     assert "ended] exit 0" in resumed and f"detached job output {jobs_tmp_root()}" in resumed
+    assert resumed.startswith("[System] The `loop run` job is done with the result of j-")
     digests = engine.db.q("SELECT payload FROM inbox WHERE ws='detach' AND kind='worker_done' ORDER BY id")
     assert len(digests) == 2 and "result of j-" in digests[1]["payload"]
     # Both digests tell the meta-work that the long job still runs and the worker resumes with its result

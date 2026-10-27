@@ -739,8 +739,11 @@ const FEED_TAIL = 400;  // events kept per overview pane; the log window shows t
 const cliName = a => a === 'claude' ? 'claude code' : a;
 const firstLines = (s, n) => String(s || '').split('\n').filter(l => l.trim()).slice(0, n).join('\n').slice(0, 400);
 // A meta-work turn carrying worker replies ("[Worker <sid> · role <role> ...]") or advice ("[Advice] <sid> ...") is
-// labelled by those senders; one of platform events alone keeps who.prompt
+// labelled by those senders; one of platform events alone keeps who.prompt. A worker turn started by the result of
+// its `loop run` job (Engine.wake_for_jobs; older turns open with the job result itself) comes from the platform
 function turnSender(e, who) {
+  if (who.prompt === 'meta-work → worker' && /^(\[System\] The `loop run` job|\[Job j-)/.test(e.prompt || ''))
+    return 'platform → worker (loop run)';
   if (who.prompt !== 'platform → meta-work') return who.prompt;
   const senders = [...new Set([...String(e.prompt || '').matchAll(/^\[(?:Worker \S+ · role ([^\]·]+?)\s*[·\]]|Advice\] )/gm)]
     .map(m => m[1] ? `worker ${m[1]}` : 'meta-advisor'))];

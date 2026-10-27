@@ -980,6 +980,9 @@ class Engine:
         if self.goal_row(ws, gid)["status"] != "running":
             return
         self.db.x(f"UPDATE jobs SET reported=1 WHERE id IN ({','.join('?' * len(jobs))})", *(j["id"] for j in jobs))
+        woken = ", ".join(j["id"] for j in jobs)
+        # The UI labels a worker turn opening with this line as sent by the platform (app.js turnSender)
+        done = f"[System] The `loop run` job is done with the result of {woken}."
         text = "\n\n".join(j["result"] for j in jobs)
         if s["kind"] == "worker":
             try:
@@ -993,8 +996,10 @@ class Engine:
             else:
                 self.db.update("sessions", {"id": sid}, status="running")
                 self._count_dispatch(ws, gid)
-                self.spawn(self.worker_turn(sid, text, woken=", ".join(j["id"] for j in jobs)), goal=(ws, gid))
+                self.spawn(self.worker_turn(sid, f"{done}\n\n{text}", woken=woken), goal=(ws, gid))
                 return
+        else:
+            text = f"{done}\n\n{text}"
         self.db.push_inbox(ws, gid, "system", {"text": text})
         self.kick(ws, gid)
 
@@ -1776,7 +1781,8 @@ class Engine:
         try:
             text, n = await self._worker_turn(sess, prompt)
             if woken:
-                text += f"\n[System] The platform started this turn with the result of {woken}."
+                text += (f"\n[System] The `loop run` job is done with the result of {woken}, "
+                         "which started this turn.")
         except Exception as exc:
             # Any platform failure must still reach the meta-work, or the goal stalls on a phantom worker
             log.exception("worker turn failed for %s", sid)
