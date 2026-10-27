@@ -273,6 +273,22 @@ def test_guard_rules(tmp_path):
     assert guard.check(ev("Bash", command="ls"), {}) is None
 
 
+def test_guard_blocks_polling(tmp_path):
+    (tmp_path / "wt/w-1").mkdir(parents=True)
+    w, m = guard_env(tmp_path, "worker"), guard_env(tmp_path, "meta-chat")
+    ev = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path / "wt/w-1")}
+    for cmd in ('until ! pgrep -f "tools.score" >/dev/null; do sleep 5; done; cat out.err',
+                "while [ ! -f out.json ]\ndo\n  sleep 10\ndone", "bash -c 'while true; do sleep 1; done'",
+                "tail -f job.log", "timeout 60 tail -F job.log", "watch -n 5 nvidia-smi"):
+        assert guard.check(ev(cmd), w) and guard.check(ev(cmd), m), cmd
+    # Retries, short pauses, one-off reads and the loops of a `loop run` job pass
+    for cmd in ("for i in 1 2 3; do kaggle datasets download x && break; sleep 30; done", "sleep 1; cat lvl.log",
+                "tail -n 40 job.log", "while read f; do wc -l $f; done < files.txt",
+                "loop run -- bash -c 'until test -f done; do sleep 5; done'", "git log --follow a.py",
+                "python - <<'EOF'\nwhile x:\n    time.sleep(1)\nEOF"):
+        assert not guard.check(ev(cmd), w), cmd
+
+
 def test_guard_ignores_prompt_text(tmp_path):
     (tmp_path / "wt/w-1").mkdir(parents=True)
     m = guard_env(tmp_path, "meta-work")

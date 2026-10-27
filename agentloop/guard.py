@@ -3,7 +3,7 @@ decision on stdout).
 
 Guards against mistakes, not adversaries: agents never push, never touch human-owned files or
 the user's Python, workers stay inside their own worktree, and meta sessions change project code only in their
-goal's integration worktree (meta-chats not at all). Messages shown to workers name no platform concepts, so a
+goal's integration worktree (meta-chats not at all), and no session polls running work from inside its turn. Messages shown to workers name no platform concepts, so a
 worker experiences these as ordinary limits of its environment.
 """
 from __future__ import annotations
@@ -30,6 +30,11 @@ IN_PLACE = re.compile(r"-[a-zA-Z]*i|--in-place")  # sed -i, perl -pi
 GIT_WRITES = {"add", "am", "apply", "checkout", "cherry-pick", "clean", "commit", "merge", "mv", "pull", "rebase",
               "reset", "restore", "revert", "rm", "stash", "switch"}
 # Package installs that change the human's own Python instead of a project venv
+# Waiting on other work from inside a turn: a while/until loop that sleeps, or following a file or command
+POLL_LOOP = re.compile(r"\b(?:while|until)\b(?:(?!\bdone\b).)*?\bdo\b(?:(?!\bdone\b).)*?\bsleep\b", re.S)
+FOLLOW = re.compile(r"\btail\b[^|;&\n]*\s(?:-[a-zA-Z]*[fF][a-zA-Z]*|--follow\S*)(?=\s|$)")
+NO_POLL = ("waiting in a loop is disabled (sleep loops, tail -f, watch): run long work in the foreground or "
+           "as `loop run -- <cmd>`, whose result comes back as a new message")
 GLOBAL_INSTALL = re.compile(r"\bsudo\b|\bpip3?\b[^|;&\n]*\binstall\b[^|;&\n]*(--user|--break-system-packages)\b"
                             r"|\bconda\s+install\b(?![^|;&\n]*(-p|--prefix)\s)")
 
@@ -188,6 +193,11 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
         return reason
     if GLOBAL_INSTALL.search(bare):
         return "do not install into the user or system Python; install into the active virtualenv ($VIRTUAL_ENV)"
+    # A `loop run` job may wait on whatever it likes; only the turn itself must not poll
+    own = re.sub(r"\bloop\s+run\b[^\n]*", "", code)
+    if POLL_LOOP.search(own) or FOLLOW.search(own) or \
+            any(os.path.basename(words[0]) == "watch" for _, words in simple_commands(own)):
+        return NO_POLL
     cmd = code
     for match in re.finditer(r"\brm\s+((?:-\S+\s+)*)(.+?)(?:$|[;&|])", cmd, re.M):
         if "r" not in match.group(1) and "f" not in match.group(1):
