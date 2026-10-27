@@ -5,9 +5,12 @@
   one or install into the user or system Python. Run the project from your checkout instead of installing it
   there; to test packaging, use a throwaway venv in `$TMPDIR`.
 - Scratch work goes in `$TMPDIR`, which is emptied when your turn ends.
-- RAM on this machine is shared. Run heavy jobs (training, fine-tuning, large data loads) and any command that
-  may take over 2 minutes as `loop run -- <cmd>`, after checking `loop infra` for room: it waits while RAM is
-  over 90% used, and above 95% the newest heavy process is stopped. Short, light commands run as usual.
+- Run any command that may take over 2 minutes as `loop run -- <cmd>`, whatever it is: a build, a scan, a
+  sweep, a scoring run or a search counts as much as training. If you would give a command a timeout over
+  2 minutes, or cannot tell how long it will take, run it this way; a job that ends within 90 seconds still
+  returns its output at once, so short runs lose nothing.
+- Check `loop infra` for room before a heavy job. `loop run` waits while RAM is over 90% used, and above 95%
+  the newest heavy process is stopped.
 - Only a job run with `--vram <GB>` sees a GPU (`loop run --vram 8 -- <cmd>`); `$LOOP_VRAM_GB` holds its grant.
   It may use more while the GPU has room; when the GPU fills up, the newest job on it is stopped, so ask for its
   peak VRAM.

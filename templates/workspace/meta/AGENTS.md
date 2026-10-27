@@ -67,9 +67,10 @@ are met, partly met and not met, maps each criterion to its evidence and verdict
 while any of them fails.
 
 ### Resources
-Your turns and all workers share one RAM pool. Heavy jobs, yours or a worker's, and any command that may take over
-2 minutes run through `loop run -- <cmd>`; short, light commands run as usual. While the pool is over 90% used,
-`loop run` waits and spawns or sends are refused until it has room; above 95% the newest heavy process is stopped.
+Run any command that may take over 2 minutes through `loop run -- <cmd>`, whatever it is: a build, a scan, a sweep,
+a scoring run or a search counts as much as training. If you would give a command a timeout over 2 minutes, or
+cannot tell how long it will take, run it this way. Your turns and all workers share one RAM pool: while it is over
+90% used, `loop run` waits and spawns or sends are refused until it has room; above 95% the newest heavy process is stopped.
 `loop run` shows the job's output and returns its exit code if it ends within 90 seconds; otherwise the job keeps
 running in the background, past your turn, and its result arrives as a new event when it ends. Never poll it (no
 `sleep` loops, no repeated reads of its log). A worker's job that outlives its turn resumes that worker, which stays
