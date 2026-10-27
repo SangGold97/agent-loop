@@ -40,6 +40,7 @@ class ParseState:
     last_text: str = ""
     final: str | None = None
     tokens: int = 0                # this turn's tokens, cached input excluded
+    result_tokens: int = 0         # Claude: the tokens of this turn's results so far
     context: int = 0
     is_error: bool = False
     error: str = ""

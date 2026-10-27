@@ -136,6 +136,10 @@ def test_claude_parse_result():
               "usage": {"input_tokens": 1, "cache_creation_input_tokens": 4, "cache_read_input_tokens": 90, "output_tokens": 2}}, st)
     assert (st.vendor_id, st.final, st.tokens, st.is_error) == ("S", "ok", 7, False)
     assert not hasattr(st, "cost")
+    # A background task that ends after the reply makes the CLI answer again: both replies and totals count
+    ad.parse({"type": "result", "subtype": "success", "result": "the job ended", "session_id": "S",
+              "usage": {"input_tokens": 1, "cache_read_input_tokens": 99, "output_tokens": 1}}, st)
+    assert (st.final, st.tokens) == ("ok\n\nthe job ended", 9)
 
 
 

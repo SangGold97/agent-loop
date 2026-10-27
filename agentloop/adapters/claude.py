@@ -120,9 +120,13 @@ class ClaudeAdapter(Adapter):
                     out.append(tool_result(body or "", bool(c.get("is_error"))))
         elif kind == "result":
             st.vendor_id = o.get("session_id") or st.vendor_id
-            st.final = o.get("result") if o.get("result") is not None else st.last_text
-            # The CLI's own total for the turn replaces the per-call count
-            st.tokens = billed_tokens(o.get("usage") or {})
+            # A turn can end in several results: the CLI answers again when a background task it started
+            # ends. Each result counts only its own calls and replies only to its own prompt, so both add up
+            text = o.get("result") if o.get("result") is not None else st.last_text
+            st.final = f"{st.final}\n\n{text}" if st.final and text else (text or st.final)
+            # The CLI's own totals replace the per-call count
+            st.result_tokens += billed_tokens(o.get("usage") or {})
+            st.tokens = st.result_tokens
             st.is_error = bool(o.get("is_error")) or o.get("subtype") not in (None, "success")
             if st.is_error:
                 st.error = str(o.get("subtype") or "error")
