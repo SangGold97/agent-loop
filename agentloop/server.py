@@ -133,6 +133,11 @@ def create_app(api_url: str) -> FastAPI:
             if s["kind"] == "worker":
                 s["status"] = engine.worker_status(s)
         done, total = digest.checklist(files["plan.md"])
+        base, repo, branch = engine.goal_base(ws, gid), p / "repo", gitops.int_branch(gid)
+        remote = row["status"] == "done" and gitops.has_origin(repo)
+        # Merge into base is offered for an accepted goal in a repo without origin, until base holds the branch
+        merged = (row["status"] == "done" and not remote and gitops.branch_exists(repo, branch)
+                  and gitops.is_merged(repo, branch, base))
         # What each consultation turn sent back to the meta-work: the [Advice] text without its header line
         advice = {}
         for item in engine.db.q("SELECT payload FROM inbox WHERE ws=? AND goal=? AND kind='advice' ORDER BY id",
@@ -146,8 +151,7 @@ def create_app(api_url: str) -> FastAPI:
                 "sessions": sessions, "advice": advice,
                 "notes": engine.db.q("SELECT * FROM notes WHERE ws=? AND goal=? ORDER BY id DESC", ws, gid),
                 "verify": digest.verify_commands(files["goal.md"]), "meta_active": (ws, gid) in engine.meta_active,
-                "base": engine.goal_base(ws, gid),
-                "remote": row["status"] == "done" and gitops.has_origin(p / "repo")}
+                "base": base, "remote": remote, "merged": merged}
 
     @app.delete("/api/goals/{ws}/{gid}")
     async def delete_goal(ws: str, gid: str):
@@ -170,6 +174,8 @@ def create_app(api_url: str) -> FastAPI:
             return {"tags": await engine.accept(ws, gid)}
         elif action == "push":
             return await engine.push_goal(ws, gid)
+        elif action == "merge":
+            return await engine.merge_into_base(ws, gid)
         elif action == "reopen":
             await engine.reopen(ws, gid, b.get("text", ""))
         elif action == "notes":

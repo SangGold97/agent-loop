@@ -335,17 +335,43 @@ def test_push_opens_pr_and_never_touches_base(server, monkeypatch, tmp_path):
     client.post(f"/api/goals/pushing/{gid}/accept")
     view = client.get(f"/api/goals/pushing/{gid}").json()
     assert view["base"] == "main" and view["row"]["base"] == "main" and view["remote"] is False
-    assert "no remote" in push().json()["error"]
+    assert view["merged"] is False and "no remote" in push().json()["error"]
 
     remote = tmp_path / "origin.git"
     git("init", "-q", "--bare", str(remote), cwd=tmp_path)
     git("remote", "add", "origin", str(remote))
     main_before = git("rev-parse", "main")
+    # With origin the base moves only through PRs
+    assert "use push" in client.post(f"/api/goals/pushing/{gid}/merge", json={}).json()["error"]
     r = push().json()
     assert r["branch"] == f"loop/{gid}/integration" and r["base"] == "main" and r["pr"] is None and r["pr_error"]
     assert git("branch", "--format=%(refname:short)", cwd=remote) == f"loop/{gid}/integration"
     assert git("rev-parse", "main") == main_before and not (repo / "hello.py").exists()
     assert client.get(f"/api/goals/pushing/{gid}").json()["row"]["pushed"]
+
+
+def test_merge_into_base_without_origin(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "merging"})
+    repo = Path(engine.wsp("merging")) / "repo"
+    git = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True).stdout.strip()
+    gid = client.post("/api/workspaces/merging/goals", json={
+        "title": "Merge me", "spec": "Create hello.py", "goal": "- verify: `test -f hello.py`",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/merging/{gid}/start")
+    wait_for(lambda: client.get(f"/api/goals/merging/{gid}").json()["row"]["status"] == "awaiting_review")
+    merge = lambda: client.post(f"/api/goals/merging/{gid}/merge", json={})
+    assert "accept the goal" in merge().json()["error"]
+    client.post(f"/api/goals/merging/{gid}/accept")
+
+    # Uncommitted changes in repo/ refuse the merge; then main fast-forwards and the next goal starts from it
+    (repo / "README.md").write_text("dirty\n")
+    assert "uncommitted" in merge().json()["error"]
+    git("checkout", "--", "README.md")
+    r = merge().json()
+    assert r["changed"] and r["commit"] == git("rev-parse", f"loop/{gid}/integration") == git("rev-parse", "main")
+    assert (repo / "hello.py").exists() and client.get(f"/api/goals/merging/{gid}").json()["merged"] is True
+    assert merge().json()["changed"] is False
 
 
 def test_start_pulls_base_from_origin(server, tmp_path):

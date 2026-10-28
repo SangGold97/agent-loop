@@ -1513,6 +1513,14 @@ class Engine:
         self.publish("goal_status", ws=ws, goal=gid, status="done")
         return res
 
+    async def merge_into_base(self, ws: str, gid: str) -> dict:
+        """Merge an accepted goal into its base in repo/, for a repo without origin (with one, push opens a PR)."""
+        if self.goal_row(ws, gid)["status"] != "done":
+            raise AgentError("accept the goal before merging it")
+        res = await asyncio.to_thread(gitops.merge_into_base, self.wsp(ws), gid, self.goal_base(ws, gid))
+        self.publish("goal_status", ws=ws, goal=gid, status="done")
+        return res
+
     async def reopen(self, ws: str, gid: str, text: str, nid: int | None = None) -> None:
         """Back to running after review; the human's note (new, or a pending one approved) is delivered now."""
         m = self.goal_row(ws, gid)

@@ -276,6 +276,34 @@ def pull_base(ws: Path, base: str) -> None:
         raise RuntimeError(f"local {base} has commits that are not on origin/{base}; push or reconcile them first")
 
 
+def merge_into_base(ws: Path, gid: str, base: str) -> dict:
+    """Merge loop/<gid>/integration into base in repo/, as the human; only for a repo without origin.
+
+    With origin, base moves only through PRs and `pull_base`, so a local merge would make it diverge. A base that
+    is not checked out can only fast-forward; a checked-out one needs a clean tree, and a conflict is aborted."""
+    repo, branch = ws / "repo", int_branch(gid)
+    if has_origin(repo):
+        raise RuntimeError("repo/ has a remote 'origin'; use push & create PR")
+    if not branch_exists(repo, branch):
+        raise RuntimeError(f"{branch} no longer exists")
+    before = git(repo, "rev-parse", base)
+    if is_merged(repo, branch, base):
+        return {"base": base, "commit": before, "changed": False}
+    if current_branch(repo) != base:
+        if not is_merged(repo, base, branch):
+            raise RuntimeError(f"{base} cannot fast-forward to {branch}; check {base} out in repo/ first")
+        git(repo, "update-ref", f"refs/heads/{base}", branch, before)
+    else:
+        if git(repo, "status", "--porcelain", "--untracked-files=no"):
+            raise RuntimeError("repo/ has uncommitted changes; commit or stash them first")
+        try:
+            git(repo, "-c", "user.name=human", "-c", "user.email=human@agentloop", "merge", "--no-edit", branch)
+        except RuntimeError:
+            git(repo, "merge", "--abort", check=False)
+            raise
+    return {"base": base, "commit": git(repo, "rev-parse", base), "changed": True}
+
+
 def push_goal(ws: Path, gid: str, base: str, title: str, body: str) -> dict:
     """Push loop/<gid>/integration to origin and open a pull request into base with the gh CLI.
 

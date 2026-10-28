@@ -523,13 +523,18 @@ function renderGoalHead() {
     <div class="actions">${buttons.join('')}</div></div>`;
   $$('[data-act]', $('#m-head')).forEach(b => b.onclick = () => goalAction(b.dataset.act));
 }
-// Review actions sit at the right end of the tabs row; push lights up once the goal is accepted and repo/ has a remote
+// Review actions sit at the right end of the tabs row; once the goal is accepted, push lights up when repo/ has a
+// remote and merge into base when it has none
 function reviewButtons() {
   const M = S.goal, st = M.row.status, canPush = st === 'done' && M.remote;
+  const canMerge = st === 'done' && !M.remote && !M.merged, branch = `loop/${S.route.gid}/integration`;
   const why = st !== 'done' ? 'accept the goal first' : !M.remote ? "repo/ has no remote 'origin'"
-    : `push loop/${S.route.gid}/integration to origin and open a PR into ${M.base}` + (M.row.pushed ? ` (last pushed ${fmtTime(M.row.pushed)})` : '');
+    : `push ${branch} to origin and open a PR into ${M.base}` + (M.row.pushed ? ` (last pushed ${fmtTime(M.row.pushed)})` : '');
+  const whyMerge = st !== 'done' ? 'accept the goal first' : M.remote ? "repo/ has a remote 'origin'; use push & create PR"
+    : M.merged ? `${M.base} already holds ${branch}` : `merge ${branch} into ${M.base} in repo/`;
   return (st === 'awaiting_review' ? '<button class="btn small" data-act="reopen">reopen with note</button><button class="btn small primary" data-act="accept">accept</button>' : '')
     + (M.row.pr ? `<a class="btn small" href="${esc(M.row.pr)}" target="_blank" rel="noopener">PR ↗</a>` : '')
+    + `<button class="btn small ${canMerge ? 'primary' : ''}" data-act="merge" ${canMerge ? '' : 'disabled'} title="${esc(whyMerge)}">merge into base</button>`
     + `<button class="btn small ${canPush && !M.row.pushed ? 'primary' : ''}" data-act="push" ${canPush ? '' : 'disabled'} title="${esc(why)}">push &amp; create PR</button>`;
 }
 async function goalAction(action) {
@@ -537,6 +542,7 @@ async function goalAction(action) {
   if (action === 'reopen') return reopenModal();
   if (action === 'delete') return deleteGoal();
   if (action === 'push') return pushGoal();
+  if (action === 'merge') return mergeGoal();
   if (action === 'stop' && !window.confirm('Stop the goal? Running sessions are killed; their work is snapshotted.')) return;
   await act(async () => {
     const r = await api(`/api/goals/${ws}/${gid}/${action}`, { body: {} });
@@ -566,6 +572,16 @@ async function pushGoal() {
       const r = await api(`/api/goals/${ws}/${gid}/push`, { body: {} });
       if (r.pr) toast(`Pushed ${r.branch}; PR into ${r.base}: ${r.pr}`, 'ok', 9000);
       else toast(`Pushed ${r.branch}; no PR opened: ${r.pr_error}`, 'warn', 12000);
+    } finally { await refreshGoal(true); }
+  });
+}
+async function mergeGoal() {
+  const { ws, gid } = S.route;
+  if (!window.confirm(`Merge loop/${gid}/integration into ${S.goal.base} in repo/? New goals then start from it.`)) return;
+  await act(async () => {
+    try {
+      const r = await api(`/api/goals/${ws}/${gid}/merge`, { body: {} });
+      toast(`${r.base} is now at ${r.commit.slice(0, 7)}`, 'ok');
     } finally { await refreshGoal(true); }
   });
 }

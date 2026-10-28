@@ -48,9 +48,11 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   (or a meta-chat turn that changes the integration worktree) raises an alert.
 - Claude sessions connect only the MCP servers in `loop.yaml → mcp_servers` (URLs; default none).
 - Git hooks in the project repo block agent commits to protected branches and any agent push.
-- The platform never touches the base branch. Accepting a goal removes its worktrees and keeps
+- Agents never touch the base branch. Accepting a goal removes its worktrees and keeps
   `loop/<goal>/integration`; **push** on the goal page then pushes that branch to `origin` and opens a pull request
-  into the base branch with your `gh` login; merging the PR is yours. Starting a new goal first fast-forwards the
+  into the base branch with your `gh` login; merging the PR is yours. For a `repo/` without `origin`, **merge into
+  base** merges that branch into the base branch in `repo/` as you (fast-forward when it can; refused with
+  uncommitted changes or conflicts); with `origin` it is refused, so the base moves only through PRs. Starting a new goal first fast-forwards the
   local base branch from `origin` (the start is refused when it cannot fast-forward), so the goal builds on merged
   PRs. The base branch is `base_branch` from `goal.yaml`, or else the branch `repo/` had checked out when the goal
   started.
