@@ -203,8 +203,11 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("note").add_argument("text")
     for name in ("ls", "status", "budget", "infra"):
         sub.add_parser(name)
-    run = sub.add_parser("run", help="run a heavy, GPU or long job; its output shows for up to 90 s, then it "
-                         "runs on in the background and its result comes back as a new message")
+    run_help = ("run a heavy, GPU or long job; its output shows for up to 90 s, then it runs on in the "
+                "background and its result comes back as a new message")
+    run = sub.add_parser("run", help=run_help, description=(
+        f"{run_help[0].upper()}{run_help[1:]}. The job gets its own $TMPDIR, emptied when it ends; keep files it "
+        "reads or writes for later in the checkout and pass their paths."))
     run.add_argument("--ram", type=float, help=argparse.SUPPRESS)  # no longer granted; accepted from older habits
     run.add_argument("--vram", type=float, default=0, help="GB of GPU memory the job needs at its peak; "
                      "only a job given --vram sees a GPU")
