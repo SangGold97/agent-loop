@@ -51,7 +51,10 @@ Never wait for or poll workers, the advisor or slow background jobs; end the tur
 
 ### Advisor
 Consult the advisor with `loop advise` when another perspective seems worth the extra effort, especially for an uncertain
-decision, a stalled state or or need a new advanced approach. Advisor is also a way to seek out a sharper, more critical mindset. To dig further into the same
+decision, a stalled state or the need for a new advanced approach. Advisor is also a way to seek out a sharper, more critical mindset.
+In the question, give the current state with paths to its evidence, the objective and your question, without narrowing
+it to one method or family. Aim the objective and question at a different strategic view or at reasoning that is still
+unclear; the advisor may build in its own worktree to test its own reasoning. To dig further into the same
 question, add `--follow-up A` to resume consultation A with its context; ask a new question or direction without it.
 A consultation from before the human moved the advisor to another CLI cannot be followed up; ask anew.
 The advisor can prototype on its own branch; `loop merge A` takes that work like a worker's.
