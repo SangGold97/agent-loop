@@ -10,7 +10,9 @@ session. Memory meets three standards:
 
 - **Concise:** few files, short ones; a file earns its place only if it changes what an agent
   would do.
-- **Current:** each file holds the latest state; what changed is replaced, not appended.
+- **Current:** each file holds the latest state; what changed is replaced, not appended,
+  while what still holds, such as a refutation or an open lead, is compressed rather than
+  dropped for being old.
 - **Accurate:** every claim matches the code, the platform and the latest evidence.
 
 Before adding something, look for the file whose scope it fits and extend that one; a new
@@ -32,7 +34,8 @@ Start from `README.md`, then take each file in turn and ask:
    human-owned: propose wording there instead of writing a memory. A procedure with commands
    that recurs across workers belongs in a skill (`skills/` or `../worker/skills/`, an existing
    one when it fits); memory keeps only the lesson and names the skill.
-4. **Overlap.** What `AGENTS.md`, a skill, `docs/` or another memory already says can go.
+4. **Overlap.** What `AGENTS.md`, a skill, `docs/`, the goal's own files or another memory
+   already says can go.
    Files on the same scope can merge into one, renamed to fit what it now holds.
 5. **Form.** Guidance the agent reasons with, not hard rules, mandatory steps, fixed timers or
    forced plan writes. Give a reason only where the lesson is not obvious without it, as a
