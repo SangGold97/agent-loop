@@ -1839,6 +1839,14 @@ class Engine:
             if branch and gitops.branch_exists(repo, branch) and not gitops.is_merged(repo, branch,
                                                                                      gitops.int_branch(gid)):
                 text += f"\n[System] Its branch {branch} holds work the integration branch lacks; `loop merge {sid}` takes it."
+            # A job that ended during the turn joins this advice: resuming the consultation for it would mostly
+            # repeat advice that already read its output. Jobs still running resume it when they end
+            if ended := self.db.q("SELECT id, result FROM jobs WHERE session=? AND status='done' AND reported=0 "
+                                  "ORDER BY ended", sid):
+                self.db.x(f"UPDATE jobs SET reported=1 WHERE id IN ({','.join('?' * len(ended))})",
+                          *(j["id"] for j in ended))
+                text += ("\n[System] Ended during this turn (follow up if the advice does not cover it):\n"
+                         + "\n".join(j["result"] for j in ended))
             if jobs :=self.db.q("SELECT id FROM jobs WHERE session=? AND status='running' ORDER BY started", sid):
                 ids = ", ".join(j["id"] for j in jobs)
                 text += (f"\n[System] Job{'s' * (len(jobs) > 1)} {ids} {'are' if len(jobs) > 1 else 'is'} still "

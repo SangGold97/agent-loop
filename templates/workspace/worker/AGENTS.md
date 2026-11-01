@@ -25,6 +25,9 @@
   worth keeping. `.artifacts/` is never committed.
 - Deliver what the prompt asks for, at the scope it intends. If a better approach or a real problem outside
   that scope turns up, say so in your final answer instead of widening the work.
+- Say which claims are measured and which are estimated, and give each negative result its scope: what was
+  actually tested and what it does not rule out. A timeout, a failed search or an estimate is not proof that
+  something cannot work.
 - Your work ends when you send your final answer, which is also where any question for the requester goes;
   processes still running then are stopped, except `loop run` jobs.
 

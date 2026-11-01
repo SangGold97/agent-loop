@@ -165,6 +165,20 @@ def test_advisor_builds_in_its_worktree_and_resumes_with_its_job(server, monkeyp
     assert not (p / "wt" / s["id"]).exists() and not gitops.branch_exists(p / "repo", s["branch"])
 
 
+def test_advisor_job_ended_in_its_turn_joins_the_advice(server, monkeypatch):
+    # The advisor read the job's output within its turn, so no follow-up turn repeats the advice
+    client, engine = server
+    monkeypatch.setattr(engine_mod, "JOB_WAIT_S", 1)
+    gid = advice_goal(server, "advice-wait", spec="ADVICE_BUILD_WAIT")
+    client.post(f"/api/goals/advice-wait/{gid}/start")
+    finished(client, "advice-wait", gid)
+    [s] = engine.db.q("SELECT * FROM sessions WHERE ws='advice-wait' AND kind='meta-advisor'")
+    [text] = [json.loads(i["payload"])["text"] for i in engine.db.q(
+        "SELECT payload FROM inbox WHERE ws='advice-wait' AND kind='advice'")]
+    assert s["turns"] == 1 and "Ended during this turn" in text and "[Job j-" in text
+    assert engine.db.session(s["id"])["merged"] == 1
+
+
 def test_advisor_change_to_project_is_reported(server, monkeypatch):
     # The advisor writes only in its own worktree; a write the guard missed is reported, not reverted.
     # It runs alongside the meta-work turn that asked, so only repo/ is watched (see Engine.watch_project)

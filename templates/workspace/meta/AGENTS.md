@@ -33,8 +33,9 @@ Never wait for or poll workers, the advisor or slow background jobs; end the tur
 - `loop spawn --agent claude|codex|agy --role R <<'EOF' ...prompt... EOF` starts a new worker
   (fresh context, own worktree and branch). You choose the CLI and name the role; the human fixed model and effort.
 - `loop send W <<'EOF' ... EOF` continues an idle worker, keeping its context
-- `loop retire W` removes a worker's worktree to free disk once its line of work is over; its branch, log and
-  artifacts stay, but it can no longer be sent. Remove worktrees this way, not with `git worktree remove`.
+- `loop retire W|A` removes a worker's or advisor's worktree to free disk once its line of work is over; its
+  branch, log and artifacts stay. A retired worker can no longer be sent. Remove worktrees this way, not with
+  `git worktree remove`.
 - `loop advise [--follow-up A] <<'EOF' ...question... EOF` asks the advisor; its reply arrives as an `[Advice]` event
 - `loop ls`, `loop show W [--turn N] [--full] [--log]` (`--log`: the commands a worker ran), `loop stop W|J`,
   `loop merge W|A`, `loop infra`, `loop budget`, `loop run [--vram GB] -- CMD`
@@ -58,6 +59,9 @@ unclear; the advisor may build in its own worktree to test its own reasoning. To
 question, add `--follow-up A` to resume consultation A with its context; ask a new question or direction without it.
 A consultation from before the human moved the advisor to another CLI cannot be followed up; ask anew.
 The advisor can prototype on its own branch; `loop merge A` takes that work like a worker's.
+Before closing short of success, or dropping a direction on reasoning rather than a measurement, ask the advisor
+to challenge that conclusion: a wrong negative is the most expensive mistake and the hardest to see from inside
+your own plan.
 
 ### Integration
 Workers branch from `loop/<goal>/integration`. Make your own changes in its worktree; the platform commits
@@ -116,7 +120,11 @@ reassess your earlier advice against what has happened since.
 
 ## Improving the harness (for meta-work and meta-chat)
 
-When a pattern repeats, you may improve `memory/`, `docs/`, `skills/` here and in `../worker/`. Memory keeps
+Keep long-term memory in step with what the goal has learned. When the work drifts from it (evidence refutes a
+stored claim, a stored insight proves wrong, or a lesson emerges that later goals would act on), curate it then
+with the memory-curation skill and continue from the corrected version; drift is the trigger, not each turn.
+In meta-work, also delete the outputs agents left in `data/` that no running work or open lead still needs.
+When a pattern repeats, you may also improve `docs/` and `skills/` here and in `../worker/`. Memory keeps
 lessons and their reasons rather than ready-made prompt text, so later goals can judge what applies.
 Keep `../worker/` generic engineering guidance: never mention agent-loop, meta-agents or this platform there.
 Never edit `hooks.json`, `loop.yaml`, `spec.md`, `goal.md` or `goal.yaml`.

@@ -342,18 +342,22 @@ CLAUDE_MEMORY_NAMES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/CLA
 
 
 def claude_settings_doc(ws: Path, layer: str) -> dict:
-    """The layer's hooks.json, claudeMdExcludes for every directory above the agent's own cwd, and the MCP allowlist.
+    """The layer's hooks.json, claudeMdExcludes for every directory above the agent's own cwd, the MCP allowlist
+    and no auto memory.
 
     Claude Code walks up to / for CLAUDE.md/AGENTS.md, and workspaces usually live inside the platform repo,
     so without this an agent would read the platform's developer docs. Only meta/ and the worktree count:
     the workspace root, wt/ and all their parents are excluded. Each resumed turn re-adds every connected MCP
-    server's instructions to the conversation, so only loop.yaml's mcp_servers connect."""
+    server's instructions to the conversation, so only loop.yaml's mcp_servers connect. Auto memory is kept per
+    git repo, which every worktree of repo/ shares: it would hand each new worker its predecessors' unreviewed
+    verdicts, outside the workspace's own memory/."""
     doc = json.loads((ws / layer / "hooks.json").read_text())
     dirs = {ws / "wt"} if layer == "worker" else set()
     for base in {ws.absolute(), ws.resolve()}:
         dirs |= {base, *base.parents}
     doc["claudeMdExcludes"] = sorted(str(d / name) for d in dirs for name in CLAUDE_MEMORY_NAMES)
     doc["allowedMcpServers"] = [{"serverUrl": url} for url in workspace_config(ws)["mcp_servers"] or []]
+    doc["autoMemoryEnabled"] = False
     return doc
 
 

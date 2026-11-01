@@ -578,6 +578,7 @@ def test_claude_settings_exclude_instructions_above_the_agent(tmp_path):
         assert str(ws / "CLAUDE.md") in doc["claudeMdExcludes"]
         assert not any(x.startswith((str(ws / "meta"), str(ws / "wt" / "w-1"))) for x in doc["claudeMdExcludes"])
     assert str(ws / "wt" / "AGENTS.md") in worker["claudeMdExcludes"]
+    assert worker["autoMemoryEnabled"] is False and meta["autoMemoryEnabled"] is False
     assert workspace.claude_settings(ws, "worker").read_text().startswith("{")
     # No MCP server unless loop.yaml allows it, claude.ai connectors included
     assert meta["allowedMcpServers"] == []

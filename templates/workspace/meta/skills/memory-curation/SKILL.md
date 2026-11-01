@@ -1,6 +1,6 @@
 ---
 name: memory-curation
-description: Review, trim, merge and update the workspace's long-term memory (meta/memory, worker/memory) so each file is current, accurate, non-overlapping and worth reading - must be used whenever adding or revising memory, however small the change, and also after a goal closes or when the human asks to review memory
+description: Review, trim, merge and update the workspace's long-term memory (meta/memory, worker/memory) so each file is current, accurate, non-overlapping and worth reading - must be used whenever adding or revising memory, however small the change - when evidence drifts from what memory holds (a stored claim refuted, an insight found wrong, a new durable lesson) or when the human asks to review memory
 ---
 
 # Curating long-term memory

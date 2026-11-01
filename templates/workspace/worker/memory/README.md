@@ -1,3 +1,3 @@
 # Worker memory
 
-One short file per durable lesson; list each file here with a one-line hook.
+One file per topic; list each file here with a one-line hook.

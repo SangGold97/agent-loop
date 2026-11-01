@@ -51,6 +51,9 @@ def main():
                                  cwd=own, capture_output=True, text=True)
             assert "is running in the background" in out.stdout + out.stderr, out
             text = "Prototype is being scored."
+            if "ADVICE_BUILD_WAIT" in _spec(gdir):  # works on until the job has ended within this turn
+                time.sleep(4)
+                text = "Prototype scored 42; merge it."
         emit({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
         emit({"type": "result", "subtype": "success", "result": text, "session_id": sid})
         return
@@ -160,7 +163,7 @@ def main():
             # One consultation; its job-woken follow-up brings the prototype, which the meta-work merges
             if "[Kickoff]" in prompt:
                 text = loop("advise", stdin="Prototype and score the idea.")
-            elif m := re.search(r"\[Advice\] (ma-\w+) · turn 2", prompt):
+            elif m := re.search(r"\[Advice\] (ma-\w+)(?: · turn 2)? · completed\nPrototype scored 42", prompt):
                 text = loop("merge", m.group(1))
                 text += "\n" + loop("done", "--status", "success", stdin="Prototype merged.")
             else:

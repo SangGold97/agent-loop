@@ -29,7 +29,8 @@ sessions, merges their work and closes the goal; the human steers from the web U
   names another CLI (`Engine.check_agent_current`, which also refuses to resume a worker of a disabled CLI). Consultations
   share `max_meta_turns` and take no worker slot. An advisor builds in its own worktree `wt/<sid>` on
   `loop/<goal>/advisor-<sid>` (`Engine.advisor_tree`, snapshot after each turn, `loop merge`/`retire` by the
-  meta-work) and may `loop run`, whose result resumes the consultation; elsewhere it is read-only like a
+  meta-work) and may `loop run`: a job still running when its turn ends resumes the consultation, one that
+  ended during the turn joins that turn's advice; elsewhere it is read-only like a
   meta-chat (guard, `loop` API without steering commands, change report after the turn).
 - **Worker turn**: runs in its own worktree on `loop/<goal>/<role>-<sid>`, is snapshot-committed, and its final
   reply becomes a digest (`digest.py`) pushed to the inbox. `loop merge` merges into
@@ -49,7 +50,7 @@ sessions, merges their work and closes the goal; the human steers from the web U
   (`{{PY}}` is replaced by the venv Python); agy, which has no per-session settings, gets it from the plugin
   `workspace.agy_plugin` writes to `~/.gemini/config/plugins/agentloop/`. Claude gets it through `workspace.claude_settings`, which rebuilds
   `.loop/claude/<layer>-settings.json` each turn from `hooks.json` plus `claudeMdExcludes`, so agents never read
-  instruction files above their own directory. After every turn `workspace.enforce_protected` reverts edits to
+  instruction files above their own directory, and with auto memory off, so `memory/` is their only long-term memory. After every turn `workspace.enforce_protected` reverts edits to
   human-owned files.
 - **Config layering** (`config.py`): `DEFAULTS` < workspace `loop.yaml` < goal `goal.yaml` (only `GOAL_KEYS`).
 - **Prompts sent to agents** live in code as well as templates: `Engine.kickoff_text`, `mode_text`,

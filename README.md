@@ -58,7 +58,8 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   started.
 - Agents read only their own instructions: Claude sessions get `--settings` from `.loop/claude/<layer>-settings.json`
   (the layer's `hooks.json` plus `claudeMdExcludes` for every directory above `meta/` or the worktree), so a
-  `CLAUDE.md`/`AGENTS.md` in the platform repo or another parent never reaches them. Codex workers stop at the
+  `CLAUDE.md`/`AGENTS.md` in the platform repo or another parent never reaches them. Their auto memory is off
+  (it is shared by every worktree of `repo/`), so the workspace's `memory/` is the only long-term memory. Codex workers stop at the
   worktree's git root, and Codex meta sessions run with `project_root_markers=[]` so they read only `meta/`.
   agy sessions run agy's default agent, with your own agy skills, plugins and MCP servers, and stop at the git root
   as Codex does; their layer's instructions (mode text, `worker/AGENTS.md` and an index of `worker/skills/`) lead
@@ -124,8 +125,9 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   stopped on it.
 - Events handed to a meta-work turn stay "in flight" until it completes; a crash, restart or stop puts them back.
 - The advisor builds only in its own worktree: the guard blocks its edits elsewhere in the workspace except
-  `data/` and its turn's `$TMPDIR`, its `loop` token permits read commands and `loop run` (a job's result
-  resumes the consultation, outside the worker concurrency), and a turn that still changes `repo/` or the
+  `data/` and its turn's `$TMPDIR`, its `loop` token permits read commands and `loop run` (a job still running
+  when the turn ends resumes the consultation with its result, outside the worker concurrency; one that ended
+  during the turn joins that turn's advice), and a turn that still changes `repo/` or the
   integration worktree raises an alert. The meta-work takes its branch with `loop merge`. A stopped or interrupted consultation reports its status
   back to the inbox and is never rerun by the platform; queued requests survive a server restart. A quota-refused consultation is refunded from the shared meta turn budget and asked again at the reset.
 - The API accepts writes only from the UI's own origin or non-browser clients. CLI updates (Agent CLIs page) are

@@ -17,11 +17,12 @@ This workspace is run by agent-loop. The workspace root is `$LOOP_WS`; paths bel
 | `wt/<sid>/` | One git worktree per worker, branch `loop/<goal>/<role>-<sid>`; `.artifacts/` is git-excluded; removed by `loop retire` or when the goal is accepted, the branch kept | worker |
 | `wt/<goal>/` | Integration branch `loop/<goal>/integration` | meta-work (committed by the platform), platform (`loop merge`) |
 | `.venv/` | Python virtualenv shared by every session of the workspace | all sessions (packages only) |
-| `data/` | Large shared data (datasets, checkpoints) | human, workers that fetch data |
+| `data/` | Large shared data (datasets, checkpoints) | human, workers that fetch data; meta-work prunes agent outputs no longer needed |
 | `.loop/` | Runtime logs and state | platform |
 
 Memory: `meta/memory/` holds cross-goal lessons for meta-agents, `worker/memory/` for workers.
-Keep one short file per lesson and list it in that folder's `README.md`.
+Keep one file per scope (a cross-goal lesson or a task ledger for meta, a topic for workers) and list it in
+that folder's `README.md`.
 
 The advisor can prototype in its own worktree and `loop run` jobs, and returns advice through the inbox; it does
 not write other project or harness files.
