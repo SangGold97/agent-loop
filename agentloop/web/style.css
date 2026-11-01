@@ -274,7 +274,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .cfg .k { color: var(--faint); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
 .cfg-agents > .hint { margin: 4px 0 0; }
 .cfg-side { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 12px; align-items: center; }
-.cfg-side { align-self: stretch; grid-template-rows: repeat(4, auto) 1fr; }
+.cfg-side { align-self: stretch; grid-template-rows: repeat(5, auto) 1fr; }
 .cfg-foot { align-self: end; flex-wrap: nowrap; }
 .cfg-foot .hint { margin: 0; }
 .agent-row { display: grid; grid-template-columns: 110px 90px minmax(160px, 1.4fr) 110px minmax(90px, 1fr); gap: 8px; align-items: center; margin: 3px 0; }

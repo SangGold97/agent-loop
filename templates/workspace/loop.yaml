@@ -10,6 +10,7 @@ defaults:
     effort: high
     autocompact: null         # tokens before auto-compaction (null = CLI default)
     rotate_at_tokens: null    # start a fresh meta-work session when context exceeds this
+    chrome: false             # claude only: give the meta-work Claude in Chrome (the human's browser)
   meta_advisor:               # consulted by the meta-work through loop advise
     agent: claude
     model: opus

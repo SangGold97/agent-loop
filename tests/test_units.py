@@ -33,6 +33,9 @@ def test_claude_argv_worker(tmp_path):
     assert a[:2] == ["claude", "-p"] and "--dangerously-skip-permissions" in a
     assert a[a.index("--resume") + 1] == "abc" and a[a.index("--autocompact") + 1] == "300000"
     assert "--append-system-prompt-file" in a and "--append-system-prompt" not in a
+    assert "--chrome" not in a
+    s.chrome = True
+    assert "--chrome" in ClaudeAdapter().argv(s)
 
 
 def test_codex_argv_meta_resume(tmp_path):

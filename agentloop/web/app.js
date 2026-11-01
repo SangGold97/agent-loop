@@ -233,6 +233,8 @@ function wireAgentRows(root, onChange) {
       const f = e.target.dataset.f;
       if (f === 'agent') {
         row.dataset.agent = e.target.value;
+        if (row.dataset.key === 'meta_work')
+          $$('.chrome-opt', root).forEach(el => { el.style.visibility = e.target.value === 'claude' ? '' : 'hidden'; });
         $('[data-f=model]', row).innerHTML = modelOptions(e.target.value, null);
         const ac = $('[data-f=autocompact]', row);
         if (ac) {
@@ -258,6 +260,10 @@ function readAgentRow(row) {
   if ($('[data-f=enabled]', row)) out.enabled = $('[data-f=enabled]', row).checked;
   return out;
 }
+// Claude in Chrome acts in the human's own browser with their sign-ins: off unless ticked, Claude meta-work only
+const CHROME_TIP = 'Claude meta-work only: it gets the Claude in Chrome tools and acts in your Chrome with your sign-ins. Workers, advisor and meta-chat never get them.';
+// Kept in the layout (visibility, not display) so the side grid keeps its rows
+const chromeHidden = agent => (agent || 'claude') === 'claude' ? '' : 'style="visibility:hidden"';
 function configForm(conf, footer = '') {
   const b = conf.budget || {}, mw = conf.meta_work || {}, wk = conf.workers || {};
   const num = (k, v, title, tip) => `<label class="f" title="${tip}">${title}<input type="number" min="0" step="1" data-b="${k}" value="${v ?? ''}" placeholder="∞"></label>`;
@@ -272,6 +278,8 @@ function configForm(conf, footer = '') {
     <div class="cfg-side">
       <div class="k" title="start a fresh meta-work session when its context exceeds this many tokens">rotate at</div>
       <input type="text" data-rotate value="${esc(mw.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)" title="start a fresh meta-work session when its context exceeds this many tokens">
+      <div class="k chrome-opt" title="${CHROME_TIP}" ${chromeHidden(mw.agent)}>chrome</div>
+      <label class="inline chrome-opt" title="${CHROME_TIP}" ${chromeHidden(mw.agent)}><input type="checkbox" data-chrome ${mw.chrome ? 'checked' : ''}> meta-work uses Claude in Chrome</label>
       <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'workers', 'concurrent workers')}
         ${num('max_worker_turns', b.max_worker_turns, 'worker turns', 'worker turns in total')}${num('max_meta_turns', b.max_meta_turns, 'meta turns', 'meta-work + advisor turns in total')}</div>
       <div class="k">language</div><select data-lang title="for plan, report, advice and chat replies to you; meta-work and workers talk to each other in English">${['English', 'Vietnamese'].concat(
@@ -286,6 +294,7 @@ function readConfigForm(root) {
   const rows = $$('.agent-row[data-key]', root);
   const metaWork = readAgentRow(rows.find(r => r.dataset.key === 'meta_work'));
   metaWork.rotate_at_tokens = $('[data-rotate]', root).value.trim() || null;
+  metaWork.chrome = $('[data-chrome]', root).checked && metaWork.agent === 'claude';
   const workers = {};
   rows.filter(r => r.dataset.key.startsWith('worker:')).forEach(r => {
     const { agent, ...conf } = readAgentRow(r);

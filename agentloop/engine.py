@@ -1156,6 +1156,8 @@ class Engine:
                 spec.codex_home = workspace.codex_home(p, "meta")
             elif sess["agent"] != "agy":  # agy reads meta/AGENTS.md and meta/.agents/skills from its cwd
                 spec.settings_file, spec.add_dirs = workspace.claude_settings(p, "meta"), [p]
+                # Only the meta-work may drive the human's Chrome, and only when the goal says so
+                spec.chrome = sess["kind"] == "meta-work" and bool(cfg["goal"]["meta_work"].get("chrome"))
         if sess["agent"] == "codex":
             spec.last_message_file = self.logs(ws, sid)[0].with_name(f"{sid}.t{n}.last.txt")
         elif sess["agent"] == "agy":

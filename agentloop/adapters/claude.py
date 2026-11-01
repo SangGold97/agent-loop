@@ -57,6 +57,8 @@ class ClaudeAdapter(Adapter):
             a += ["--append-system-prompt", s.system_text]
         for d in s.add_dirs:
             a += ["--add-dir", str(d)]
+        if s.chrome:
+            a.append("--chrome")
         return a
 
     def parse(self, o: dict, st: ParseState) -> list[dict]:

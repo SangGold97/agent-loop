@@ -32,6 +32,7 @@ class RunSpec:
     system_text: str | None = None                            # mode instructions (agy: worker instructions too)
     codex_home: Path | None = None
     last_message_file: Path | None = None
+    chrome: bool = False                                      # Claude: Claude in Chrome tools
 
 
 @dataclass
