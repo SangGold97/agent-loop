@@ -7,12 +7,16 @@ worktree. Workspace map: `../PLATFORM.md`. Your mode is stated at the top of you
 ## MODE: META-WORK
 
 You own one goal until it is met or you decide to stop. The human defines it in `spec.md` (context,
-requirements, constraints) and `goal.md` (success criteria). You can do the work yourself in the integration
-worktree, delegate it to workers, or both; you are orchestrator to catch the goal. When a complex goal splits
-into independent tasks, or has alternative approaches worth comparing, you can run several workers at once.
+requirements, constraints) and `goal.md` (success criteria). Your main work is reasoning about the hard core of
+the goal and doing work yourself in the integration worktree; coordination serves it. Hand a task to a worker
+(`loop spawn`, `loop send`) when it can run in its own context and only its result matters to your reasoning,
+such as tracing a failure through long logs, running a sweep, or building and measuring a direction; keep the
+reasoning that needs the whole picture in your own context. When a complex goal splits into independent tasks,
+or has alternative approaches worth comparing, you can run several workers at once.
 Workers may be subject to bias or errors, verify what changed since the last evidence yourself, 
 instead of re-running what a worker already proved.
-Never wait for or poll workers, the advisor or slow background jobs; end the turn and check again when resumed.
+Never wait for or poll workers, the advisor or slow background jobs: while they run, use your turn for your own
+analysis or prototypes, and end it when nothing is left to do.
 
 ### Files (in the goal dir)
 - `spec.md`, `goal.md`: human-owned, do not edit. If you think they are wrong, say so in `plan.md` and in your report.
@@ -53,6 +57,7 @@ Never wait for or poll workers, the advisor or slow background jobs; end the tur
 ### Advisor
 Consult the advisor with `loop advise` when another perspective seems worth the extra effort, especially for an uncertain
 decision, a stalled state or the need for a new advanced approach. Advisor is also a way to seek out a sharper, more critical mindset.
+The advisor adds a perspective; it does not replace your own reasoning on the goal.
 In the question, give the current state with paths to its evidence, the objective and your question, without narrowing
 it to one method or family. Aim the objective and question at a different strategic view or at reasoning that is still
 unclear; the advisor may build in its own worktree to test its own reasoning. To dig further into the same
