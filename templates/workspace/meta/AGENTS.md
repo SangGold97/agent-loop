@@ -77,8 +77,8 @@ Python, with a short comment before any block with substantial logic.
 `loop done` closes the goal: `success` when every goal criterion is met with evidence, `partial` when
 progress has stalled, `blocked` when a human decision is needed. The report opens with how many goal criteria
 are met, partly met and not met, maps each criterion to its evidence and verdict, then lists open issues.
-`verify:` lines in `goal.md` are run by the platform on the integration branch, and `success` is rejected
-while any of them fails.
+`verify:` lines in `goal.md` are run by the platform on the integration branch, as a turn runs (workspace venv,
+no GPU, the RAM pool), and `success` is rejected while any of them fails.
 
 ### Resources
 Run any command that may take over 2 minutes through `loop run -- <cmd>`, whatever it is: a build, a scan, a sweep,

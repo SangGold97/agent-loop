@@ -503,6 +503,29 @@ def test_verify_that_edits_tracked_files_is_rejected_and_undone(server):
     assert "changed tracked files" in final
 
 
+def test_verify_runs_like_a_turn(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "vrun"})
+    ws = Path(engine.wsp("vrun"))
+    # Each verify passes only in a turn's environment: the workspace venv, no GPU, a TMPDIR of its own
+    # under the scratch root; the last one leaves a process behind, out of its group where systemd can reach it,
+    # and waits until that process has left the group
+    daemon = (f"""{'setsid ' if systemd_available() else ''}sh -c 'touch "$TMPDIR/up"; exec sleep 3141' """
+              """>/dev/null 2>&1 & while [ ! -e "$TMPDIR/up" ]; do sleep 0.05; done""")
+    checks = [f'test "$(command -v python)" = "{ws}/.venv/bin/python"',
+              'test "${CUDA_VISIBLE_DEVICES-unset}" = ""',
+              f'case "$TMPDIR" in {scratch_root()}/*) test -d "$TMPDIR";; *) exit 1;; esac', daemon]
+    goal = "- hello.py exists\n" + "".join(f"- verify: `{c}`\n" for c in checks)
+    gid = client.post("/api/workspaces/vrun/goals", json={
+        "title": "Verify env", "spec": "Create hello.py", "goal": goal, "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/vrun/{gid}/start")
+    view = wait_for(lambda: (v := client.get(f"/api/goals/vrun/{gid}").json())["row"]["status"]
+                    == "awaiting_review" and v)
+    assert view["row"]["outcome"] == "success", view["files"]["report.md"]
+    assert not [p for p in psutil.process_iter(["cmdline"]) if p.info["cmdline"] == ["sleep", "3141"]]
+    assert not list(scratch_root().glob("*-verify-*"))
+
+
 def test_failed_checkpoint_blocks_spawn_and_done(server):
     client, engine = server
     client.post("/api/workspaces", json={"name": "offbranch"})
@@ -680,6 +703,9 @@ def test_cli_usage_limits_are_kept_shown_and_warned(server, monkeypatch):
             engine.set_quota("fake", windows)
         warned = engine.db.q("SELECT deferred FROM inbox WHERE ws='usage' AND payload LIKE '%fake has used 95%'")
         assert [r["deferred"] for r in warned] == [1, 1]
+        # A CLI the goal's config gives no role (agy is disabled for its workers) is not its concern
+        engine.set_quota("agy", high)
+        assert not engine.db.q("SELECT id FROM inbox WHERE ws='usage' AND payload LIKE '%agy has used%'")
         # Low disk wakes the meta-work once, and again only after free disk has recovered
         kicked = []
         monkeypatch.setattr(engine, "kick", lambda ws, g: kicked.append(ws))
@@ -690,6 +716,8 @@ def test_cli_usage_limits_are_kept_shown_and_warned(server, monkeypatch):
     finally:
         engine.db.x("UPDATE goals SET status='awaiting_review' WHERE ws='usage' AND id=?", gid)
         engine.db.x("UPDATE inbox SET consumed=1 WHERE ws='usage'")
+        engine.quotas.pop("agy", None)
+        engine.quota_warned.discard(("agy", "5h"))
         engine.set_quota("fake", [{"name": "5h", "used": 0.25, "resets_at": time.time() + 3600}])
         engine.check_disk(100)
 
@@ -806,7 +834,7 @@ def test_newest_heavy_process_is_stopped_when_the_pool_is_full(server, monkeypat
         time.sleep(1.5)
         tool = subprocess.Popen([sys.executable, "-c", "import time; x = bytearray(60 * 2**20); time.sleep(60)"])
         wait_for(lambda: psutil.Process(tool.pid).memory_info().rss > 50 * 2**20)
-        engine.turn_mem[worker["id"]] = {"peak": 0.0, "oom": 0, "over": [], "tools": {tool.pid}}
+        engine.turn_mem[worker["id"]] = {"oom": 0, "over": [], "tools": {tool.pid}}
         # Below RAM_KILL nothing is stopped
         monkeypatch.setattr(engine, "ram_share", lambda: 0.92)
         engine.police_ram()

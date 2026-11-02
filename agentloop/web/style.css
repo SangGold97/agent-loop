@@ -279,7 +279,10 @@ table.t { width: 100%; border-collapse: collapse; }
 .cfg-foot .hint { margin: 0; }
 .agent-row { display: grid; grid-template-columns: 110px 90px minmax(160px, 1.4fr) 110px minmax(90px, 1fr); gap: 8px; align-items: center; margin: 3px 0; }
 .agent-row .name { color: var(--muted); }
-.agent-row.off select, .agent-row.off input[type=text] { opacity: .4; }
+.agent-row.off select, .agent-row.off input[type=text], .agent-row.off .tok { opacity: .4; }
+.tok { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.tok input { flex: 1; }
+.tok .unit { color: var(--faint); font-size: 12px; white-space: nowrap; }
 .budget-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .report { border-color: var(--warn); }
 .report > .lt { color: var(--warn); }

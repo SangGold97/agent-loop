@@ -174,10 +174,16 @@ class Engine:
         self.vendor_limits.pop(agent, None)
         return None
 
+    def goal_agents(self, ws: str, gid: str) -> set[str]:
+        """The CLIs the goal's config gives a role: its meta-work, its advisor and its enabled workers."""
+        mc = goal_config(self.wsp(ws), gid)["goal"]
+        return {mc["meta_work"]["agent"], mc["meta_advisor"]["agent"],
+                *(a for a, w in mc["workers"].items() if w.get("enabled", True))}
+
     def set_quota(self, agent: str, windows: list[dict], ts: float = 0.0) -> None:
         """Keep a CLI's latest usage-limit windows, reported at `ts` (0: now). A report older than the kept one is
         dropped; windows it leaves out keep their last reading. When one passes QUOTA_WARN, every running goal
-        hears it once (deferred, so no meta turn is spent on it) and can move new workers to another CLI before
+        whose config uses that CLI hears it once (deferred, so no meta turn is spent on it) and can move new workers to another CLI before
         this one refuses them; it hears again only after the window has dropped below QUOTA_WARN."""
         ts, old = ts or time.time(), self.quotas.get(agent) or {}
         if ts < old.get("ts", 0):
@@ -199,6 +205,8 @@ class Engine:
             text = (f"{agent} has used {w['used']:.0%} of its {w['name']} usage window{reset}; prefer another CLI "
                     "for new workers and sends until then.")
             for g in self.db.q("SELECT ws, id FROM goals WHERE status='running'"):
+                if agent not in self.goal_agents(g["ws"], g["id"]):
+                    continue
                 self.db.push_inbox(g["ws"], g["id"], "system",
                                    {"text": f"[System] {text}", "until": w.get("resets_at")}, deferred=True)
                 self.publish("alert", ws=g["ws"], goal=g["id"], text=text)
@@ -521,7 +529,7 @@ class Engine:
                 for key, (proc, _) in list(self.runner.procs.items()):
                     s = self.db.session(key) or {"kind": "smoke", "ws": "", "goal": "", "role": ""}
                     # The turn's scope counts detached jobs too; without systemd only the CLI's process tree
-                    mem = self.turn_mem.get(key, {"peak": 0.0})  # CLI smoke runs keep no record
+                    mem = self.turn_mem.get(key, {})  # CLI smoke runs keep no record
                     cg = mem.get("cgroup") or cgroup_dir(proc.pid)
                     # Until systemd-run has moved the CLI into its scope, the cgroup is still the server's
                     used = scope_memory(cg) if cg and cg.name.startswith(unit_prefix()) else None
@@ -529,7 +537,6 @@ class Engine:
                         mem["cgroup"], mem["oom"] = cg, used[1]
                     rss = round((used[0] if used else tree_rss(proc.pid)) / 2**30, 2)
                     jobs = sum(g["rss_gb"] for g in self.grants.values() if g["sid"] == key and g["unit"])
-                    mem["peak"] = max(mem["peak"], rss + jobs)
                     snap["sessions"].append({"id": key, "kind": s["kind"], "ws": s["ws"], "goal": s["goal"],
                                              "role": s["role"], "agent": s.get("agent") or "",
                                              "rss_gb": round(rss + jobs, 2),
@@ -935,13 +942,10 @@ class Engine:
 
     @staticmethod
     def mem_note(mem: dict) -> str:
-        """What the meta-work should know about a finished turn's memory: its peak when it was large, and any
-        process the kernel or `loop run` killed for memory."""
-        parts = [f"peak {mem['peak']:.1f} GB"] if mem.get("peak", 0) >= 1 else []
-        if mem.get("oom"):
-            parts.append(f"{mem['oom']} process(es) killed by the kernel for lack of memory")
-        parts += mem.get("over", [])
-        return "; ".join(parts)
+        """What the meta-work should know about a finished turn's memory: the processes the kernel or the
+        platform killed for it, so a failure is explained; empty (no note) when nothing was."""
+        kernel = [f"{mem['oom']} process(es) killed by the kernel for lack of memory"] if mem.get("oom") else []
+        return "; ".join(kernel + mem.get("over", []))
 
     # ---------- jobs (`loop run`) ----------
     def job_register(self, caller: dict, cmd: str) -> dict:
@@ -1187,7 +1191,7 @@ class Engine:
         # Workers and the meta-work run project jobs, so both may get a per-session cap; a meta-chat only reads
         mem = cfg["infra"]["worker_memory_max_gb"] if sess["kind"] in ("worker", "meta-work", "meta-advisor") else None
         self.runner.set_pool(self.pool_gb())
-        self.turn_mem[sid] = {"peak": 0.0, "oom": 0, "over": []}
+        self.turn_mem[sid] = {"oom": 0, "over": []}
         # Each turn gets its own scratch dir; it goes when the turn ends (its processes are stopped by then),
         # and so do its `loop run` jobs, all but the detached ones
         scratch = Path(spec.env["TMPDIR"])
@@ -1369,11 +1373,9 @@ class Engine:
         # A running agent's pending edit to a human-owned file is not the human's: its own turn end reverts it
         busy = self.db.one("SELECT 1 FROM sessions WHERE ws=? AND status='running'", ws)
         workspace.commit_external(p, protected=not busy)
-        # The turn carries its events; resources and budget come only when they matter (the budget once mostly
-        # spent; RAM, disk and usage limits as events when they run low), and `loop infra` / `loop budget` on demand
-        b = self.budget(ws, gid)
-        text = digest.envelope(items, digest.budget_line(b) if digest.budget_low(b) else None,
-                               self.brief_text(ws, gid))
+        # The turn carries its events; resources come only as events when they run low (RAM, disk, usage limits),
+        # the budget only once exhausted, and `loop infra` / `loop budget` on demand
+        text = digest.envelope(items, self.brief_text(ws, gid))
         wt = gitops.int_worktree(p, gid)
         start = gitops.head(wt) if wt.exists() else None
         repo_before = self.checkout_state(p / "repo")
@@ -2088,6 +2090,41 @@ class Engine:
     def worker_status(w: dict) -> str:
         return "retired" if w["status"] != "running" and not Path(w["cwd"]).exists() else w["status"]
 
+    @staticmethod
+    async def run_verify(p: Path, wt: Path, sid: str, cmd: str) -> dict:
+        """Run one verify command as a turn runs: in the workspace venv, without a GPU, with a TMPDIR of its own
+        and in a scope of the RAM pool. Whatever it leaves running is stopped once it ends."""
+        stamp = int(time.time() * 1000)
+        tmp = scratch_root() / f"{sid}-verify-{stamp}"
+        (tmp / "t").mkdir(parents=True)
+        venv = p / ".venv"
+        env = child_env({"VIRTUAL_ENV": venv, "PATH_PREPEND": venv / "bin", "TMPDIR": tmp / "t",
+                         "CUDA_VISIBLE_DEVICES": ""})
+        unit = f"{unit_prefix()}-{sid}-verify-{stamp}" if systemd_available() else None
+        argv = [*(job_scope_argv(unit) if unit else []), "/bin/sh", "-c", cmd]
+        proc = None
+        try:
+            # Output goes to a file: a process left in the background could hold a pipe open until the timeout
+            with (tmp / "out").open("wb") as fh:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv, cwd=wt, env=env, stdin=asyncio.subprocess.DEVNULL, stdout=fh,
+                    stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+            try:
+                await asyncio.wait_for(proc.wait(), VERIFY_TIMEOUT_S)
+                out = (tmp / "out").read_bytes()[-6000:].decode(errors="replace")[-1500:]
+            except asyncio.TimeoutError:
+                out = f"timeout after {VERIFY_TIMEOUT_S // 60} min"
+        finally:
+            # The scope holds the whole tree, even what left the process group; without systemd the group goes
+            if unit:
+                kill_unit(unit)
+            if proc:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                await proc.wait()
+            shutil.rmtree(tmp, ignore_errors=True)
+        return {"cmd": cmd, "code": proc.returncode, "out": out}
+
     async def done(self, caller: dict, status: str, report: str) -> str:
         self.require_meta_work(caller)
         if status not in ("success", "partial", "blocked"):
@@ -2103,16 +2140,7 @@ class Engine:
             if status == "success":
                 before = gitops.untracked(wt)
                 for cmd in digest.verify_commands((self.gdir(ws, gid) / "goal.md").read_text()):
-                    proc = await asyncio.create_subprocess_shell(
-                        cmd, cwd=wt, env=child_env({}), stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.STDOUT, start_new_session=True)
-                    try:
-                        out, _ = await asyncio.wait_for(proc.communicate(), VERIFY_TIMEOUT_S)
-                    except asyncio.TimeoutError:
-                        os.killpg(proc.pid, signal.SIGKILL)  # the whole tree, not just /bin/sh
-                        await proc.wait()
-                        out = f"timeout after {VERIFY_TIMEOUT_S // 60} min".encode()
-                    results.append({"cmd": cmd, "code": proc.returncode, "out": out.decode(errors="replace")[-1500:]})
+                    results.append(await self.run_verify(p, wt, caller["id"], cmd))
                 # Verify output must not reach a later checkpoint, and edits to tracked files would mean the
                 # accepted state differs from the committed one: both are undone, and the edits reject the close
                 changed, _ = gitops.restore_after_run(wt, before)

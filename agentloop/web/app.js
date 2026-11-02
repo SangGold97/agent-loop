@@ -31,6 +31,29 @@ function md(s) {
     ? katex.renderToString(math[i].tex, { displayMode: math[i].display, throwOnError: false, strict: false, output: 'html' }) : m);
 }
 const fmtTok = n => !n ? '0' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n);
+// Token settings are typed in whole thousands: '1.2M', '600k' or 400000 in the config shows as 1200, 600, 400
+const toK = v => {
+  const m = String(v ?? '').trim().match(/^([\d.]+)\s*([kKmM]?)$/);
+  return m ? Math.round(Number(m[1]) * { '': 1, k: 1e3, m: 1e6 }[m[2].toLowerCase()] / 1e3) || '' : '';
+};
+const kUnit = k => Number(k) >= 1000 ? `k = ${fmtTok(Number(k) * 1e3)}` : 'k';
+// A number input in thousands with its unit beside it; the unit also spells out millions as the human types
+function tokInput(attrs, value, placeholder, disabled = false) {
+  const k = toK(value);
+  return `<span class="tok"><input type="number" min="1" step="1" ${attrs} value="${k}" placeholder="${esc(placeholder)}" ${disabled ? 'disabled' : ''}><span class="unit">${kUnit(k)}</span></span>`;
+}
+document.addEventListener('input', e => {
+  const unit = e.target.closest('.tok')?.querySelector('.unit');
+  if (unit) unit.textContent = kUnit(e.target.value);
+});
+// The value of a tokInput as a config string ('1200k'), null when empty; refused below a whole thousand
+function readTok(el, name) {
+  const v = el.value.trim();
+  if (v === '' && !el.validity.badInput) return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${name}: enter a whole number of thousands of tokens (1200 = 1.2M)`);
+  return `${n}k`;
+}
 const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '–';
 const hhmm = ts => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 const fmtDur = hours => { const m = Math.round(hours * 60); return `${Math.floor(m / 60)} h ${m % 60} mins`; };
@@ -211,7 +234,7 @@ async function loadModels() { try { S.models = await api('/api/models'); } catch
 // ---------- agent settings form (HUMAN layer, new goal, new meta-chat) ----------
 // Empty autocompact = the CLI's own setting (for Claude Code: autoCompactWindow in ~/.claude/settings.json)
 const autocompactHint = agent => NO_AUTOCOMPACT.includes(agent) ? 'n/a'
-  : S.models?.[agent]?.autocompact ? `CLI setting: ${fmtTok(S.models[agent].autocompact)}` : 'CLI default';
+  : S.models?.[agent]?.autocompact ? `CLI: ${toK(S.models[agent].autocompact)}` : 'CLI default';
 function agentRow(key, conf = {}, opts = {}) {
   const agent = conf.agent || opts.agent || 'claude';
   const off = opts.toggle && conf.enabled === false;
@@ -220,7 +243,7 @@ function agentRow(key, conf = {}, opts = {}) {
     ${opts.fixedAgent ? `<div>${esc(agent)}</div>` : `<select data-f="agent">${AGENTS.map(a => `<option ${a === agent ? 'selected' : ''}>${a}</option>`).join('')}</select>`}
     <select data-f="model">${modelOptions(agent, conf.model)}</select>
     <select data-f="effort">${effortOptions(agent, conf.model, conf.effort)}</select>
-    ${opts.noAutocompact ? '<span></span>' : `<input type="text" data-f="autocompact" value="${esc(conf.autocompact ?? '')}" placeholder="${esc(autocompactHint(agent))}" ${NO_AUTOCOMPACT.includes(agent) ? 'disabled' : ''}>`}
+    ${opts.noAutocompact ? '<span></span>' : tokInput('data-f="autocompact" title="compact the context at this many thousand tokens; empty = the CLI\'s own setting"', conf.autocompact, autocompactHint(agent), NO_AUTOCOMPACT.includes(agent))}
   </div>`;
 }
 function agentHeader(label = '') {
@@ -240,7 +263,7 @@ function wireAgentRows(root, onChange) {
         if (ac) {
           ac.placeholder = autocompactHint(e.target.value);
           ac.disabled = NO_AUTOCOMPACT.includes(e.target.value);
-          if (ac.disabled) ac.value = '';
+          if (ac.disabled) { ac.value = ''; ac.nextElementSibling.textContent = kUnit(''); }
         }
       }
       if (f === 'agent' || f === 'model') {
@@ -256,7 +279,8 @@ function wireAgentRows(root, onChange) {
 function readAgentRow(row) {
   const val = f => { const el = $(`[data-f=${f}]`, row); const v = el ? el.value.trim() : ''; return v === '' ? null : v; };
   const out = { agent: row.dataset.agent, model: val('model'), effort: val('effort') };
-  if ($('[data-f=autocompact]', row)) out.autocompact = val('autocompact');
+  const ac = $('[data-f=autocompact]', row);
+  if (ac) out.autocompact = readTok(ac, 'autocompact');
   if ($('[data-f=enabled]', row)) out.enabled = $('[data-f=enabled]', row).checked;
   return out;
 }
@@ -277,7 +301,7 @@ function configForm(conf, footer = '') {
       <div class="hint">The meta-work picks <code>--agent ${AGENTS.join('|')}</code> per worker; model and effort are always taken from here.</div></div>
     <div class="cfg-side">
       <div class="k" title="start a fresh meta-work session when its context exceeds this many tokens">rotate at</div>
-      <input type="text" data-rotate value="${esc(mw.rotate_at_tokens ?? '')}" placeholder="off (e.g. 600k)" title="start a fresh meta-work session when its context exceeds this many tokens">
+      ${tokInput('data-rotate title="start a fresh meta-work session when its context exceeds this many thousand tokens; empty = off"', mw.rotate_at_tokens, 'off (e.g. 1200)')}
       <div class="k chrome-opt" title="${CHROME_TIP}" ${chromeHidden(mw.agent)}>chrome</div>
       <label class="inline chrome-opt" title="${CHROME_TIP}" ${chromeHidden(mw.agent)}><input type="checkbox" data-chrome ${mw.chrome ? 'checked' : ''}> meta-work uses Claude in Chrome</label>
       <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'workers', 'concurrent workers')}
@@ -293,7 +317,7 @@ function configForm(conf, footer = '') {
 function readConfigForm(root) {
   const rows = $$('.agent-row[data-key]', root);
   const metaWork = readAgentRow(rows.find(r => r.dataset.key === 'meta_work'));
-  metaWork.rotate_at_tokens = $('[data-rotate]', root).value.trim() || null;
+  metaWork.rotate_at_tokens = readTok($('[data-rotate]', root), 'rotate at');
   metaWork.chrome = $('[data-chrome]', root).checked && metaWork.agent === 'claude';
   const workers = {};
   rows.filter(r => r.dataset.key.startsWith('worker:')).forEach(r => {

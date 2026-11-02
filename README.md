@@ -38,7 +38,7 @@ To run it on another machine and use the UI from this one, see [remote/README.md
 | **Meta-advisor** | Consulted through `loop advise`, with agent/model/effort from `goal.yaml → meta_advisor`. Each question starts a new session right away, with its own worktree and branch to prototype in, while the meta-work turn that asked goes on; `loop advise --follow-up <sid>` instead resumes that consultation's session for one more turn on the same question, while `meta_advisor` still names its CLI (model/effort changes apply at once). Its final text returns to the meta-work inbox as `[Advice]`; the Advisor button beside META-WORK opens its session log, without a chat composer. |
 | **Worker** | A Claude Code, Codex or agy session (the meta-work picks the CLI and role; model/effort come from `goal.yaml` → `workers`), in its own worktree on `loop/<goal>/<role>-<sid>`; accepted work is merged into `loop/<goal>/integration`. It receives the meta-work's prompt as is and a generic `worker/AGENTS.md`, nothing about the platform; `.venv/` and `.artifacts/` stay out of git, and `.artifacts/` is kept in `runs/<sid>/artifacts/`. `loop retire W` removes a finished worker's worktree but keeps its branch and log; a worker without a worktree shows as retired and can no longer be sent, nor can a worker whose CLI the human disabled. |
 | **Digest** | What a finished worker turn sends to the meta-work: a line naming the worker, role and turn, then its final reply as is (kept in `runs/<sid>/t<n>.out.md`). Its changes and the commands it ran are pulled on demand, with git and `loop show W --log`. |
-| **goal.md** | Success criteria, free text. Lines `- verify: \`cmd\`` are run on the committed integration branch before a `success` close (a run that edits tracked files is rejected and its edits and new files are undone); everything else is judged by the meta-work. |
+| **goal.md** | Success criteria, free text. Lines `- verify: \`cmd\`` are run on the committed integration branch before a `success` close, in the workspace venv without a GPU and in the RAM pool, with whatever they leave running stopped afterwards (a run that edits tracked files is rejected and its edits and new files are undone); everything else is judged by the meta-work. |
 
 ## Guardrails (mistakes, not adversaries)
 
@@ -78,11 +78,10 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   The platform records how much of each CLI's usage windows is used after every turn (Claude's
   `rate_limit_event`, Codex's rollout, `agy -p /usage`) and, so that use outside agent-loop counts too, every 10
   minutes and on the Agent CLIs page's refresh button without a model call (`claude -p /usage`, `codex app-server`,
-  `agy -p /usage`). It shows them on that page and in `loop infra`; once a window passes 90%, every running goal's
-  meta-work is told so with its next turn.
-- A meta-work turn carries its events and nothing else: the `[Budget]` line joins only once 80% of the worker or
-  meta turns are spent, and resources reach it as events when they run low (RAM refusals, free disk under 10 GB,
-  usage limits); `loop infra` and `loop budget` show the rest on demand.
+  `agy -p /usage`). It shows them on that page and in `loop infra`; once a window passes 90%, the meta-work of every running
+  goal whose config uses that CLI is told so with its next turn.
+- A meta-work turn carries its events and nothing else: the budget reaches it only once exhausted, and resources
+  reach it as events when they run low (RAM refusals, free disk under 10 GB, usage limits); `loop infra` and `loop budget` show the rest on demand.
 - Every turn runs in its own `systemd-run --user --scope`. Processes still running when the CLI exits (a job the
   agent backgrounded) are stopped and named in the digest, detached jobs aside (below); orphans are stopped on
   restart. Each turn also gets its
@@ -98,7 +97,7 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   first keep running; its `loop run` prints why. The kernel's OOM killer, should the pool run out between
   samples, takes them in the same order (`oom_score_adj` from 1000 for the newest heavy one, 200 for other tool
   processes, 0 for CLIs; helpers and light jobs keep their user service's default). If the helper dies, the platform stops the job with it. Processes outside
-  the platform can still exhaust the host's reserve. The digest reports a turn's memory peak and kills.
+  the platform can still exhaust the host's reserve. The digest reports the processes killed for memory in a turn.
 - CPU is shared by weight, never reserved or waited for: an idle core goes to whoever wants it. Every turn and job
   scope has the same `CPUWeight`, so under contention busy jobs split the CPU per scope rather than per thread, and
   the pool slice as a whole yields to the platform server and the human's own programs. A `loop run` job gets

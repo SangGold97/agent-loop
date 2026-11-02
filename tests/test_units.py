@@ -198,13 +198,9 @@ def test_verify_and_checklist():
     assert digest.checklist("- [x] a\n- [ ] b\n* [X] c") == (2, 3)
 
 
-def test_envelope_carries_events_and_budget_only_when_low():
+def test_envelope_carries_events_only():
     items = [{"kind": "worker_done", "payload": json.dumps({"text": "[Worker w-1] done"})}]
-    b = {"max_worker_turns": 10, "worker_turns": 7, "max_meta_turns": 0, "meta_turns": 50}
-    assert not digest.budget_low(b)
-    assert digest.envelope(items, None) == "[Worker w-1] done"
-    assert digest.budget_low({**b, "worker_turns": 8})
-    assert digest.envelope([], "[Budget] x") == "[Budget] x"
+    assert digest.envelope(items) == "[Worker w-1] done"
     assert digest.envelope([]) == "[System] No new events."
 
 

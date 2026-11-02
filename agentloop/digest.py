@@ -39,18 +39,10 @@ def budget_line(b: dict) -> str:
             f"meta turns {b['meta_turns']}/{lim(b['max_meta_turns'])} · active {b['hours']:.1f} h")
 
 
-BUDGET_LOW = 0.8  # share of a turn budget past which every meta-work turn carries the [Budget] line
-
-
-def budget_low(b: dict) -> bool:
-    """Whether worker or meta turns are mostly spent, so the meta-work should see the budget with every turn."""
-    return any(b.get(f"max_{k}") and b[k] >= BUDGET_LOW * b[f"max_{k}"] for k in ("worker_turns", "meta_turns"))
-
-
 BRIEF_FILES = ("spec.md", "goal.md", "goal.yaml")  # a human edit of one quotes spec and goal again
 
 
-def envelope(items: list[dict], budget: str | None = None, brief: str | None = None) -> str:
+def envelope(items: list[dict], brief: str | None = None) -> str:
     """One meta-work turn's prompt from its events. `brief` (spec and goal quoted) joins once when an event asks
     for it (a restart, a human edit of BRIEF_FILES) and no kickoff or handoff already carries it."""
     parts, quote = [], False
@@ -68,8 +60,6 @@ def envelope(items: list[dict], budget: str | None = None, brief: str | None = N
         quote = quote or p.get("brief") or (kind == "file_changed" and p["name"] in BRIEF_FILES)
     if brief and quote and not any(it["kind"] in ("kickoff", "handoff") for it in items):
         parts.append(brief)
-    if budget:
-        parts.append(budget)
     return "\n\n".join(parts) or "[System] No new events."
 
 
