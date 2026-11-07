@@ -662,6 +662,52 @@ def test_long_job_outlives_its_turn_and_resumes_the_worker(server, monkeypatch):
     assert not jobs_tmp_root().exists() or not any(jobs_tmp_root().iterdir())
 
 
+def test_idle_agents_bring_the_meta_work_a_check_in_that_costs_no_meta_turn(server, monkeypatch):
+    client, engine = server
+    monkeypatch.setattr(engine_mod, "JOB_WAIT_S", 1)  # `loop run` leaves its job to the background at once
+    client.post("/api/workspaces", json={"name": "checkin"})
+    ws = Path(engine.wsp("checkin"))
+    cfg = yaml.safe_load((ws / "loop.yaml").read_text())
+    (ws / "loop.yaml").write_text(yaml.safe_dump({**cfg, "idle_checkin_min": 0.02}))
+    gid = client.post("/api/workspaces/checkin/goals", json={
+        "title": "Check-in", "spec": "Wait for a job CHECKIN", "goal": "- the job was checked",
+        "config": goal_config()}).json()["id"]
+    client.post(f"/api/goals/checkin/{gid}/start")
+    wait_for(lambda: client.get(f"/api/goals/checkin/{gid}").json()["row"]["status"] == "awaiting_review", timeout=30)
+    # The kickoff turn left its job running; the check-in names it with its log
+    job = engine.db.one("SELECT * FROM jobs WHERE ws='checkin'")
+    text = (ws / "goals" / gid / ".checkin.txt").read_text()
+    assert text.startswith("[Check-in] All agents have been idle for 0.02 min.")
+    assert f"Running job {job['id']} of {job['session']}, for " in text and f"log {job['log']}" in text
+    # Only the kickoff turn counts against the budget
+    assert engine.db.one("SELECT meta_turns FROM goals WHERE ws='checkin' AND id=?", gid)["meta_turns"] == 1
+    wait_for(lambda: not [p for p in psutil.process_iter(["cmdline"]) if p.info["cmdline"] == ["sleep", "299"]],
+             timeout=10)
+
+
+def test_scheduled_start_waits_its_minutes_and_can_be_cancelled(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "sched"})
+    gid = client.post("/api/workspaces/sched/goals", json={
+        "title": "Later", "spec": "Create hello.py", "goal": "- hello.py exists", "config": goal_config()}).json()["id"]
+    row = lambda: engine.db.one("SELECT * FROM goals WHERE ws='sched' AND id=?", gid)
+    for bad in ("5", 0, 1.5):  # the UI sends a whole number of minutes; anything else is refused
+        r = client.post(f"/api/goals/sched/{gid}/start", json={"delay_min": bad})
+        assert r.status_code == 400 and "whole number of minutes" in r.json()["error"]
+    assert client.post(f"/api/goals/sched/{gid}/start", json={"delay_min": 30}).status_code == 200
+    assert row()["status"] == "draft" and 29 * 60 < row()["start_at"] - time.time() <= 30 * 60
+    goal = next(g for w in client.get("/api/state").json()["workspaces"] for g in w["goals"] if g["id"] == gid)
+    assert goal["start_at"] == row()["start_at"]
+    client.post(f"/api/goals/sched/{gid}/unschedule")
+    assert row()["start_at"] is None
+    # Once its time has come, the infra loop starts it
+    client.post(f"/api/goals/sched/{gid}/start", json={"delay_min": 1})
+    engine.db.x("UPDATE goals SET start_at=? WHERE ws='sched' AND id=?", time.time() - 1, gid)
+    wait_for(lambda: row()["status"] != "draft", timeout=10)
+    assert row()["start_at"] is None and row()["meta_work"]
+    wait_for(lambda: row()["status"] == "awaiting_review", timeout=60)
+
+
 def test_detached_jobs_end_at_their_time_limit_or_with_their_helper(server):
     client, engine = server
     client.post("/api/workspaces", json={"name": "jobs"})
@@ -947,3 +993,113 @@ def test_vram_grants_fit_gpus_and_a_full_gpu_stops_its_newest_job(server, monkey
             h.kill()
             h.wait()
     assert not engine.grants
+
+
+def run_goal(client, engine, ws_name: str, spec: str, config: dict) -> tuple[Path, str, dict]:
+    """Create and start a goal, wait until its meta-work has closed it and finished that turn."""
+    client.post("/api/workspaces", json={"name": ws_name})
+    gid = client.post(f"/api/workspaces/{ws_name}/goals", json={
+        "title": spec, "spec": spec, "goal": "- hello.py exists", "config": config}).json()["id"]
+    client.post(f"/api/goals/{ws_name}/{gid}/start")
+    view = wait_for(lambda: (v := client.get(f"/api/goals/{ws_name}/{gid}").json())["row"]["status"]
+                    == "awaiting_review" and v)
+    wait_for(lambda: (ws_name, gid) not in engine.meta_active)
+    return Path(engine.wsp(ws_name)) / "goals" / gid, gid, view
+
+
+def test_mid_turn_steers_a_running_worker_and_reports_into_the_running_meta_turn(server):
+    client, engine = server
+    gdir, gid, view = run_goal(client, engine, "midturn", "Create hello.py MIDTURN",
+                               {**goal_config(), "mid_turn": True})
+    sid = next(s["id"] for s in view["sessions"] if s["kind"] == "worker")
+    # `loop send` reached the running worker after its tool call, so it needed no second turn
+    assert "is running: it gets your message after its current tool call" in (gdir / ".midturn-send.txt").read_text()
+    assert (gdir / "runs" / sid / "artifacts" / "midturn.txt").read_text() == "MIDMSG: mind the docstring"
+    assert engine.db.session(sid)["turns"] == 1
+    assert engine.db.one("SELECT status FROM mail WHERE session=?", sid)["status"] == "delivered"
+    assert [e["text"] for e in engine.session_events(sid) if e["type"] == "message"] == ["MIDMSG: mind the docstring"]
+    # Its report reached the meta-work turn that steered it, which merged and closed the goal in that turn
+    report = (gdir / ".midturn-report.txt").read_text()
+    assert report.startswith(f"[Worker {sid} · role coder · turn 1] ok")
+    assert report.endswith("[System] It got your message during this turn.")
+    row = engine.goal_row("midturn", gid)
+    assert row["outcome"] == "success" and row["meta_turns"] == 1
+    assert engine.db.one("SELECT consumed FROM inbox WHERE ws='midturn' AND kind='worker_done'")["consumed"] == 1
+
+
+def test_mid_turn_reaches_a_cli_without_live_input_through_its_mailbox_hook(server):
+    from agentloop.config import mailbox
+    client, engine = server
+    cfg = {**goal_config(), "mid_turn": True}
+    cfg["workers"] = {**cfg["workers"], "fakehook": {"enabled": True, "model": None, "effort": None}}
+    gdir, gid, view = run_goal(client, engine, "midhook", "Create hello.py MIDHOOK", cfg)
+    sid = next(s["id"] for s in view["sessions"] if s["kind"] == "worker")
+    assert "is running: it gets your message after its current tool call" in (gdir / ".midhook-send.txt").read_text()
+    # The hook handed the message over in Codex's PostToolUse format and took the flag away
+    out = json.loads((gdir / "runs" / sid / "artifacts" / "midhook.txt").read_text())
+    assert out == {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext":
+                                          "New message, sent while you were working:\n\nHOOKMSG: mind the docstring"}}
+    assert (gdir / "runs" / sid / "artifacts" / "flag-after.txt").read_text() == "False"
+    assert not mailbox(sid).exists() and engine.db.session(sid)["turns"] == 1
+    assert [e["text"] for e in engine.session_events(sid) if e["type"] == "message"] == ["HOOKMSG: mind the docstring"]
+
+
+def test_send_to_a_running_worker_without_mid_turn_starts_its_next_turn(server):
+    client, engine = server
+    gdir, gid, view = run_goal(client, engine, "queuesend", "Create hello.py QUEUESEND", goal_config())
+    sid = next(s["id"] for s in view["sessions"] if s["kind"] == "worker")
+    assert "your message starts its next turn when this one ends" in (gdir / ".queue-send.txt").read_text()
+    # The message waited for the running turn to end and started the next one; the first report said so
+    assert engine.db.session(sid)["turns"] == 2
+    assert (gdir / "runs" / sid / "t2.prompt.md").read_text() == "QMSG: second task"
+    first = engine.db.one("SELECT payload FROM inbox WHERE ws='queuesend' AND kind='worker_done' ORDER BY id")
+    assert json.loads(first["payload"])["text"].endswith(
+        "[System] Your message sent while it ran starts its next turn.")
+    assert engine.db.one("SELECT status FROM mail WHERE session=?", sid)["status"] == "turn"
+    assert not [e for e in engine.session_events(sid) if e["type"] == "message"]
+
+
+def test_meta_chat_takes_a_message_while_it_answers_only_with_mid_turn(server):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "chatmid"})
+    ws = Path(engine.wsp("chatmid"))
+    gid = client.post("/api/workspaces/chatmid/goals", json={
+        "title": "Chat mid", "spec": "x", "goal": "- x", "config": {**goal_config(), "mid_turn": True}}).json()["id"]
+    sid = client.post(f"/api/goals/chatmid/{gid}/meta-chats", json={"text": "CHATWAIT first"}).json()["id"]
+    wait_for(lambda: engine.runner.live(sid))
+    assert client.post(f"/api/meta-chats/{sid}/messages", json={"text": "second"}).status_code == 200
+    msgs = wait_for(lambda: (m := client.get(f"/api/meta-chats/{sid}/messages").json()) and not m["busy"]
+                    and len(m["messages"]) == 3 and m["messages"])
+    assert [m["role"] for m in msgs] == ["user", "user", "assistant"] and msgs[2]["text"] == "Also read: second"
+    assert engine.db.session(sid)["turns"] == 1
+    # Without mid-turn delivery a meta-chat that is answering takes no message, as before
+    path = ws / "goals" / gid / "goal.yaml"
+    client.put(f"/api/goals/chatmid/{gid}/files/goal.yaml",
+               json={"text": path.read_text().replace("mid_turn: true", "mid_turn: false")})
+    engine.db.update("sessions", {"id": sid}, status="running")
+    try:
+        with pytest.raises(AgentError, match="still answering"):
+            engine.meta_chat_send(sid, "third")
+    finally:
+        engine.db.update("sessions", {"id": sid}, status="idle")
+
+
+def test_meta_work_job_result_reaches_it_as_an_event(server, monkeypatch):
+    client, engine = server
+    client.post("/api/workspaces", json={"name": "mwjob"})
+    gid = client.post("/api/workspaces/mwjob/goals", json={
+        "title": "Meta job", "spec": "x", "goal": "- x", "config": goal_config()}).json()["id"]
+    meta = engine.new_session("mwjob", gid, "meta-work", "meta-work", FAKE_ROLE, engine.wsp("mwjob") / "meta")
+    monkeypatch.setattr(engine, "kick", lambda *_: None)
+    engine.set_goal("mwjob", gid, status="running", meta_work=meta["id"])
+    try:
+        engine.db.x("INSERT INTO jobs(id, session, ws, goal, cmd, log, started, ended, status, result, reported) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,0)", "j-mw1", meta["id"], "mwjob", gid, "true", "/dev/null",
+                    time.time(), time.time(), "done", "[Job j-mw1 ended] exit 0")
+        engine.wake_for_jobs(meta["id"])
+        item = engine.db.one("SELECT payload FROM inbox WHERE ws='mwjob' AND kind='system'")
+        assert json.loads(item["payload"])["text"] == ("[System] The `loop run` job is done with the result of "
+                                                       "j-mw1.\n\n[Job j-mw1 ended] exit 0")
+        assert engine.db.one("SELECT reported FROM jobs WHERE id='j-mw1'")["reported"] == 1
+    finally:
+        engine.set_goal("mwjob", gid, status="stopped")

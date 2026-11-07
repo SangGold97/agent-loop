@@ -28,16 +28,21 @@ DEFAULTS: dict = {
         # Language of everything agents write for the human; code and commit messages follow the project
         "language": "English",
         "base_branch": None,
+        # Messages to a session in a turn reach it after its current tool call instead of waiting for the turn to end
+        "mid_turn": False,
     },
     "infra": {"pool_reserve_gb": 3, "worker_memory_max_gb": None, "vram_reserve_gb": 1},
     "turn_timeout_min": 180,
     "job_timeout_h": 9,  # a `loop run` job is stopped after this many hours
+    # Minutes every agent of a running goal may stay idle, with nothing queued for the meta-work, before the
+    # meta-work gets a check-in to look at the work in flight (0: never)
+    "idle_checkin_min": 30,
     "guard": {"deny_patterns": []},
     "mcp_servers": [],  # MCP server URLs Claude sessions may use; all others blocked
 }
 
 # Goal-level keys that override workspace defaults
-GOAL_KEYS = ("meta_work", "meta_advisor", "workers", "budget", "language", "base_branch")
+GOAL_KEYS = ("meta_work", "meta_advisor", "workers", "budget", "language", "base_branch", "mid_turn")
 
 
 def home() -> Path:
@@ -52,6 +57,11 @@ def state_dir() -> Path:
     path = home() / "state"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def mailbox(sid: str) -> Path:
+    """The flag that tells a session's mailbox hook (CLIs without live input) that something waits for it."""
+    return state_dir() / "mailbox" / sid
 
 
 def deep_merge(base: dict, over: dict | None) -> dict:

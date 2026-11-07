@@ -3,6 +3,7 @@
 Normalized events emitted while a turn runs:
   init {vendor_id} · text {text} · thinking {text} · tool {name, detail}
   tool_result {text, error, tail?} · usage {context} · error {text}
+  message {text}: a message the turn took while it ran (CLIs with live input)
 """
 from __future__ import annotations
 
@@ -52,6 +53,8 @@ class ParseState:
     quota: list[dict] | None = None
     quota_ts: float = 0.0  # when the CLI reported `quota`; 0 means at the turn's end
     limit_reset: float | None = None  # when a usage limit that refused this turn resets, as the CLI reported it
+    rest: bool = False  # the CLI has answered everything it was given so far (live input: more may follow)
+    replays: int = 0  # messages from stdin the CLI echoed back as it took them (the prompt is the first)
 
 
 def epoch(stamp) -> float:
@@ -73,6 +76,9 @@ def billed_tokens(usage: dict) -> int:
 class Adapter:
     name = "base"
     binary = ""
+    # Live input: the CLI keeps reading messages on stdin while its turn runs and takes each one after its current
+    # tool call; stdin stays open until the CLI is at rest with nothing more to give it
+    live = False
 
     def argv(self, spec: RunSpec) -> list[str]:
         raise NotImplementedError
@@ -83,6 +89,10 @@ class Adapter:
     def stdin(self, spec: RunSpec) -> str:
         """What the CLI reads on stdin: the prompt itself by default."""
         return spec.prompt
+
+    def message(self, text: str) -> str:
+        """One more message for a CLI with live input, as it reads it on stdin."""
+        raise NotImplementedError
 
     def parse(self, obj: dict, st: ParseState) -> list[dict]:
         raise NotImplementedError

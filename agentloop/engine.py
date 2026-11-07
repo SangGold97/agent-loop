@@ -17,14 +17,15 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import Callable
 
 import psutil
 import yaml
 
 from . import agents, digest, gitops, workspace
-from .adapters import RunSpec
+from .adapters import ADAPTERS, RunSpec
 from .adapters.base import to_tokens
-from .config import DEFAULTS, PYTHON, home, goal_config, state_dir, workspace_config
+from .config import DEFAULTS, PYTHON, home, goal_config, mailbox, state_dir, workspace_config
 from .db import DB
 from .infra import (GPU_STALE_S, SAMPLE_S, Infra, cgroup_dir, cgroup_pids, scope_cpu_s, scope_memory, set_oom_adj,
                     tree_cpu_s, tree_rss)
@@ -49,12 +50,22 @@ CPU_WARN_PCT = 90  # 10-minute mean CPU use from which running goals hear the CP
 CPU_REARM_PCT = 70
 MIN_JOB_THREADS = 2  # fewest BLAS/OpenMP threads a `loop run` job gets by default, however busy the CPU is
 JOB_WAIT_S = 90  # how long `loop run` shows a job's output before leaving it to run in the background
+# Mid-turn delivery: the events that would start the meta-work's next turn reach its running turn instead (a budget
+# end opens its own final turn), and no turn past this share of turn_timeout_min gets more: it ends, and the next
+# turn gets what waits
+MID_TURN_KINDS = ("worker_done", "advice", "note", "system", "file_changed")
+MID_TURN_UNTIL = 0.8
 
 
 def clock(ts: float) -> str:
     """Local wall time for agent-facing messages: HH:MM today, with the date otherwise."""
     fmt = "%H:%M" if time.strftime("%x", time.localtime(ts)) == time.strftime("%x") else "%Y-%m-%d %H:%M"
     return time.strftime(fmt, time.localtime(ts))
+
+
+def span(secs: float) -> str:
+    """A duration for agent-facing messages."""
+    return f"{secs:.0f} s" if secs < 90 else f"{secs / 60:.0f} min" if secs < 5400 else f"{secs / 3600:.1f} h"
 
 
 def leftover_note(cmds: tuple[str, ...], whose: str) -> str:
@@ -142,6 +153,9 @@ class Engine:
         self.vram_base: dict[int, float] = {}
         self.stopped: dict[int, tuple[str, str]] = {}
         self.job_watched: set[str] = set()  # jobs whose `loop run` still shows them, which reports their end
+        # Turns running now (start time, turn number, event log), and how many messages each took while it ran
+        self.live_turns: dict[str, dict] = {}
+        self.mid_turn_got: dict[str, int] = {}
         self.vram_settle: dict[int, float] = {}  # GPU index -> until when it is left alone after a stop
         self.ram_settle = 0.0  # until when the RAM pool is left alone after a stop
         self.bin_dir = state_dir() / "bin"
@@ -419,6 +433,11 @@ class Engine:
         shutil.rmtree(scratch_root(), ignore_errors=True)
         # Events handed to a meta turn that never finished go back to the queue
         self.db.x("UPDATE inbox SET consumed=0 WHERE consumed=2")
+        # Messages for sessions whose turn the restart cut off are not delivered; the restart notice names them
+        undelivered = self.db.q("SELECT DISTINCT s.id, s.ws, s.goal FROM mail m JOIN sessions s ON s.id=m.session "
+                                "WHERE m.status='pending' AND s.kind IN ('worker', 'meta-advisor')")
+        self.db.x("UPDATE mail SET status='dropped' WHERE status='pending'")
+        shutil.rmtree(state_dir() / "mailbox", ignore_errors=True)
         # A turn cut off by a restart still counts, so the next turn gets its own evidence files
         for s in self.db.q("SELECT id, turns FROM sessions WHERE status='running'"):
             cut = self.db.q("SELECT id FROM turns WHERE session=? AND status='running'", s["id"])
@@ -457,9 +476,11 @@ class Engine:
             gained = max(0.0, (last or 0) - (m["started"] or time.time()))
             self.db.update("goals", {"ws": m["ws"], "id": m["id"]}, started=time.time(),
                            active_s=(m["active_s"] or 0) + gained)
+            lost = [u["id"] for u in undelivered if (u["ws"], u["goal"]) == (m["ws"], m["id"])]
             self.db.push_inbox(m["ws"], m["id"], "system", {"text": (
                 "[System] The platform restarted. " + (f"Interrupted workers: {', '.join(names)} "
-                "(continue them with `loop send`)." if names else "No workers were interrupted.")), "brief": True})
+                "(continue them with `loop send`)." if names else "No workers were interrupted.")
+                + (f" Your messages to {', '.join(lost)} were not delivered." if lost else "")), "brief": True})
             self.kick(m["ws"], m["id"])
         # Harness prompts follow the platform templates unless the human customised them; every workspace has
         # the shared venv its sessions run in
@@ -565,6 +586,8 @@ class Engine:
                             f"[System] The RAM pool has room again ({self.ram_free()} GB free); spawn or send what "
                             "was refused if it is still needed.")})
                         self.kick(ws, gid)
+                self.start_scheduled()
+                self.check_in()
             except Exception:
                 log.exception("infra sample failed")
             tick = max(tick + SAMPLE_S, time.monotonic())
@@ -998,8 +1021,7 @@ class Engine:
             return
         self.db.update("jobs", {"id": jid}, status="done", ended=time.time(), rc=rc)
         shutil.rmtree(jobs_tmp_root() / jid, ignore_errors=True)
-        secs = time.time() - j["started"]
-        took = f"{secs:.0f} s" if secs < 90 else f"{secs / 60:.0f} min" if secs < 5400 else f"{secs / 3600:.1f} h"
+        took = span(time.time() - j["started"])
         # Its peak RAM as `loop run` released it, or as last sampled when its helper is gone without a report
         peak = j["peak_gb"] if j["peak_gb"] is not None else next(
             (g.get("peak_gb") for g in self.grants.values() if g.get("job") == jid and not g.get("within")), None)
@@ -1028,6 +1050,36 @@ class Engine:
             elif (not psutil.pid_exists(j["pid"])) if j["pid"] else age > 120:
                 self.job_end(j["id"], "its `loop run` helper ended without reporting how the job ended")
 
+    def check_in(self) -> None:
+        """Wake the meta-work of a running goal whose agents have all been idle for `idle_checkin_min`, with nothing
+        queued for it, so a job that hangs or goes wrong is looked at before it ends."""
+        now = time.time()
+        for g in self.db.q("SELECT ws, id FROM goals WHERE status='running'"):
+            ws, gid = g["ws"], g["id"]
+            if (ws, gid) in self.meta_active or self.db.one(
+                    "SELECT 1 FROM sessions WHERE ws=? AND goal=? AND kind IN ('worker', 'meta-advisor') AND "
+                    "status IN ('running', 'queued')", ws, gid) or self.db.one(
+                    "SELECT 1 FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0", ws, gid):
+                continue
+            # Idle since the last turn of its agents ended, the turn of the last check-in included
+            last = self.db.one("SELECT MAX(COALESCE(t.ended, t.started)) AS ts FROM turns t JOIN sessions s ON "
+                               "s.id=t.session WHERE s.ws=? AND s.goal=? AND s.kind != 'meta-chat'", ws, gid)["ts"]
+            mins = workspace_config(self.wsp(ws))["idle_checkin_min"]
+            if not mins or not last or now - last < mins * 60:
+                continue
+            jobs = self.db.q("SELECT * FROM jobs WHERE ws=? AND goal=? AND status='running' ORDER BY started",
+                             ws, gid)
+            # Sessions a usage limit cut off resume at its reset, which wakes the goal anyway
+            if not jobs and self.db.one("SELECT 1 FROM sessions WHERE ws=? AND goal=? AND resume_at IS NOT NULL",
+                                        ws, gid):
+                continue
+            self.db.push_inbox(ws, gid, "checkin", {"text": "\n".join(
+                [f"[Check-in] All agents have been idle for {mins:g} min. Check that nothing in flight is stuck or "
+                 "going wrong, and stop or redirect what is; if all is well, just end your turn."]
+                + [f"Running job {j['id']} of {j['session']}, for {span(now - j['started'])}: log {j['log']}"
+                   for j in jobs])})
+            self.kick(ws, gid)
+
     def stop_jobs(self, why: str, **where) -> list[str]:
         """Stop the running detached jobs matching `where`. Their result is not delivered: whoever stops them
         knows why."""
@@ -1050,22 +1102,29 @@ class Engine:
         shutil.rmtree(jobs_tmp_root() / j["id"], ignore_errors=True)
 
     def wake_for_jobs(self, sid: str) -> None:
-        """Hand a session the results of its ended detached jobs: a worker gets them as a turn of its own once
-        it is idle, or the meta-work gets them as an event when that turn cannot start; an advisor gets them
-        the same way, as a follow-up of its consultation; the meta-work gets its own as an event."""
+        """Hand a session what waits for it: the results of its ended detached jobs and, for a worker or advisor,
+        the messages the meta-work sent it while it ran. A session in a turn gets them in that turn when mid-turn
+        delivery is on, else once the turn ends: a worker as a turn of its own (or the meta-work as an event when
+        that turn cannot start), an advisor as a follow-up of its consultation. The meta-work gets its own jobs'
+        results as an event."""
         s = self.db.session(sid)
-        jobs = self.db.q("SELECT id, result FROM jobs WHERE session=? AND status='done' AND reported=0 "
-                         "ORDER BY ended", sid)
-        if not s or not jobs or (s["kind"] in ("worker", "meta-advisor") and s["status"] in ("running", "queued")):
-            return  # a session in a turn gets them when that turn ends (worker_turn, advisor_turn)
+        if not s:
+            return
+        if s["kind"] in ("worker", "meta-advisor") and s["status"] in ("running", "queued"):
+            self.offer(sid)
+            return  # what its turn does not take waits for the turn to end (worker_turn, advisor_turn)
+        mail, jobs = self.pending(s)
+        if not mail and not jobs:
+            return
         ws, gid = s["ws"], s["goal"]
         if self.goal_row(ws, gid)["status"] != "running":
+            # Job results wait for the goal to run again; messages sent before it stopped are not delivered
+            self.take_pending(mail, [], "dropped")
             return
-        self.db.x(f"UPDATE jobs SET reported=1 WHERE id IN ({','.join('?' * len(jobs))})", *(j["id"] for j in jobs))
+        self.take_pending(mail, jobs, "turn")
         woken = ", ".join(j["id"] for j in jobs)
-        # The UI labels a worker turn opening with this line as sent by the platform (app.js turnSender)
-        done = f"[System] The `loop run` job is done with the result of {woken}."
-        text = "\n\n".join(j["result"] for j in jobs)
+        text = self.pending_text(s, mail, jobs)
+        what = " and ".join(w for w, have in (("your message", mail), ("the result of its job", jobs)) if have)
         if s["kind"] == "worker":
             try:
                 if not Path(s["cwd"]).exists():
@@ -1074,29 +1133,161 @@ class Engine:
                 self.check_limit(s["agent"])
                 self.check_dispatch(ws, gid)
             except AgentError as exc:
-                text = (f"[System] {sid} was not resumed with the result of its job ({exc}); pass it on with "
+                text = (f"[System] {sid} was not resumed with {what} ({exc}); pass it on with "
                         f"`loop send {sid}` or to a new worker if it is still needed.\n{text}")
             else:
                 self.db.update("sessions", {"id": sid}, status="running")
                 self._count_dispatch(ws, gid)
-                self.spawn(self.worker_turn(sid, f"{done}\n\n{text}", woken=woken), goal=(ws, gid))
+                self.spawn(self.worker_turn(sid, text, woken=woken), goal=(ws, gid))
                 return
         elif s["kind"] == "meta-advisor":
-            # The consultation goes on with the result, and its next answer reaches the meta-work as advice
+            # The consultation goes on with them, and its next answer reaches the meta-work as advice
             try:
                 self.check_agent_current(s)
                 self.check_limit(s["agent"])
                 self.check_meta_turns(ws, gid)
             except AgentError as exc:
-                text = (f"[System] {sid} was not resumed with the result of its job ({exc}); pass it on with "
+                text = (f"[System] {sid} was not resumed with {what} ({exc}); pass it on with "
                         f"`loop advise [--follow-up {sid}]` if it is still needed.\n{text}")
             else:
-                self.queue_advice(ws, gid, s, f"{done}\n\n{text}")
+                self.queue_advice(ws, gid, s, text)
                 return
-        else:
-            text = f"{done}\n\n{text}"
         self.db.push_inbox(ws, gid, "system", {"text": text})
         self.kick(ws, gid)
+
+    # ---------- mid-turn delivery ----------
+    def mid_turn(self, ws: str, gid: str) -> bool:
+        """Whether messages reach a session in its running turn (goal setting `mid_turn`, off by default)."""
+        return bool(goal_config(self.wsp(ws), gid)["goal"].get("mid_turn"))
+
+    def pending(self, s: dict) -> tuple[list[dict], list[dict]]:
+        """Messages for a worker, advisor or meta-chat it has not received yet, and the ended jobs of a session
+        whose results it has not received yet."""
+        mail = self.db.q("SELECT * FROM mail WHERE session=? AND status='pending' ORDER BY id", s["id"])
+        jobs = self.db.q("SELECT id, result FROM jobs WHERE session=? AND status='done' AND reported=0 "
+                         "ORDER BY ended", s["id"])
+        return mail, jobs
+
+    def take_pending(self, mail: list[dict], jobs: list[dict], status: str) -> None:
+        """Mark messages delivered (in a turn: `delivered`; as a turn's prompt: `turn`; never: `dropped`) and
+        job results received."""
+        if mail:
+            self.db.x(f"UPDATE mail SET status=?, delivered=? WHERE id IN ({','.join('?' * len(mail))})",
+                      status, time.time(), *(m["id"] for m in mail))
+        if jobs:
+            self.db.x(f"UPDATE jobs SET reported=1 WHERE id IN ({','.join('?' * len(jobs))})",
+                      *(j["id"] for j in jobs))
+
+    @staticmethod
+    def pending_text(s: dict, mail: list[dict], jobs: list[dict], mid_turn: bool = False) -> str:
+        """Messages and job results as a session receives them, as a turn of its own or in its running turn."""
+        parts = [m["text"] for m in mail]
+        if jobs:
+            # The UI labels a worker turn opening with this line as sent by the platform (app.js turnSender)
+            parts.append(f"[System] The `loop run` job is done with the result of {', '.join(j['id'] for j in jobs)}."
+                         "\n\n" + "\n\n".join(j["result"] for j in jobs))
+        text = "\n\n".join(parts)
+        # A follow-up reaches a running consultation framed as the question that opened it
+        return f"[Consultation]\n{text}" if mid_turn and mail and s["kind"] == "meta-advisor" else text
+
+    def _waiting(self, s: dict | None) -> tuple[str, Callable[[], None]] | None:
+        """What waits for session `s` that mid-turn delivery may hand to its running turn now, as its text and the
+        step that marks it taken: for the meta-work the events that would start its next turn, for a worker or
+        advisor its messages and the results of its ended jobs, for a meta-chat the human's messages."""
+        turn = s and self.live_turns.get(s["id"])
+        if not turn:
+            return None
+        sid, ws, gid = s["id"], s["ws"], s["goal"]
+        cfg = goal_config(self.wsp(ws), gid)
+        # A turn near its time limit gets nothing more: it ends, and what waits starts the next turn
+        if not cfg["goal"].get("mid_turn") or \
+                time.time() - turn["started"] > MID_TURN_UNTIL * cfg["turn_timeout_min"] * 60:
+            return None
+        if s["kind"] == "meta-work":
+            m = self.goal_row(ws, gid)
+            if m["meta_work"] != sid or m["status"] != "running":
+                return None
+            items = self.db.q(f"SELECT * FROM inbox WHERE ws=? AND goal=? AND consumed=0 AND deferred=0 AND kind IN "
+                              f"({','.join('?' * len(MID_TURN_KINDS))}) ORDER BY id", ws, gid, *MID_TURN_KINDS)
+            text = digest.envelope(items, self.brief_text(ws, gid))
+            if not items or text == digest.envelope([]):  # nothing, or only notices that have expired
+                return None
+            ids = ",".join(str(i["id"]) for i in items)
+
+            def take() -> None:  # in flight with the turn, like the events it started with (meta_loop)
+                self.db.x(f"UPDATE inbox SET consumed=2 WHERE id IN ({ids})")
+                self.notes_delivered(ws, gid, ids)
+            return text, take
+        mail, jobs = self.pending(s)
+        if not mail and not jobs:
+            return None
+
+        def take() -> None:
+            self.take_pending(mail, jobs, "delivered")
+            if mail:
+                self.mid_turn_got[sid] = self.mid_turn_got.get(sid, 0) + len(mail)
+        return self.pending_text(s, mail, jobs, mid_turn=True), take
+
+    def offer(self, sid: str) -> bool:
+        """Hand a session in a turn what waits for it, when mid-turn delivery is on. A CLI with live input gets it on
+        stdin now and takes it after its current tool call; the others take it through their mailbox hook, which
+        runs while the session's mailbox flag exists. Returns whether the CLI was given a message. It never fails
+        its caller (a running turn, `loop send`, the end of another turn): what it cannot deliver goes the usual way."""
+        try:
+            s = self.db.session(sid)
+            if not (waiting := self._waiting(s)):
+                return False
+            text, take = waiting
+            if self.runner.live(sid):
+                if self.runner.write(sid, text):
+                    take()
+                    return True
+            elif (adapter := ADAPTERS.get(s["agent"])) and not adapter.live:
+                mailbox(sid).parent.mkdir(parents=True, exist_ok=True)
+                mailbox(sid).touch()
+        except Exception:
+            log.exception("mid-turn delivery to %s failed", sid)
+        return False
+
+    def mail_take(self, caller: dict) -> str:
+        """What the mailbox hook of a CLI without live input takes for its session (empty when nothing waits)."""
+        sid = caller["id"]
+        mailbox(sid).unlink(missing_ok=True)
+        if not (waiting := self._waiting(self.db.session(sid))):
+            return ""
+        text, take = waiting
+        take()
+        if turn := self.live_turns.get(sid):
+            self._log_event(caller["ws"], caller["goal"], sid, turn["n"], turn["events"],
+                            {"type": "message", "text": text})
+        return text
+
+    def post_mail(self, sid: str, text: str, sender: str) -> None:
+        """A message for a worker, advisor or meta-chat in a turn: with mid-turn delivery on, its running turn takes
+        it; otherwise, or when that turn ends first, it starts the session's next turn."""
+        self.db.x("INSERT INTO mail(session, ts, text, sender) VALUES(?,?,?,?)", sid, time.time(), text, sender)
+        self.offer(sid)
+
+    def mail_note(self, sid: str, what: str) -> str:
+        """For the meta-work, after a turn of a worker or advisor: whether the messages it sent while the turn ran
+        reached it in that turn, or start its next turn."""
+        got, waits = self.mid_turn_got.pop(sid, 0), self.db.one(
+            "SELECT 1 FROM mail WHERE session=? AND status='pending'", sid)
+        return ((f"\n[System] It got your {what}{'s' * (got > 1)} during this turn." if got else "")
+                + (f"\n[System] Your {what} sent while it ran starts its next turn." if waits else ""))
+
+    def notes_delivered(self, ws: str, gid: str, ids: str) -> None:
+        """Queued human notes among these inbox events reach the meta-work with them."""
+        if self.db.one(f"SELECT 1 FROM inbox WHERE id IN ({ids}) AND kind='note'"):
+            self.db.x("UPDATE notes SET status='delivered' WHERE ws=? AND goal=? AND status='queued' AND seq IN "
+                      f"(SELECT json_extract(payload, '$.id') FROM inbox WHERE id IN ({ids}) AND kind='note')",
+                      ws, gid)
+            self.publish("note", ws=ws, goal=gid)
+
+    def requeue(self, ws: str, gid: str, deferred: bool = False) -> None:
+        """Put back the events of a meta-work turn that did not complete, those it took while it ran included."""
+        self.db.x(f"UPDATE inbox SET consumed=0{', deferred=1' if deferred else ''} WHERE ws=? AND goal=? "
+                  "AND consumed=2", ws, gid)
 
     # ---------- running one turn of any session ----------
     @staticmethod
@@ -1156,6 +1347,8 @@ class Engine:
                "LOOP_GUARD_PATTERNS": json.dumps(cfg["guard"]["deny_patterns"] or [])}
         if sess["kind"] != "meta-chat":  # a GPU is handed to one job at a time, by `loop run --vram`
             env["CUDA_VISIBLE_DEVICES"] = ""
+        if not ADAPTERS[sess["agent"]].live:  # its mailbox hook runs while this flag exists (mid-turn delivery)
+            env["LOOP_MAILBOX"] = mailbox(sid)
         spec = RunSpec(agent=sess["agent"], kind="worker" if worker else "meta", cwd=Path(sess["cwd"]),
                        prompt=prompt, model=conf["model"], effort=conf["effort"], autocompact=conf["autocompact"],
                        resume_id=sess["vendor_id"], env=env)
@@ -1209,10 +1402,16 @@ class Engine:
         # and so do its `loop run` jobs, all but the detached ones
         scratch = Path(spec.env["TMPDIR"])
         scratch.mkdir(parents=True, exist_ok=True)
+        # Messages for the session reach this turn while it runs when mid-turn delivery is on (offer)
+        self.live_turns[sid] = {"started": time.time(), "n": n, "events": events}
+        self.mid_turn_got.pop(sid, None)
         try:
             res = await self.runner.run(sid, spec, raw_log=raw, event_log=events, on_event=on_event,
-                                        timeout_s=cfg["turn_timeout_min"] * 60, memory_max_gb=mem)
+                                        timeout_s=cfg["turn_timeout_min"] * 60, memory_max_gb=mem,
+                                        on_input=lambda: self.offer(sid))
         finally:
+            self.live_turns.pop(sid, None)
+            mailbox(sid).unlink(missing_ok=True)
             shutil.rmtree(scratch, ignore_errors=True)
             mine = [k for k, g in self.grants.items() if g["sid"] == sid and not g.get("job")]
             jobs = [self.grants[k]["cmd"] for k in mine]
@@ -1278,6 +1477,7 @@ class Engine:
         running = self.db.one("SELECT COUNT(*) c FROM goals WHERE ws=? AND status='running'", ws)["c"]
         if running >= limit:
             raise AgentError(f"{running} goals already running in this workspace (max_running_goals={limit})")
+        self.set_goal(ws, gid, start_at=None)  # before any wait, so a scheduled start cannot start it twice
         mc = goal_config(p, gid)["goal"]
         # The base is recorded once, so the PR targets the branch the integration branch was cut from
         base = mc.get("base_branch") or m["base"] or gitops.current_branch(p / "repo")
@@ -1298,6 +1498,29 @@ class Engine:
                          fail_streak=0, first_started=m["first_started"] or time.time())
         self.kick(ws, gid)
 
+    def schedule_start(self, ws: str, gid: str, minutes: int | None) -> None:
+        """Start or resume the goal in `minutes` (the infra loop starts it, so the time survives a restart); None
+        cancels a scheduled start."""
+        m = self.goal_row(ws, gid)
+        if minutes is not None:
+            if m["status"] in ("running", "awaiting_review", "done"):
+                raise AgentError(f"goal is {m['status']}")
+            if type(minutes) is not int or minutes < 1:
+                raise AgentError("the delay is a whole number of minutes, 1 or more")
+        self.db.update("goals", {"ws": ws, "id": gid}, start_at=None if minutes is None else time.time() + minutes * 60)
+        self.publish("goal_status", ws=ws, goal=gid, status=m["status"])
+
+    def start_scheduled(self) -> None:
+        """Start the goals whose scheduled start has come; one that cannot start says why."""
+        async def start(ws: str, gid: str) -> None:
+            try:
+                await self.start_goal(ws, gid)
+            except Exception as exc:
+                self.publish("alert", ws=ws, goal=gid, text=f"The scheduled start failed: {exc}")
+        for g in self.db.q("SELECT ws, id FROM goals WHERE start_at <= ?", time.time()):
+            self.db.update("goals", {"ws": g["ws"], "id": g["id"]}, start_at=None)
+            self.spawn(start(g["ws"], g["id"]), goal=(g["ws"], g["id"]))
+
     async def stop_goal(self, ws: str, gid: str, status: str = "stopped", meta_work: bool = True) -> None:
         """Leave the running state; kill workers (and the meta-work unless it is the caller)."""
         m = self.goal_row(ws, gid)
@@ -1312,6 +1535,9 @@ class Engine:
                 self.db.update("sessions", {"id": s["id"]}, status="stopped", updated=time.time())
                 self.advice_result(s, s["turns"] + 1, "stopped", "The goal stopped before the consultation started.")
         self.stop_jobs("the goal stopped", ws=ws, goal=gid)
+        # Messages the meta-work sent to its workers and advisors are not delivered once the goal stops
+        self.db.x("UPDATE mail SET status='dropped' WHERE status='pending' AND session IN (SELECT id FROM sessions "
+                  "WHERE ws=? AND goal=? AND kind IN ('worker', 'meta-advisor'))", ws, gid)
         kinds = ("worker", "meta-work", "meta-advisor") if meta_work else ("worker", "meta-advisor")
         for s in self.db.q("SELECT id, kind FROM sessions WHERE ws=? AND goal=?", ws, gid):
             if s["kind"] in kinds:
@@ -1320,6 +1546,8 @@ class Engine:
     def kick(self, ws: str, gid: str) -> None:
         if (ws, gid) not in self.meta_active:
             self.spawn(self.meta_loop(ws, gid), goal=(ws, gid))
+        elif (m := self.db.goal(ws, gid)) and m["meta_work"]:
+            self.offer(m["meta_work"])  # with mid-turn delivery on, its running turn takes the new events
 
     async def meta_loop(self, ws: str, gid: str) -> None:
         key = (ws, gid)
@@ -1344,24 +1572,20 @@ class Engine:
                     return
                 items = self.db.q("SELECT * FROM inbox WHERE ws=? AND goal=? AND consumed=0 ORDER BY id",
                                   ws, gid)
-                # Items stay in flight (2) until the turn completes; failures put them back (0)
+                # Items stay in flight (2) until the turn completes, with those it takes while it runs (mid-turn
+                # delivery); failures put them back (0)
                 ids = ",".join(str(i["id"]) for i in items)
                 self.db.x(f"UPDATE inbox SET consumed=2 WHERE id IN ({ids})")
-                # Queued notes reach the meta-work with this turn
-                if any(i["kind"] == "note" for i in items):
-                    self.db.x("UPDATE notes SET status='delivered' WHERE ws=? AND goal=? AND status='queued' AND seq IN "
-                              f"(SELECT json_extract(payload, '$.id') FROM inbox WHERE id IN ({ids}) AND kind='note')",
-                              ws, gid)
-                    self.publish("note", ws=ws, goal=gid)
+                self.notes_delivered(ws, gid, ids)
                 try:
                     progressed = await self.meta_turn(ws, gid, items)
                 except Exception as exc:
-                    self.db.x(f"UPDATE inbox SET consumed=0 WHERE id IN ({ids}) AND consumed=2")
+                    self.requeue(ws, gid)
                     log.exception("meta turn failed for %s/%s", ws, gid)
                     await self.stop_goal(ws, gid, status="paused")
                     self.publish("alert", ws=ws, goal=gid, text=f"Meta-work turn crashed, goal paused: {exc!r}")
                     return
-                self.db.x(f"UPDATE inbox SET consumed=1 WHERE id IN ({ids}) AND consumed=2")
+                self.db.x("UPDATE inbox SET consumed=1 WHERE ws=? AND goal=? AND consumed=2", ws, gid)
                 await self.after_meta_turn(ws, gid, items, progressed)
         finally:
             self.meta_active.discard(key)
@@ -1419,12 +1643,10 @@ class Engine:
                 "project changes in the integration worktree only.")}, deferred=True)
             self.publish("alert", ws=ws, goal=gid, text=f"repo/ changed during meta-work turn {n}; please check it.")
         workspace.commit(p, f"meta-work({orch['id']})", f"meta-work({orch['id']}): {gid} turn {n}", protected=False)
-        ids = ",".join(str(i["id"]) for i in items if "id" in i)
         if res.limited_until:
             # The CLI refused to run: no meta turn spent and no failure counted; the same events are redelivered
             self.vendor_limits[orch["agent"]] = res.limited_until
-            if ids:
-                self.db.x(f"UPDATE inbox SET consumed=0 WHERE id IN ({ids})")
+            self.requeue(ws, gid)
             for i in items:  # a handoff built for this turn only must reach the session's first real turn
                 if "id" not in i:
                     self.db.push_inbox(ws, gid, i["kind"], json.loads(i["payload"]))
@@ -1432,18 +1654,19 @@ class Engine:
                                                         f"resumes after {clock(res.limited_until)}.")
             return end != start
         m = self.goal_row(ws, gid)
-        fields = {"meta_turns": m["meta_turns"] + 1, "tokens": m["tokens"] + res.tokens}
+        # A turn on nothing but a check-in, events it took mid-turn included, costs no meta turn of the budget
+        spent = self.db.one("SELECT 1 FROM inbox WHERE ws=? AND goal=? AND consumed=2 AND kind != 'checkin'", ws, gid)
+        fields = {"meta_turns": m["meta_turns"] + bool(spent), "tokens": m["tokens"] + res.tokens}
         if reverted:
             self.db.push_inbox(ws, gid, "system", {"text": "[System] Reverted your edits to human-owned files: "
                                                            + ", ".join(reverted)}, deferred=True)
             self.publish("alert", ws=ws, goal=gid, text="Reverted edits to human-owned files (backup in "
                                                             ".loop/reverted/): " + ", ".join(reverted))
-        if res.stopped and ids:  # a human-stopped turn: keep its events for the next trigger
-            self.db.x(f"UPDATE inbox SET consumed=0, deferred=1 WHERE id IN ({ids})")
+        if res.stopped:  # a human-stopped turn: keep its events for the next trigger
+            self.requeue(ws, gid, deferred=True)
         if res.error and not res.stopped:
             fields["fail_streak"] = m["fail_streak"] + 1
-            if ids:  # redeliver the same events on the next attempt
-                self.db.x(f"UPDATE inbox SET consumed=0 WHERE id IN ({ids})")
+            self.requeue(ws, gid)  # redeliver the same events on the next attempt
             if fields["fail_streak"] >= 3:
                 self.db.update("goals", {"ws": ws, "id": gid}, **fields)
                 await self.stop_goal(ws, gid, status="paused")
@@ -1717,7 +1940,12 @@ class Engine:
             if not sess or sess["kind"] != "meta-advisor" or (sess["ws"], sess["goal"]) != (ws, gid):
                 raise AgentError(f"no consultation {follow_up} in this goal")
             if sess["status"] in ("queued", "running"):
-                raise AgentError(f"consultation {follow_up} is still in progress; follow up after its [Advice]")
+                self.post_mail(sess["id"], prompt.strip(), "meta-work")
+                if self.mid_turn(ws, gid):
+                    return (f"Consultation {follow_up} is running: it gets your follow-up after its current tool "
+                            "call; its advice arrives as an [Advice] event.")
+                return (f"Consultation {follow_up} is running: your follow-up starts its next turn when this one "
+                        "ends; each turn's advice arrives as an [Advice] event.")
             if not sess["vendor_id"]:
                 raise AgentError(f"consultation {follow_up} has no conversation to resume; ask without --follow-up")
             self.check_agent_current(sess)
@@ -1841,6 +2069,7 @@ class Engine:
             text = res.final or res.error or "The advisor returned no advice."
             if res.error and res.final:
                 text = f"{res.error}\n\n{text}"
+            text += self.mail_note(sid, "follow-up")
             if res.limited_until:
                 # Refunded, and the same question goes to the consultation again at the reset
                 self.vendor_limits[sess["agent"]] = res.limited_until
@@ -1938,13 +2167,18 @@ class Engine:
         self.require_meta_work(caller)
         w = self.own_worker(caller, sid)
         self.check_agent_current(w)
-        if w["status"] == "running":
-            raise AgentError(f"{sid} is still running; wait for its report")
         if not Path(w["cwd"]).exists():
             raise AgentError(f"{sid} is retired (its worktree was removed); spawn a new worker, which can build on "
                              f"its branch {w['branch']}")
         if not prompt.strip():
             raise AgentError("empty prompt")
+        if w["status"] == "running":
+            self.post_mail(sid, prompt.strip(), "meta-work")
+            if self.mid_turn(caller["ws"], caller["goal"]):
+                return f"{sid} is running: it gets your message after its current tool call and reports when its " \
+                       "turn ends."
+            return f"{sid} is running: your message starts its next turn when this one ends; each turn reports as " \
+                   "an event."
         self.check_limit(w["agent"])
         self.check_dispatch(caller["ws"], caller["goal"])
         self.db.update("sessions", {"id": sid}, status="running")
@@ -2014,7 +2248,7 @@ class Engine:
             shutil.copytree(wt / ".artifacts", rd / "artifacts", dirs_exist_ok=True)
         digest.write_text(rd / f"t{n}.out.md", res.final or res.error or "")
         self.db.x("UPDATE turns SET end_commit=? WHERE session=? AND n=?", gitops.head(wt), sid, n)
-        text = digest.worker_digest(self.db.session(sid), n, res)
+        text = digest.worker_digest(self.db.session(sid), n, res) + self.mail_note(sid, "message")
         # The guard can be bypassed (e.g. a script writing goal.md): revert before the evidence commit seals it
         reverted = workspace.enforce_protected(p)
         if res.leftover:
@@ -2051,6 +2285,7 @@ class Engine:
             return f"Stopped job {sid}." if stopped else f"{sid} is not a running job of this goal (see `loop ls`)"
         w = self.own_worker(caller, sid) if caller else self.db.session(sid)
         jobs = self.stop_jobs(f"stopped with {sid}", session=sid) if w else []
+        self.db.x("UPDATE mail SET status='dropped' WHERE session=? AND status='pending'", sid)
         also = f" Stopped its jobs {', '.join(jobs)}." if jobs else ""
         if not w or not self.runner.running(sid):
             return f"{sid} is not running.{also}"
@@ -2297,13 +2532,24 @@ class Engine:
         s = self.db.session(sid)
         if not s or s["kind"] != "meta-chat":
             raise AgentError("unknown meta-chat session")
-        if s["status"] == "running" or self.runner.running(sid):
+        # While it answers, a message reaches it only with mid-turn delivery on: in that turn, or as the next one
+        busy = s["status"] == "running" or self.runner.running(sid)
+        if busy and not self.mid_turn(s["ws"], s["goal"]):
             raise AgentError("the meta-chat is still answering")
         if not text.strip():
             raise AgentError("empty message")
-        self.db.update("sessions", {"id": sid}, status="running")  # claimed before the CLI starts
+        if not busy:
+            self.db.update("sessions", {"id": sid}, status="running")  # claimed before the CLI starts
         self.db.x("INSERT INTO messages(session, ts, role, text) VALUES(?,?,?,?)", sid, time.time(), "user", text)
         self.publish("meta_chat_message", session=sid, ws=s["ws"], goal=s["goal"])
+        if busy:
+            self.post_mail(sid, text, "human")
+        else:
+            self.chat_turn(sid, text)
+
+    def chat_turn(self, sid: str, text: str) -> None:
+        """Start a meta-chat turn on the human's message(s); the session is already claimed (running)."""
+        s = self.db.session(sid)
         task = self.chat_tasks[sid] = self.spawn(self._meta_chat_turn(sid, text), goal=(s["ws"], s["goal"]))
         task.add_done_callback(lambda t: self.chat_tasks.pop(sid, None) if self.chat_tasks.get(sid) is t else None)
 
@@ -2312,6 +2558,7 @@ class Engine:
         s = self.db.session(sid)
         if not s or s["kind"] != "meta-chat":
             raise AgentError("unknown meta-chat session")
+        self.db.x("DELETE FROM mail WHERE session=?", sid)  # so no turn starts with them once this one is killed
         await self.runner.kill(sid, stopped=True)
         # The killed turn still records its answer; wait for it so no row outlives the delete
         if task := self.chat_tasks.get(sid):
@@ -2345,3 +2592,8 @@ class Engine:
         self.db.x("INSERT INTO messages(session, ts, role, text) VALUES(?,?,?,?)", sid, time.time(),
                   "assistant", answer)
         self.publish("meta_chat_message", session=sid, ws=s["ws"], goal=s["goal"])
+        # Messages the human sent while it answered that this turn did not take start the next one
+        if mail := self.db.q("SELECT * FROM mail WHERE session=? AND status='pending' ORDER BY id", sid):
+            self.take_pending(mail, [], "turn")
+            self.db.update("sessions", {"id": sid}, status="running")
+            self.chat_turn(sid, "\n\n".join(m["text"] for m in mail))

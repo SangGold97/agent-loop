@@ -1,4 +1,5 @@
-"""SQLite runtime state: goals, sessions, turns, inbox events, notes, meta-chat messages, detached jobs."""
+"""SQLite runtime state: goals, sessions, turns, inbox events, notes, meta-chat messages, detached jobs, and mail
+(messages for a worker, advisor or meta-chat sent while it runs)."""
 from __future__ import annotations
 
 import json
@@ -31,6 +32,9 @@ CREATE TABLE IF NOT EXISTS notes(
   status TEXT, mode TEXT, source_session TEXT);
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY, session TEXT, ts REAL, role TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS mail(
+  id INTEGER PRIMARY KEY, session TEXT, ts REAL, text TEXT, sender TEXT, status TEXT DEFAULT 'pending',
+  delivered REAL);
 CREATE TABLE IF NOT EXISTS jobs(
   id TEXT PRIMARY KEY, session TEXT, ws TEXT, goal TEXT, cmd TEXT, log TEXT, unit TEXT, pid INT,
   grant_info TEXT, started REAL, ended REAL, status TEXT, result TEXT, reported INT DEFAULT 0, rc INT,
@@ -40,7 +44,7 @@ CREATE TABLE IF NOT EXISTS jobs(
 ADDED_COLUMNS = [("goals", "first_started", "REAL"), ("goals", "base", "TEXT"), ("goals", "pushed", "REAL"),
                  ("goals", "pr", "TEXT"), ("notes", "seq", "INT"), ("jobs", "rc", "INT"),
                  ("sessions", "resume_at", "REAL"), ("sessions", "resume_prompt", "TEXT"),
-                 ("jobs", "prov", "TEXT"), ("jobs", "peak_gb", "REAL")]
+                 ("jobs", "prov", "TEXT"), ("jobs", "peak_gb", "REAL"), ("goals", "start_at", "REAL")]
 # Columns no longer kept: the platform does not track spend, and GPUs go to jobs (`loop run --vram`), not sessions
 DROPPED_COLUMNS = [("goals", "cost"), ("sessions", "cost"), ("turns", "cost"), ("sessions", "gpu")]
 

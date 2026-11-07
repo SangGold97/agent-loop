@@ -51,7 +51,7 @@ def envelope(items: list[dict], brief: str | None = None) -> str:
         kind = it["kind"]
         if p.get("until") and p["until"] < time.time():
             continue
-        if kind in ("kickoff", "handoff", "system", "budget", "worker_done", "advice"):
+        if kind in ("kickoff", "handoff", "system", "budget", "worker_done", "advice", "checkin"):
             parts.append(p["text"])
         elif kind == "note":
             parts.append(f"[Human note #{p['id']}] {p['text']}")

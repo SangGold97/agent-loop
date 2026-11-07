@@ -46,7 +46,16 @@ def server():
         def argv(self, s):
             return [sys.executable, str(FAKE)] + (["--resume", s.resume_id] if s.resume_id else [])
 
+    class FakeHookAdapter(FakeAdapter):
+        """A CLI without live input (as Codex and agy): plain prompt on stdin, messages through the mailbox hook."""
+        name = "fakehook"
+        live = False
+
+        def stdin(self, s):
+            return s.prompt
+
     ADAPTERS["fake"] = FakeAdapter()
+    ADAPTERS["fakehook"] = FakeHookAdapter()
 
     # The real CLIs' usage windows stay out of the tests (their warnings would reach the goals under test)
     async def no_quota(name):

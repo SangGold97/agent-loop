@@ -1,4 +1,5 @@
-"""Claude Code adapter: `claude -p --output-format stream-json`, prompt on stdin, resume by session id."""
+"""Claude Code adapter: `claude -p` with stream-json in and out, resume by session id. The prompt and any message
+sent while the turn runs are user messages on stdin; the CLI takes each one after its current tool call."""
 from __future__ import annotations
 
 import json
@@ -34,10 +35,13 @@ def tool_detail(inp: dict) -> str:
 class ClaudeAdapter(Adapter):
     name = "claude"
     binary = "claude"
+    live = True
 
     def argv(self, s: RunSpec) -> list[str]:
-        a = ["claude", "-p", "--output-format", "stream-json", "--verbose",
-             "--include-partial-messages", "--dangerously-skip-permissions", "--setting-sources", "project,local"]
+        # --replay-user-messages echoes each message from stdin when the CLI takes it
+        a = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+             "--replay-user-messages", "--include-partial-messages", "--dangerously-skip-permissions",
+             "--setting-sources", "project,local"]
         if s.model:
             a += ["--model", s.model]
         if s.effort:
@@ -60,6 +64,13 @@ class ClaudeAdapter(Adapter):
         if s.chrome:
             a.append("--chrome")
         return a
+
+    def stdin(self, s: RunSpec) -> str:
+        return self.message(s.prompt)
+
+    def message(self, text: str) -> str:
+        return json.dumps({"type": "user", "message": {"role": "user", "content": text},
+                           "parent_tool_use_id": None}, ensure_ascii=False) + "\n"
 
     def parse(self, o: dict, st: ParseState) -> list[dict]:
         kind, out = o.get("type"), []
@@ -113,6 +124,14 @@ class ClaudeAdapter(Adapter):
                     out.append({"type": "tool", "name": c.get("name"), "detail": tool_detail(c.get("input") or {})})
                 elif c.get("type") == "thinking" and c.get("thinking"):
                     out.append({"type": "thinking", "text": short(c["thinking"], 400)})
+        elif kind == "user" and o.get("isReplay"):
+            # A message from stdin as the CLI takes it; the first is the turn's prompt, logged with the turn
+            st.replays += 1
+            content = (o.get("message") or {}).get("content")
+            if st.replays > 1:
+                text = content if isinstance(content, str) else "\n".join(
+                    c.get("text", "") for c in content or [] if isinstance(c, dict))
+                out.append({"type": "message", "text": text})
         elif kind == "user":
             for c in (o.get("message") or {}).get("content") or []:
                 if isinstance(c, dict) and c.get("type") == "tool_result":
@@ -121,6 +140,7 @@ class ClaudeAdapter(Adapter):
                         body = "\n".join(x.get("text", "") for x in body if isinstance(x, dict))
                     out.append(tool_result(body or "", bool(c.get("is_error"))))
         elif kind == "result":
+            st.rest = True
             st.vendor_id = o.get("session_id") or st.vendor_id
             # A turn can end in several results: the CLI answers again when a background task it started
             # ends. Each result counts only its own calls and replies only to its own prompt, so both add up

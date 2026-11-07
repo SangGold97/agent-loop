@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import time
@@ -24,10 +25,33 @@ def _spec(gdir):
     return (gdir / "spec.md").read_text() if (gdir / "spec.md").exists() else ""
 
 
+# Live input, as Claude Code with --input-format stream-json: user messages on stdin, one per line, which stays open
+# while the turn runs; a session with a mailbox flag stands in for a CLI without it (plain prompt, then EOF)
+LIVE = "LOOP_MAILBOX" not in os.environ
+_buf = b""
+
+
+def read_message(timeout=None):
+    """One user message from stdin, echoed back as Claude Code does with --replay-user-messages; None at EOF or
+    after `timeout` seconds without one."""
+    global _buf
+    while b"\n" not in _buf:
+        if timeout is not None and not select.select([0], [], [], timeout)[0]:
+            return None
+        chunk = os.read(0, 65536)
+        if not chunk:
+            return None
+        _buf += chunk
+    line, _buf = _buf.split(b"\n", 1)
+    msg = json.loads(line)["message"]
+    emit({"type": "user", "message": msg, "isReplay": True})
+    return msg["content"]
+
+
 def main():
     resume = sys.argv[sys.argv.index("--resume") + 1] if "--resume" in sys.argv else None
     sid = resume or str(uuid.uuid4())
-    prompt = sys.stdin.read()
+    prompt = read_message() if LIVE else sys.stdin.read()
     role, gdir = os.environ.get("LOOP_ROLE"), Path(os.environ.get("LOOP_GOAL_DIR", "."))
     wt = Path(os.environ.get("LOOP_WS", ".")) / "wt" / os.environ.get("LOOP_GOAL", "")  # integration worktree
     emit({"type": "system", "subtype": "init", "session_id": sid})
@@ -105,6 +129,29 @@ def main():
         elif "FAIL" in prompt:
             Path("broken.txt").write_text("partial\n")
             text = "**Result:** failed on purpose\n**Issues:** simulated failure"
+        elif "MIDTURN" in prompt:
+            # The meta-work's message sent while this turn runs comes on stdin after a tool call
+            emit({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}})
+            msg = read_message(timeout=60)
+            Path(".artifacts").mkdir(exist_ok=True)
+            Path(".artifacts/midturn.txt").write_text(msg or "")
+            Path("hello.py").write_text('print("hello")\n')
+            text = f"**Result:** created hello.py, then read: {msg}"
+        elif "MIDHOOK" in prompt:
+            # A CLI without live input takes it through its mailbox hook, run after a tool call while the flag exists
+            flag = Path(os.environ["LOOP_MAILBOX"])
+            for _ in range(300):
+                if flag.exists():
+                    break
+                time.sleep(0.1)
+            out = subprocess.run([sys.executable, "-m", "agentloop.mailbox"], capture_output=True, text=True,
+                                 input=json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash"})).stdout
+            Path(".artifacts").mkdir(exist_ok=True)
+            Path(".artifacts/midhook.txt").write_text(out)
+            Path(".artifacts/flag-after.txt").write_text(str(flag.exists()))
+            Path("hello.py").write_text('print("hello")\n')
+            text = "**Result:** created hello.py"
         else:
             Path("hello.py").write_text('print("hello")\n')
             # Kept outputs: collected and git-excluded by the platform, never committed
@@ -113,7 +160,10 @@ def main():
             (Path(os.environ["TMPDIR"]) / "scratch.txt").write_text("temporary\n")
             Path(".artifacts/tmpdir.txt").write_text(os.environ["TMPDIR"])
             if "TAMPER" in prompt:  # a write the guard does not see; the platform must revert it
+                time.sleep(1)  # once the meta-work's kickoff turn has ended, so this worker's turn reverts it
                 (gdir / "goal.md").write_text("- nothing to do\n")
+            if "SLOW" in prompt:  # still running when the meta-work sends it a message
+                time.sleep(1.5)
             if "RAMJOB" in prompt:
                 # A tool process is put ahead of the CLI and `loop run` jobs for the OOM killer within a sample
                 tool = subprocess.Popen(["sleep", "5"])
@@ -207,6 +257,32 @@ def main():
             subprocess.run(["git", "checkout", "-q", f"loop/{os.environ['LOOP_GOAL']}/integration"], cwd=wt,
                            check=True)
             text += "\n" + loop("done", "--status", "partial", stdin="- wip only")
+        elif "MIDTURN" in _spec(gdir) and "[Kickoff]" in prompt:
+            # Steers the worker while it runs and takes its report in this same turn (mid-turn delivery)
+            w = re.search(r"Spawned (w-\w+)", loop("spawn", "--agent", "fake", "--role", "coder", "--prompt",
+                                                    "Create hello.py MIDTURN")).group(1)
+            (gdir / ".midturn-send.txt").write_text(loop("send", w, "--prompt", "MIDMSG: mind the docstring"))
+            (gdir / ".midturn-report.txt").write_text(read_message(timeout=60) or "")
+            text = loop("merge", w) + "\n" + loop("done", "--status", "success", stdin="- hello.py exists")
+        elif "MIDHOOK" in _spec(gdir) and "[Kickoff]" in prompt:
+            w = re.search(r"Spawned (w-\w+)", loop("spawn", "--agent", "fakehook", "--role", "coder", "--prompt",
+                                                    "Create hello.py MIDHOOK")).group(1)
+            (gdir / ".midhook-send.txt").write_text(loop("send", w, "--prompt", "HOOKMSG: mind the docstring"))
+            text = "waiting for the worker"
+        elif "QUEUESEND" in _spec(gdir) and "[Kickoff]" in prompt:
+            # Without mid-turn delivery, a message to a running worker starts its next turn
+            w = re.search(r"Spawned (w-\w+)", loop("spawn", "--agent", "fake", "--role", "coder", "--prompt",
+                                                    "Create hello.py SLOW")).group(1)
+            (gdir / ".queue-send.txt").write_text(loop("send", w, "--prompt", "QMSG: second task"))
+            text = "waiting for the worker"
+        elif "QUEUESEND" in _spec(gdir) and "[Worker" in prompt and "· turn 2]" not in prompt:
+            text = "waiting for its second turn"
+        elif "CHECKIN" in _spec(gdir) and "[Kickoff]" in prompt:
+            # Leaves a long job running and ends its turn: before the job ends, only a check-in wakes it
+            text = loop("run", "--", "sleep", "299")
+        elif "CHECKIN" in _spec(gdir) and "[Check-in]" in prompt:
+            (gdir / ".checkin.txt").write_text(prompt)
+            text = loop("done", "--status", "success", stdin="- the job was checked")
         elif "[Kickoff]" in prompt:
             (gdir / "plan.md").write_text("# Plan\n\n- [ ] create hello.py\n")
             task = "Create hello.py" + "".join(f" {k}" for k in ("TAMPER", "RAMJOB", "DETACH") if k in _spec(gdir))
@@ -234,9 +310,14 @@ def main():
     else:
         if "CHATWRITE" in prompt:  # a shell write the guard does not see; the platform must report it
             (wt / "chat.txt").write_text("x\n")
-        status = loop("status")
-        note = loop("note", "Consider adding a test")
-        text = f"Status checked ({len(status)} chars). {note}"
+        if "CHATWAIT" in prompt:  # the human's next message comes while this turn answers (mid-turn delivery)
+            emit({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}})
+            text = f"Also read: {read_message(timeout=20)}"
+        else:
+            status = loop("status")
+            note = loop("note", "Consider adding a test")
+            text = f"Status checked ({len(status)} chars). {note}"
     emit({"type": "assistant", "message": {"content": [{"type": "text", "text": text}],
                                            "usage": {"input_tokens": 10, "cache_read_input_tokens": 90}}})
     emit({"type": "result", "subtype": "success", "result": text, "session_id": sid, "total_cost_usd": 0.01,
@@ -245,3 +326,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # With live input, stdin stays open until the platform closes it: a message after the answer gets one more
+    while LIVE and (more := read_message()) is not None:
+        emit({"type": "assistant", "message": {"content": [{"type": "text", "text": f"Noted: {more}"}]}})
+        emit({"type": "result", "subtype": "success", "result": f"Noted: {more}"})

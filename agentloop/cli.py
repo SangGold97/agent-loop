@@ -17,7 +17,7 @@ from pathlib import Path
 
 HELP = """Commands for meta-agents (run `loop <command> -h` for options):
   spawn   start a new worker session           loop spawn --agent claude --role coder <<'EOF' ... EOF
-  send    continue an idle worker              loop send w-1a2b3c <<'EOF' ... EOF
+  send    continue a worker (also a running one) loop send w-1a2b3c <<'EOF' ... EOF
   advise  request advice; the reply arrives as an event   loop advise [--follow-up ma-1a2b3c] <<'EOF' ... EOF
   stop    stop a running worker (and its jobs), or one job   loop stop w-1a2b3c | loop stop j-4d5e6f
   ls      list this goal's workers
@@ -203,7 +203,7 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("spawn", help="start a new worker")
     sp.add_argument("--agent", required=True, help="worker CLI (claude, codex or agy); model and effort are fixed by the human")
     sp.add_argument("--role", required=True, help="what the worker does, e.g. coder, reviewer, research")
-    for name, sparser in (("spawn", sp), ("send", sub.add_parser("send", help="continue an idle worker")),
+    for name, sparser in (("spawn", sp), ("send", sub.add_parser("send", help="continue a worker, also a running one")),
                           ("advise", sub.add_parser("advise", help="request advice asynchronously"))):
         if name == "send":
             sparser.add_argument("sid")

@@ -26,6 +26,7 @@ defaults:
     max_meta_turns: 80        # meta-work + advisor turns
   language: English           # human-facing text: plan, report, chat and advice; worker prompts use English
   base_branch: null           # null = the branch repo/ has checked out when the goal starts; its PR targets it
+  mid_turn: false             # true: messages to a running agent reach it after its current tool call, not at turn end
 
 infra:
   pool_reserve_gb: 3          # host RAM kept out of the pool all sessions share (largest value of all workspaces)
@@ -34,6 +35,7 @@ infra:
 
 turn_timeout_min: 180
 job_timeout_h: 9              # a `loop run` job is stopped after this many hours
+idle_checkin_min: 30          # all agents of a running goal idle this long: the meta-work gets a check-in (0 = never)
 
 guard:
   deny_patterns: []           # extra regexes; matching shell commands are blocked for all agents

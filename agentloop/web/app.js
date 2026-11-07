@@ -9,7 +9,7 @@ const S = { workspaces: [], route: {}, goal: null, feeds: {}, infra: null, histo
 const main = document.getElementById('main');
 const AGENTS = ['claude', 'codex', 'agy'];
 const NO_AUTOCOMPACT = ['agy'];  // CLIs without an auto-compact setting
-const FEED_TYPES = ['turn', 'text', 'tool', 'tool_result', 'thinking', 'turn_end', 'error'];
+const FEED_TYPES = ['turn', 'message', 'text', 'tool', 'tool_result', 'thinking', 'turn_end', 'error'];
 
 // ---------- helpers ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -111,6 +111,7 @@ function closeModal() {
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 function pill(status, text) { return `<span class="pill ${esc(status)}">${esc(label(text || status))}</span>`; }
+const startsPill = ts => ts ? `<span class="pill queued" title="scheduled start">starts ${fmtTime(ts)}</span>` : '';
 // A goal's or agent's status; running gets a spinner instead of a separate "thinking" line.
 // The delay ties the spinner's phase to the clock so repainting the header does not restart it.
 const agentPill = st => st === 'running'
@@ -257,7 +258,7 @@ function wireAgentRows(root, onChange) {
       if (f === 'agent') {
         row.dataset.agent = e.target.value;
         if (row.dataset.key === 'meta_work')
-          $$('.chrome-opt', root).forEach(el => { el.style.visibility = e.target.value === 'claude' ? '' : 'hidden'; });
+          $$('.chrome-opt', root).forEach(el => { el.style.display = e.target.value === 'claude' ? '' : 'none'; });
         $('[data-f=model]', row).innerHTML = modelOptions(e.target.value, null);
         const ac = $('[data-f=autocompact]', row);
         if (ac) {
@@ -286,8 +287,9 @@ function readAgentRow(row) {
 }
 // Claude in Chrome acts in the human's own browser with their sign-ins: off unless ticked, Claude meta-work only
 const CHROME_TIP = 'Claude meta-work only: it gets the Claude in Chrome tools and acts in your Chrome with your sign-ins. Workers, advisor and meta-chat never get them.';
-// Kept in the layout (visibility, not display) so the side grid keeps its rows
-const chromeHidden = agent => (agent || 'claude') === 'claude' ? '' : 'style="visibility:hidden"';
+// Shares its row with mid-turn, so the side grid keeps its rows while the Chrome option is hidden
+const chromeHidden = agent => (agent || 'claude') === 'claude' ? '' : 'style="display:none"';
+const MID_TURN_TIP = 'Every agent of the goal: a message to an agent that is working reaches it after its current tool call instead of waiting for its turn to end (worker reports, advice and notes to the meta-work, loop send to a worker, follow-ups to the advisor, your chat messages). Off: messages wait for the turn to end. Takes effect at once.';
 function configForm(conf, footer = '') {
   const b = conf.budget || {}, mw = conf.meta_work || {}, wk = conf.workers || {};
   const num = (k, v, title, tip) => `<label class="f" title="${tip}">${title}<input type="number" min="0" step="1" data-b="${k}" value="${v ?? ''}" placeholder="∞"></label>`;
@@ -302,8 +304,9 @@ function configForm(conf, footer = '') {
     <div class="cfg-side">
       <div class="k" title="start a fresh meta-work session when its context exceeds this many tokens">rotate at</div>
       ${tokInput('data-rotate title="start a fresh meta-work session when its context exceeds this many thousand tokens; empty = off"', mw.rotate_at_tokens, 'off (e.g. 1200)')}
-      <div class="k chrome-opt" title="${CHROME_TIP}" ${chromeHidden(mw.agent)}>chrome</div>
-      <label class="inline chrome-opt" title="${CHROME_TIP}" ${chromeHidden(mw.agent)}><input type="checkbox" data-chrome ${mw.chrome ? 'checked' : ''}> meta-work uses Claude in Chrome</label>
+      <div class="k">options</div>
+      <div class="opt-row"><label class="inline chrome-opt" title="${CHROME_TIP}" ${chromeHidden(mw.agent)}><input type="checkbox" data-chrome ${mw.chrome ? 'checked' : ''}> meta-work uses Claude in Chrome</label>
+        <label class="inline" title="${MID_TURN_TIP}"><input type="checkbox" data-mid-turn ${conf.mid_turn ? 'checked' : ''}> mid-turn</label></div>
       <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'workers', 'concurrent workers')}
         ${num('max_worker_turns', b.max_worker_turns, 'worker turns', 'worker turns in total')}${num('max_meta_turns', b.max_meta_turns, 'meta turns', 'meta-work + advisor turns in total')}</div>
       <div class="k">language</div><select data-lang title="for plan, report, advice and chat replies to you; meta-work and workers talk to each other in English">${['English', 'Vietnamese'].concat(
@@ -329,7 +332,7 @@ function readConfigForm(root) {
   $$('[data-b]', root).forEach(i => { budget[i.dataset.b] = i.value.trim() === '' ? null : Number(i.value); });
   return { meta_work: metaWork, meta_advisor: readAgentRow(rows.find(r => r.dataset.key === 'meta_advisor')),
     workers, budget, language: $('[data-lang]', root).value,
-    base_branch: $('[data-base]', root).value.trim() || null };
+    base_branch: $('[data-base]', root).value.trim() || null, mid_turn: $('[data-mid-turn]', root).checked };
 }
 
 // ---------- sidebar & routing ----------
@@ -427,7 +430,7 @@ async function renderWorkspace() {
     <div class="grid cols-2" style="margin-top:18px">
       ${box('goals', state && state.goals.length ? `<table class="t"><tr><th>goal</th><th>status</th></tr>
         ${state.goals.map(m => `<tr><td><a href="#/ws/${ws}/g/${m.id}">${esc(m.title)}</a><div class="faint small">${esc(m.id)}</div></td>
-        <td>${pill(m.status)} ${m.outcome ? pill(m.outcome) : ''}</td></tr>`).join('')}</table>` : '<div class="empty">No goals yet.</div>')}
+        <td>${pill(m.status)} ${m.outcome ? pill(m.outcome) : ''} ${startsPill(m.start_at)}</td></tr>`).join('')}</table>` : '<div class="empty">No goals yet.</div>')}
       ${box('loop.yaml <span class="dirty" id="w-dirty"></span>', `<div class="row"><span class="hint">Workspace defaults; new goals copy <code>defaults</code>.</span><span class="spacer"></span>
         <button class="btn small primary" id="w-save">save</button></div>
         <textarea class="editor" id="w-yaml" spellcheck="false">${esc(info.loop_yaml)}</textarea>`)}
@@ -547,12 +550,13 @@ async function renderGoal() {
 function renderGoalHead() {
   const M = S.goal, st = M.row.status, { ws, gid } = S.route;
   const buttons = [];
+  if (M.row.start_at) buttons.push('<button class="btn small" data-act="unschedule">cancel schedule</button>');
   if (['draft', 'stopped', 'paused'].includes(st)) buttons.push(`<button class="btn primary" data-act="start">${st === 'draft' ? 'start goal' : 'resume'}</button>`);
   if (st === 'running') buttons.push('<button class="btn small del" data-act="stop">stop</button>');
   buttons.push('<button class="btn small del" data-act="delete" title="Delete this goal with its sessions">delete</button>');
   $('#m-head').innerHTML = `<div class="page-head"><div class="row goal-title" title="${esc(gid)}">
       <a href="#/ws/${ws}">${esc(ws)}</a><span class="faint">/</span><span class="gt">${esc(M.config.title)}</span>
-      ${agentPill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''}</div>
+      ${agentPill(st)} ${M.row.outcome ? pill(M.row.outcome, 'outcome: ' + M.row.outcome) : ''} ${startsPill(M.row.start_at)}</div>
     <div class="actions">${buttons.join('')}</div></div>`;
   $$('[data-act]', $('#m-head')).forEach(b => b.onclick = () => goalAction(b.dataset.act));
 }
@@ -576,12 +580,37 @@ async function goalAction(action) {
   if (action === 'delete') return deleteGoal();
   if (action === 'push') return pushGoal();
   if (action === 'merge') return mergeGoal();
+  if (action === 'start') return startModal();
   if (action === 'stop' && !window.confirm('Stop the goal? Running sessions are killed; their work is snapshotted.')) return;
   await act(async () => {
     const r = await api(`/api/goals/${ws}/${gid}/${action}`, { body: {} });
     if (action === 'accept' && r.tags?.length) toast(`Unmerged experiments kept as tags: ${r.tags.join(', ')}`, 'info', 9000);
     await loadState(); await refreshGoal(true);
-  }, { start: 'Goal started', stop: 'Goal stopped', accept: 'Goal accepted' }[action]);
+  }, { stop: 'Goal stopped', accept: 'Goal accepted', unschedule: 'Scheduled start cancelled' }[action]);
+}
+// Start or resume now, or after a number of minutes (the server keeps the time, across a restart too)
+function startModal() {
+  const { ws, gid } = S.route, verb = S.goal.row.status === 'draft' ? 'start' : 'resume';
+  const m = modal(`<div class="modal-head"><h2>${verb} goal</h2><button class="icon-btn" data-close>×</button></div>
+    <div class="grid" style="gap:10px">
+      <label class="inline"><input type="radio" name="st-mode" value="now" checked> immediately</label>
+      <label class="inline"><input type="radio" name="st-mode" value="later"> schedule: ${verb} in
+        <input type="text" id="st-min" inputmode="numeric" style="width:80px" placeholder="e.g. 30"> minutes</label>
+      <div class="row"><span class="spacer"></span><button class="btn" data-close>cancel</button>
+        <button class="btn primary" id="st-ok">start</button></div></div>`);
+  const min = $('#st-min', m), ok = $('#st-ok', m), later = () => $('[name=st-mode]:checked', m).value === 'later';
+  const sync = () => { ok.disabled = later() && !min.value.trim(); };
+  $$('[name=st-mode]', m).forEach(r => r.onchange = () => { sync(); if (later()) min.focus(); });
+  // Typing a delay picks the schedule
+  min.oninput = () => { if (min.value.trim()) $('[value=later]', m).checked = true; sync(); };
+  ok.onclick = () => {
+    const n = min.value.trim();
+    if (later() && (!/^\d+$/.test(n) || +n < 1)) return toast(`"${n}" is not a whole number of minutes (1 or more)`, 'error');
+    act(async () => {
+      await api(`/api/goals/${ws}/${gid}/start`, { body: later() ? { delay_min: +n } : {} });
+      closeModal(); await loadState(); await refreshGoal(true);
+    }, later() ? `Goal ${verb}s in ${+n} min` : verb === 'start' ? 'Goal started' : 'Goal resumed');
+  };
 }
 async function deleteGoal() {
   const { ws, gid } = S.route;
@@ -813,7 +842,11 @@ function tuiEvent(e, who) {
   switch (e.type) {
     case 'turn': return `<div class="fr prompt"><div class="fl"><span>▶ ${esc(turnSender(e, who))}</span>
       <span class="spacer"></span><span class="faint">turn ${e.n} · ${hhmm(e.ts)}</span></div><div class="md">${md(e.prompt)}</div></div>`;
-    case 'text': return `<div class="fr reply"><div class="fl">◀ ${esc(e.sub ? 'subagent' : who.reply)}</div><div class="md">${md(e.text)}</div></div>`;
+    // A message the running turn took (mid-turn delivery), labelled like a turn's prompt
+    case 'message': return `<div class="fr prompt"><div class="fl"><span>▶ ${esc(turnSender({ prompt: e.text }, who))}</span>
+      <span class="spacer"></span><span class="faint">mid-turn · ${hhmm(e.ts)}</span></div><div class="md">${md(e.text)}</div></div>`;
+    case 'text': return `<div class="fr reply"><div class="fl"><span>◀ ${esc(e.sub ? 'subagent' : who.reply)}</span>
+      <span class="spacer"></span><span class="faint">${hhmm(e.ts)}</span></div><div class="md">${md(e.text)}</div></div>`;
     case 'tool': return `<div class="tl"><span class="dotc">⏺</span><b>${esc(e.name)}</b> ${esc(e.detail || '')}</div>`;
     case 'tool_result': return e.text ? `<div class="tres ${e.error ? 'err' : ''}">⎿ ${esc(firstLines(e.text, 3))}</div>` : '';
     case 'thinking': return `<div class="think">✻ ${esc(firstLine(e.text))}</div>`;
@@ -836,7 +869,7 @@ function foldTurns(evs, sid) {
   let start = 0, done = 0;
   const fold = end => {
     const seg = evs.slice(start, end), reply = seg.findLast(e => e.type === 'text' && !e.sub);
-    out.push(...seg.filter(e => e.type === 'turn' || e.type === 'turn_end' || e === reply));
+    out.push(...seg.filter(e => e.type === 'turn' || e.type === 'message' || e.type === 'turn_end' || e === reply));
     start = end; done++;
   };
   evs.forEach((e, i) => {
@@ -1060,19 +1093,21 @@ async function loadChatMessages() {
   if (!r.busy) S.chat.liveEvs = [];
   feed.innerHTML = (r.messages.map((m, i) => m.role === 'user'
     ? `<div class="fr prompt"><div class="fl"><span>▶ human</span><span class="faint">${hhmm(m.ts)}</span></div><div class="md">${md(m.text)}</div></div>`
-    : `<div class="fr reply"><div class="fl"><span>◀ meta-chat</span><span class="spacer"></span><button class="btn small" data-save-note="${i}">save as note</button></div>
+    : `<div class="fr reply"><div class="fl"><span>◀ meta-chat</span><span class="spacer"></span><span class="faint">${hhmm(m.ts)}</span><button class="btn small" data-save-note="${i}">save as note</button></div>
         <div class="md">${md(m.text)}</div></div>`).join('')
     || '<div class="empty">Ask anything, e.g. what is blocking the goal right now?</div>') + '<div id="chat-live"></div>';
   feed.dataset.free = '';
   paintChatLive();
-  setComposer(!r.busy);
+  // With mid-turn delivery on, a message also reaches the meta-chat while it answers
+  setComposer(!r.busy || !!S.goal?.config?.mid_turn);
 }
 // The meta-chat's current turn, streamed like the other panes
 function paintChatLive() {
   const el = $('#chat-live');
   if (!el) return;
   const text = S.partial[S.chat.sid];
-  el.innerHTML = S.chat.busy ? S.chat.liveEvs.filter(e => e.type !== 'text').map(e => tuiEvent(e, { prompt: '', reply: 'meta-chat' })).join('')
+  // A message taken mid-turn already shows among the human's messages above
+  el.innerHTML = S.chat.busy ? S.chat.liveEvs.filter(e => e.type !== 'text' && e.type !== 'message').map(e => tuiEvent(e, { prompt: '', reply: 'meta-chat' })).join('')
     + (text ? `<div class="fr reply live"><div class="fl">◀ meta-chat</div><pre class="stream">${esc(text)}<span class="cursor"></span></pre></div>` : '')
     : '';
   // Like the other feeds, the last tool call blinks its dot while the turn runs
@@ -1097,7 +1132,8 @@ async function sendChat() {
       S.chat.sid = r.id; S.chat.draft = null;
       await loadGoal(); renderChatBar();
     }
-    $('#chat-input').value = ''; S.chat.liveEvs = [];
+    // A message sent while the chat answers (mid-turn) keeps that turn's live steps
+    $('#chat-input').value = ''; if (!S.chat.busy) S.chat.liveEvs = [];
     await loadChatMessages();
   });
 }

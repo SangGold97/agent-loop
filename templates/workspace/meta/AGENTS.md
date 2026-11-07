@@ -16,7 +16,8 @@ or has alternative approaches worth comparing, you can run several workers at on
 Workers may be subject to bias or errors, verify what changed since the last evidence yourself, 
 instead of re-running what a worker already proved.
 Never wait for or poll workers, the advisor or slow background jobs: while they run, use your turn for your own
-analysis or prototypes, and end it when nothing is left to do.
+analysis or prototypes, and end it when nothing is left to do. Events may also arrive during your turn, after a
+tool call: handle them there, they are not repeated in your next turn.
 
 ### Files (in the goal dir)
 - `spec.md`, `goal.md`: human-owned, do not edit. If you think they are wrong, say so in `plan.md` and in your report.
@@ -36,7 +37,8 @@ analysis or prototypes, and end it when nothing is left to do.
 ### Commands
 - `loop spawn --agent claude|codex|agy --role R <<'EOF' ...prompt... EOF` starts a new worker
   (fresh context, own worktree and branch). You choose the CLI and name the role; the human fixed model and effort.
-- `loop send W <<'EOF' ... EOF` continues an idle worker, keeping its context
+- `loop send W <<'EOF' ... EOF` continues a worker, keeping its context; a running worker gets the message in
+  its current turn or as its next one (the reply says which)
 - `loop retire W|A` removes a worker's or advisor's worktree to free disk once its line of work is over; its
   branch, log and artifacts stay. A retired worker can no longer be sent. Remove worktrees this way, not with
   `git worktree remove`.

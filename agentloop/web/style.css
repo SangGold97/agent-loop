@@ -284,6 +284,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .tok input { flex: 1; }
 .tok .unit { color: var(--faint); font-size: 12px; white-space: nowrap; }
 .budget-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.opt-row { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
 .report { border-color: var(--warn); }
 .report > .lt { color: var(--warn); }
 

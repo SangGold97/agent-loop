@@ -254,8 +254,12 @@ def test_advisor_recovery_delivers_saved_results_once_and_keeps_queued_requests(
     pending = engine.db.q("SELECT payload FROM inbox WHERE ws='advice-recovery' "
                           "AND kind='advice_request' AND consumed=0")
     assert len(pending) == 1 and json.loads(pending[0]["payload"])["sid"] == queued["id"]
-    # A follow-up needs a finished consultation of this goal with a conversation to resume
-    for sid, error in ((queued["id"], "in progress"), (complete["id"], "no conversation"), ("ma-none", "no consult")):
+    # A consultation in progress takes a follow-up as its next turn (mid-turn delivery off); an idle one needs a
+    # conversation to resume
+    assert "your follow-up starts its next turn" in engine.advise(meta, "early follow-up", queued["id"])
+    assert engine.db.one("SELECT text FROM mail WHERE session=? AND status='pending'", queued["id"])["text"] \
+        == "early follow-up"
+    for sid, error in ((complete["id"], "no conversation"), ("ma-none", "no consult")):
         with pytest.raises(AgentError, match=error):
             engine.advise(meta, "follow-up question", sid)
     engine.db.update("sessions", {"id": complete["id"]}, vendor_id="vendor-1")
@@ -273,4 +277,5 @@ def test_advisor_recovery_delivers_saved_results_once_and_keeps_queued_requests(
         engine.advise(meta, "another follow-up", complete["id"])
     client.post(f"/api/goals/advice-recovery/{gid}/stop")
     assert engine.db.session(queued["id"])["status"] == "stopped"
+    assert engine.db.one("SELECT status FROM mail WHERE session=?", queued["id"])["status"] == "dropped"
     assert not engine.advisors("advice-recovery", gid)

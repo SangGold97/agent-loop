@@ -22,10 +22,17 @@ sessions, merges their work and closes the goal; the human steers from the web U
   (`db.py`, under `state/`).
 - **Event loop per goal**: everything for the meta-work (kickoff, worker digests, advice, notes, budget, system messages)
   goes into the goal's `inbox` table. `Engine.meta_loop` drains it into one meta-work turn; items stay in flight
-  (`consumed=2`) until the turn ends and go back to the queue on crash or restart.
+  (`consumed=2`) until the turn ends and go back to the queue on crash or restart. When all its agents have been
+  idle for `idle_checkin_min`, `Engine.check_in` (infra loop) queues a `[Check-in]`, whose turn alone costs no meta turn.
+- **Mid-turn delivery** (`goal.yaml → mid_turn`, off by default): `Engine.offer` hands a session in a turn what
+  waits for it. Claude takes it on stdin (stream-json input kept open until the CLI is at rest, `Runner.write`);
+  Codex and agy through the `agentloop/mailbox.py` hook, which runs while the session's `$LOOP_MAILBOX` flag
+  exists. Meta-work events taken mid-turn stay in flight with that turn; messages for a worker, advisor or
+  meta-chat (`loop send` / `--follow-up` while it runs, chat input) wait in the `mail` table and start its next
+  turn when its running turn does not take them (`Engine.wake_for_jobs`, `_meta_chat_turn`).
 - **Advisor**: `loop advise` queues a question in the same inbox and at once dispatches a new `meta-advisor`
   session for one turn, alongside the asking meta-work turn; its final text returns as `[Advice]`.
-  `--follow-up <sid>` resumes an idle consultation for one more turn instead, unless `meta_advisor` now
+  `--follow-up <sid>` resumes an idle consultation for one more turn instead (a running one gets it as mail), unless `meta_advisor` now
   names another CLI (`Engine.check_agent_current`, which also refuses to resume a worker of a disabled CLI). Consultations
   share `max_meta_turns` and take no worker slot. An advisor builds in its own worktree `wt/<sid>` on
   `loop/<goal>/advisor-<sid>` (`Engine.advisor_tree`, snapshot after each turn, `loop merge`/`retire` by the

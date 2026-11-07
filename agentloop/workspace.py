@@ -263,8 +263,22 @@ def human_write(ws: Path, rel: str, text: str) -> str:
     return change
 
 
+# The mailbox hook (mid-turn delivery for CLIs without live input) starts Python only while the session's mailbox
+# flag exists, so it costs nothing when no message waits and does nothing outside agent-loop sessions
+MAILBOX_SH = f'[ -z "$LOOP_MAILBOX" ] || [ ! -e "$LOOP_MAILBOX" ] || exec "{PYTHON}" -m agentloop.mailbox'
+
+
+def codex_hooks(ws: Path, layer: str) -> dict:
+    """The layer's hooks.json, plus the mailbox hook after each tool call."""
+    doc = json.loads((ws / layer / "hooks.json").read_text())
+    hook = {"type": "command", "command": f"sh -c '{MAILBOX_SH}'", "timeout": 30}
+    doc.setdefault("hooks", {}).setdefault("PostToolUse", []).append({"matcher": "Bash|apply_patch", "hooks": [hook]})
+    return doc
+
+
 def codex_home(ws: Path, layer: str) -> Path:
-    """Materialize a CODEX_HOME for a layer: shared auth, the layer's hooks, and worker instructions."""
+    """Materialize a CODEX_HOME for a layer: shared auth, the layer's hooks with the mailbox hook, and worker
+    instructions."""
     home = ws / ".loop" / "codex" / layer
     home.mkdir(parents=True, exist_ok=True)
     user_auth = Path.home() / ".codex" / "auth.json"
@@ -274,7 +288,7 @@ def codex_home(ws: Path, layer: str) -> Path:
         if not user_auth.exists() or auth.stat().st_mtime > user_auth.stat().st_mtime:
             shutil.copy2(auth, user_auth)
         auth.unlink()
-    links = {"auth.json": user_auth, "hooks.json": ws / layer / "hooks.json"}
+    links = {"auth.json": user_auth}
     if layer == "worker":
         links["AGENTS.md"] = ws / "worker" / "AGENTS.md"
         # A real skills dir with one link per harness skill: Codex writes its own .system skills
@@ -295,6 +309,12 @@ def codex_home(ws: Path, layer: str) -> Path:
         if dst.is_symlink() or dst.exists():
             dst.unlink()
         dst.symlink_to(src)
+    hooks = home / "hooks.json"
+    if hooks.is_symlink():  # a link to the layer's hooks.json before the mailbox hook joined it
+        hooks.unlink()
+    text = json.dumps(codex_hooks(ws, layer), indent=2) + "\n"
+    if not hooks.exists() or hooks.read_text() != text:
+        hooks.write_text(text)
     custom = ws / layer / "codex.toml"
     config = custom.read_text() if custom.exists() else ""
     cfg_path = home / "config.toml"
@@ -310,10 +330,13 @@ AGY_GUARDED = "run_command|write_to_file|replace_file_content|multi_replace_file
 
 
 def agy_plugin() -> Path:
-    """Write the guard plugin agy sessions load (rewritten only when it changes, e.g. on another venv path)."""
+    """Write the plugin agy sessions load, with the guard and the mailbox hook (rewritten only when it changes,
+    e.g. on another venv path)."""
     hook = {"type": "command", "command": f'[ -z "$LOOP_ROLE" ] || exec "{PYTHON}" -m agentloop.guard', "timeout": 30}
+    mail = {"type": "command", "command": MAILBOX_SH, "timeout": 30}
     docs = {"plugin.json": {"name": "agentloop", "description": "agent-loop guard, inactive outside its sessions"},
-            "hooks.json": {"agentloop-guard": {"PreToolUse": [{"matcher": AGY_GUARDED, "hooks": [hook]}]}}}
+            "hooks.json": {"agentloop-guard": {"PreToolUse": [{"matcher": AGY_GUARDED, "hooks": [hook]}]},
+                           "agentloop-mailbox": {"PreInvocation": [mail]}}}
     AGY_PLUGIN.mkdir(parents=True, exist_ok=True)
     for name, doc in docs.items():
         text = json.dumps(doc, indent=2) + "\n"

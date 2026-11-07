@@ -63,7 +63,7 @@ def create_app(api_url: str) -> FastAPI:
             for gid in workspace.list_goals(p):
                 row = engine.goal_row(name, gid)
                 goals.append({"id": gid, "title": goal_config(p, gid)["goal"]["title"],
-                                 "status": row["status"], "outcome": row["outcome"]})
+                                 "status": row["status"], "outcome": row["outcome"], "start_at": row["start_at"]})
             out.append({"name": name, "goals": goals})
         return {"workspaces": out}
 
@@ -166,8 +166,12 @@ def create_app(api_url: str) -> FastAPI:
     @app.post("/api/goals/{ws}/{gid}/{action}")
     async def goal_action(ws: str, gid: str, action: str, req: Request):
         b = await body(req)
-        if action == "start":
+        if action == "start" and b.get("delay_min") is not None:
+            engine.schedule_start(ws, gid, b["delay_min"])
+        elif action == "start":
             await engine.start_goal(ws, gid)
+        elif action == "unschedule":
+            engine.schedule_start(ws, gid, None)
         elif action == "stop":
             await engine.stop_goal(ws, gid)
         elif action == "accept":
@@ -300,12 +304,13 @@ def create_app(api_url: str) -> FastAPI:
     @app.post("/api/agent/{cmd}")
     async def agent_cmd(cmd: str, req: Request, x_loop_token: str | None = Header(None)):
         caller, b = engine.caller(x_loop_token), await body(req)
-        # Workers only use the RAM pool; steering the goal stays with the meta-work
-        if caller["kind"] == "worker" and cmd not in ("ram", "ram-release", "infra", "job", "job-wait", "job-end"):
+        # Workers only use the RAM pool (and their mailbox hook); steering the goal stays with the meta-work
+        if caller["kind"] == "worker" and cmd not in ("ram", "ram-release", "infra", "job", "job-wait", "job-end",
+                                                      "mail"):
             raise AgentError("workers can only use `loop run` and `loop infra`")
         # The advisor reads the goal and runs its own jobs; steering workers and the goal stays with the meta-work
         if caller["kind"] == "meta-advisor" and cmd not in ("ls", "show", "status", "budget", "infra", "ram",
-                                                           "ram-release", "job", "job-wait", "job-end"):
+                                                           "ram-release", "job", "job-wait", "job-end", "mail"):
             raise AgentError("the advisor does not steer workers or the goal; return advice to the meta-work "
                              "in your final reply")
         if cmd in ("spawn", "send", "stop", "merge", "retire", "done", "advise") and caller["kind"] != "meta-work":
@@ -351,6 +356,8 @@ def create_app(api_url: str) -> FastAPI:
             return engine.job_register(caller, str(b.get("cmd", "")), str(b.get("prov") or ""))
         elif cmd == "job-wait":
             return await engine.job_wait(caller, str(b.get("job", "")))
+        elif cmd == "mail":  # the mailbox hook of a CLI without live input (mid-turn delivery)
+            text = engine.mail_take(caller)
         elif cmd == "job-end":
             text = engine.job_report(caller, str(b.get("job", "")), str(b.get("text", "")), b.get("rc"))
         else:

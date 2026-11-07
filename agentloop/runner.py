@@ -157,6 +157,8 @@ def child_env(extra: dict) -> dict:
 class Runner:
     def __init__(self):
         self.procs: dict[str, tuple[asyncio.subprocess.Process, str | None]] = {}
+        # Open stdin of turns whose CLI takes messages while it runs (live input), with its adapter
+        self.inputs: dict[str, tuple[asyncio.StreamWriter, object]] = {}
         self.stopping: set[str] = set()
         self.pool_gb: float | None = None
 
@@ -177,7 +179,9 @@ class Runner:
 
     async def run(self, key: str, spec: RunSpec, *, raw_log: Path, event_log: Path,
                   on_event: Callable[[dict], Awaitable[None]], timeout_s: float,
-                  memory_max_gb: float | None = None) -> TurnResult:
+                  memory_max_gb: float | None = None, on_input: Callable[[], bool] | None = None) -> TurnResult:
+        """Run one turn. `on_input` hands the turn what waits for it: once its prompt is in and, for a CLI with
+        live input, each time the CLI is at rest; it returns whether it gave the CLI another message."""
         adapter = ADAPTERS[spec.agent]
         argv, unit = adapter.argv(spec), None
         # Every session gets a named scope in the shared pool slice so an unclean restart can find and stop
@@ -203,7 +207,12 @@ class Runner:
         async def feed_stdin():
             proc.stdin.write(adapter.stdin(spec).encode())
             await proc.stdin.drain()
-            proc.stdin.close()
+            if adapter.live:
+                self.inputs[key] = (proc.stdin, adapter)
+            else:
+                proc.stdin.close()
+            if on_input:
+                on_input()
 
         async def read_stderr():
             async for line in proc.stderr:
@@ -230,6 +239,12 @@ class Runner:
                             evl.write(json.dumps(evt, ensure_ascii=False) + "\n")
                             evl.flush()
                         await on_event(evt)
+                    # A CLI with live input at rest gets what waits for it; with nothing left its stdin closes,
+                    # so it ends as a CLI given one prompt does (it still answers what it read before the end)
+                    if st.rest and key in self.inputs:
+                        st.rest = False
+                        if st.is_error or not (on_input and on_input()):
+                            self.close_input(key)
 
         # Readers run to EOF even if the CLI exits before reading its prompt, so stderr is complete
         readers = [asyncio.ensure_future(read_stderr()), asyncio.ensure_future(read_stdout())]
@@ -252,6 +267,7 @@ class Runner:
             for task in readers:
                 task.cancel()
             self.procs.pop(key, None)
+            self.close_input(key)
         stopped = key in self.stopping
         self.stopping.discard(key)
         leftover = () if timed_out or stopped else reap_scope(unit, proc.pid)
@@ -272,6 +288,30 @@ class Runner:
 
     def running(self, key: str) -> bool:
         return key in self.procs
+
+    def live(self, key: str) -> bool:
+        """Whether the turn's CLI takes messages on stdin now (live input, not yet told to end)."""
+        return key in self.inputs and not self.inputs[key][0].is_closing()
+
+    def write(self, key: str, text: str) -> bool:
+        """Give a turn with live input one more message; its CLI takes it after its current tool call."""
+        if not self.live(key):
+            return False
+        stdin, adapter = self.inputs[key]
+        try:
+            stdin.write(adapter.message(text).encode())
+        except (ConnectionError, RuntimeError):  # the CLI is gone
+            self.inputs.pop(key, None)
+            return False
+        return True
+
+    def close_input(self, key: str) -> None:
+        entry = self.inputs.pop(key, None)
+        if entry:
+            try:
+                entry[0].close()
+            except (ConnectionError, RuntimeError):
+                pass
 
     def pid(self, key: str) -> int | None:
         entry = self.procs.get(key)

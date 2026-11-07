@@ -742,3 +742,56 @@ def test_wsl_disk_free_counts_the_virtual_disks_own_free_blocks(monkeypatch, tmp
     # 60 GiB free inside the disk (deleted files never shrink it) plus 36 GiB it can still grow into
     snap = probe.sample()
     assert (snap["disk_free_gb"], snap["disk_total_gb"]) == (96, 236)
+
+
+def test_claude_live_input_messages_and_rest(tmp_path):
+    ad, st = ClaudeAdapter(), ParseState()
+    spec = RunSpec(agent="claude", kind="worker", cwd=tmp_path, prompt="go")
+    a = ad.argv(spec)
+    assert a[a.index("--input-format") + 1] == "stream-json" and "--replay-user-messages" in a
+    assert json.loads(ad.stdin(spec)) == {"type": "user", "message": {"role": "user", "content": "go"},
+                                          "parent_tool_use_id": None}
+    # The prompt's echo belongs to the turn; a later echo is a message the turn took while it ran
+    assert ad.parse({"type": "user", "isReplay": True, "message": {"role": "user", "content": "go"}}, st) == []
+    later = {"type": "user", "isReplay": True,
+             "message": {"role": "user", "content": [{"type": "text", "text": "more"}]}}
+    assert ad.parse(later, st) == [{"type": "message", "text": "more"}]
+    assert not st.rest
+    ad.parse({"type": "result", "subtype": "success", "result": "done"}, st)
+    assert st.rest and st.replays == 2
+
+
+def test_mailbox_hook_formats_and_gate(tmp_path, monkeypatch, capsys):
+    from agentloop import mailbox, workspace
+    lead = mailbox.LEAD
+    assert mailbox.respond({"hook_event_name": "PostToolUse"}, "hi") == {
+        "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": lead + "hi"}}
+    assert mailbox.respond({"invocationNum": 3}, "hi") == {"injectSteps": [{"userMessage": "hi"}]}
+    # Events that cannot carry a message take nothing
+    assert mailbox.respond({"hook_event_name": "Stop"}, "hi") is None
+    assert mailbox.respond({"hook_event_name": "PreToolUse"}, "hi") is None
+    # Without the platform the hook hands nothing over and never fails the agent
+    monkeypatch.delenv("LOOP_API", raising=False)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "PostToolUse"})))
+    mailbox.main()
+    assert capsys.readouterr().out == ""
+    # Codex gets the hook after each tool call, next to the layer's own hooks, and none at its stop
+    (tmp_path / "worker").mkdir()
+    (tmp_path / "worker/hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": "Bash", "hooks": [{"type": "command", "command": "guard"}]}]}}))
+    doc = workspace.codex_hooks(tmp_path, "worker")
+    post = doc["hooks"]["PostToolUse"][0]
+    assert doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "guard" and "Stop" not in doc["hooks"]
+    assert post["matcher"] == "Bash|apply_patch"
+    # The shell gate starts Python only while the session's flag exists, and exits cleanly otherwise
+    cmd, flag = post["hooks"][0]["command"], tmp_path / "flag"
+    for env in ({}, {"LOOP_MAILBOX": str(flag)}, {"LOOP_MAILBOX": str(flag), "TOUCH": "1"}):
+        if env.pop("TOUCH", None):
+            flag.touch()
+        r = subprocess.run(cmd, shell=True, env={"PATH": os.environ["PATH"], **env}, capture_output=True, text=True,
+                           input=json.dumps({"hook_event_name": "PostToolUse"}))
+        assert r.returncode == 0 and r.stdout == "" and r.stderr == "", (env, r)
+    # agy gets it before each model call only
+    monkeypatch.setattr(workspace, "AGY_PLUGIN", tmp_path / "plugin")
+    mail = json.loads((workspace.agy_plugin() / "hooks.json").read_text())["agentloop-mailbox"]
+    assert list(mail) == ["PreInvocation"] and "agentloop.mailbox" in mail["PreInvocation"][0]["command"]
