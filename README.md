@@ -109,7 +109,8 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   continues its work or ends its turn instead of polling. Meta and worker instructions send heavy jobs and any
   command that may take over 2 minutes this way; short commands run as usual. The job stays in the pool, survives
   a platform restart and is stopped after `job_timeout_h` (9 h); a `loop run` inside it belongs to the job. A
-  worker's digest names its jobs still running at the end of its turn. When a job ends, the platform resumes the worker with its exit status and the path of its log,
+  worker's digest names its jobs still running at the end of its turn. The log starts with the job's provenance
+  (commit, clean or dirty tree, worktree, start time); its result repeats it with run time and peak RAM. When a job ends, the platform resumes the worker with its exit status and the path of its log,
   right after its turn if one is running; when that turn cannot start (budget, RAM, usage limit), or the job is
   the meta-work's, the result goes to the meta-work as an event. `loop stop` stops one job, or a worker with its
   jobs, and a goal that stops stops its jobs.

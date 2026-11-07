@@ -33,12 +33,14 @@ CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY, session TEXT, ts REAL, role TEXT, text TEXT);
 CREATE TABLE IF NOT EXISTS jobs(
   id TEXT PRIMARY KEY, session TEXT, ws TEXT, goal TEXT, cmd TEXT, log TEXT, unit TEXT, pid INT,
-  grant_info TEXT, started REAL, ended REAL, status TEXT, result TEXT, reported INT DEFAULT 0, rc INT);
+  grant_info TEXT, started REAL, ended REAL, status TEXT, result TEXT, reported INT DEFAULT 0, rc INT,
+  prov TEXT, peak_gb REAL);
 """
 # Columns added after the first release: (table, column, type)
 ADDED_COLUMNS = [("goals", "first_started", "REAL"), ("goals", "base", "TEXT"), ("goals", "pushed", "REAL"),
                  ("goals", "pr", "TEXT"), ("notes", "seq", "INT"), ("jobs", "rc", "INT"),
-                 ("sessions", "resume_at", "REAL"), ("sessions", "resume_prompt", "TEXT")]
+                 ("sessions", "resume_at", "REAL"), ("sessions", "resume_prompt", "TEXT"),
+                 ("jobs", "prov", "TEXT"), ("jobs", "peak_gb", "REAL")]
 # Columns no longer kept: the platform does not track spend, and GPUs go to jobs (`loop run --vram`), not sessions
 DROPPED_COLUMNS = [("goals", "cost"), ("sessions", "cost"), ("turns", "cost"), ("sessions", "gpu")]
 

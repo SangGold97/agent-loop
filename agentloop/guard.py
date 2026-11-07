@@ -3,7 +3,8 @@ decision on stdout).
 
 Guards against mistakes, not adversaries: agents never push, never touch human-owned files or
 the user's Python, workers stay inside their own worktree, and meta sessions change project code only in their
-goal's integration worktree (meta-chats not at all), and no session polls running work from inside its turn. Messages shown to workers name no platform concepts, so a
+goal's integration worktree (meta-chats not at all), and no session polls running work from inside its turn
+(nor does a worker sleep long). Messages shown to workers name no platform concepts, so a
 worker experiences these as ordinary limits of its environment.
 """
 from __future__ import annotations
@@ -29,12 +30,21 @@ IN_PLACE = re.compile(r"-[a-zA-Z]*i|--in-place")  # sed -i, perl -pi
 # Git subcommands that change a checkout's files, index or HEAD
 GIT_WRITES = {"add", "am", "apply", "checkout", "cherry-pick", "clean", "commit", "merge", "mv", "pull", "rebase",
               "reset", "restore", "revert", "rm", "stash", "switch"}
-# Package installs that change the human's own Python instead of a project venv
-# Waiting on other work from inside a turn: a while/until loop that sleeps, or following a file or command
-POLL_LOOP = re.compile(r"\b(?:while|until)\b(?:(?!\bdone\b).)*?\bdo\b(?:(?!\bdone\b).)*?\bsleep\b", re.S)
+# Waiting on other work from inside a turn: a while/until loop that sleeps, following a file or command, and
+# for a worker any sleep longer than LONG_SLEEP_S
 FOLLOW = re.compile(r"\btail\b[^|;&\n]*\s(?:-[a-zA-Z]*[fF][a-zA-Z]*|--follow\S*)(?=\s|$)")
 NO_POLL = ("waiting in a loop is disabled (sleep loops, tail -f, watch): run long work in the foreground or "
            "as `loop run -- <cmd>`, whose result comes back as a new message")
+LONG_SLEEP_S = 30
+NO_SLEEP = f"sleeping over {LONG_SLEEP_S} s is disabled; {NO_POLL.split(': ', 1)[1]}"
+SEPARATORS = set(";&|(){}`\n")
+SHELL_TOKEN = re.compile(r"[;&|(){}`\n]|[^\s;&|(){}`]+")
+# Words a command follows; so does `-c` anywhere, as in `bash -c`
+LEADS = {"do", "then", "else", "elif", "if", "while", "until", "!", "time", "exec", "nohup"}
+DURATION = re.compile(r"(\d+\.?\d*|\.\d+)([smhd]?)")
+UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+QUOTED = re.compile(r"'([^']*)'|\"((?:\\.|[^\"\\])*)\"")
+# Package installs that change the human's own Python instead of a project venv
 GLOBAL_INSTALL = re.compile(r"\bsudo\b|\bpip3?\b[^|;&\n]*\binstall\b[^|;&\n]*(--user|--break-system-packages)\b"
                             r"|\bconda\s+install\b(?![^|;&\n]*(-p|--prefix)\s)")
 
@@ -103,7 +113,65 @@ def strip_heredocs(cmd: str) -> str:
 
 
 def strip_quotes(cmd: str) -> str:
-    return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", cmd)
+    return QUOTED.sub("''", cmd)
+
+
+def outside_loop_run(code: str) -> str:
+    """The shell text outside `loop run` commands, whose job may wait on whatever it likes. Only a `loop run`
+    outside quotes counts, so a quoted pattern such as `grep -q "loop run: done" job.log` is still checked."""
+    blank = QUOTED.sub(lambda m: " " * len(m.group(0)), code)
+    out, last = [], 0
+    for m in re.finditer(r"\bloop\s+run\b[^\n]*", blank):
+        out.append(code[last:m.start()])
+        last = m.end()
+    return "".join(out) + code[last:]
+
+
+def waits(code: str, worker: bool) -> str | None:
+    """Why a shell command would wait on other work from inside the turn, if it would. The line is checked
+    with its quoted text dropped, so a quoted "done" in a grep pattern neither ends nor hides a loop, and with
+    only its quote marks dropped, for a quoted script (`bash -c 'while ...; do sleep 5; done'`)."""
+    texts = [strip_quotes(code), QUOTED.sub(lambda m: m.group(0)[1:-1], code)]
+    if any(FOLLOW.search(t) for t in texts) or \
+            any(os.path.basename(words[0]) == "watch" for _, words in simple_commands(code)):
+        return NO_POLL
+    for text in texts:
+        if reason := sleep_wait(SHELL_TOKEN.findall(text), worker):
+            return reason
+    return None
+
+
+def sleep_wait(tokens: list[str], worker: bool) -> str | None:
+    """Walk a shell line's tokens, tracking the loops open at each command: a sleep inside a while/until loop
+    (its condition or body, nested loops included) polls; a worker's sleep outside one waits too when long.
+    A short sleep elsewhere passes (a retry in a for loop, a server starting)."""
+    loops, at_cmd, i = [], True, 0
+    while i < len(tokens):
+        tok, i = tokens[i], i + 1
+        if tok in SEPARATORS:
+            at_cmd = True
+            continue
+        if at_cmd and tok in ("while", "until", "for", "select"):
+            loops.append(tok)
+        elif at_cmd and tok == "done" and loops:
+            loops.pop()
+        elif at_cmd and tok == "timeout":  # `timeout [options] N cmd`: the command after N runs
+            while i < len(tokens) and tokens[i].startswith("-"):
+                i += 2 if tokens[i] in ("-s", "-k", "--signal", "--kill-after") else 1
+            i += 1
+            continue
+        elif at_cmd and tok == "sleep":
+            if "while" in loops or "until" in loops:
+                return NO_POLL
+            # GNU sleep adds up its arguments; one it cannot read here ($T) counts as nothing
+            secs = 0.0
+            while i < len(tokens) and ((m := DURATION.fullmatch(tokens[i])) or tokens[i] in ("inf", "infinity")):
+                secs += float(m[1]) * UNITS[m[2]] if m else float("inf")
+                i += 1
+            if worker and secs > LONG_SLEEP_S:
+                return NO_SLEEP
+        at_cmd = tok in LEADS if at_cmd else tok == "-c"
+    return None
 
 
 def simple_commands(code: str) -> list[tuple[str, list[str]]]:
@@ -196,10 +264,8 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
     if GLOBAL_INSTALL.search(bare):
         return "do not install into the user or system Python; install into the active virtualenv ($VIRTUAL_ENV)"
     # A `loop run` job may wait on whatever it likes; only the turn itself must not poll
-    own = re.sub(r"\bloop\s+run\b[^\n]*", "", code)
-    if POLL_LOOP.search(own) or FOLLOW.search(own) or \
-            any(os.path.basename(words[0]) == "watch" for _, words in simple_commands(own)):
-        return NO_POLL
+    if reason := waits(outside_loop_run(code), env.get("LOOP_ROLE") == "worker"):
+        return reason
     cmd = code
     for match in re.finditer(r"\brm\s+((?:-\S+\s+)*)(.+?)(?:$|[;&|])", cmd, re.M):
         if "r" not in match.group(1) and "f" not in match.group(1):

@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -113,16 +114,38 @@ def run_job(vram: float, wait_min: float, cmd: list[str], job: str | None = None
     return rc
 
 
+def provenance() -> str:
+    """Where a job starts from, so any number it produces can be traced: the checkout's commit, whether it has
+    changes beyond that commit, the worktree and the start time."""
+    def git(*args: str) -> str:
+        try:
+            return subprocess.run(["git", *args], capture_output=True, text=True, timeout=60).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    cwd, when = os.getcwd(), time.strftime("%Y-%m-%d %H:%M:%S %Z")
+    top = git("rev-parse", "--show-toplevel")
+    if not top:
+        return f"not a git checkout, cwd {cwd}, started {when}"
+    commit = git("rev-parse", "--short=12", "HEAD") or "none yet"
+    # Untracked files count: a new script the job runs is not in the commit either
+    changed = len(git("status", "--porcelain").splitlines())
+    state = f"dirty ({changed} uncommitted files)" if changed else "clean"
+    where = top if os.path.samefile(cwd, top) else f"{top} (cwd {os.path.relpath(cwd, top)})"
+    return f"commit {commit}, {state}, worktree {where}, started {when}"
+
+
 def start_job(vram: float, wait_min: float, cmd: list[str]) -> int:
     """`loop run`: start the job under a `loop run` helper of its own, outside this turn, and show its output
     until it ends or the platform stops waiting (90 s). A job that ends by then returns its exit code; a longer
     one keeps running, and the platform hands its result to this session as a new message when it ends."""
     if not cmd:
         sys.exit("loop run: give the command after --, e.g. loop run -- python train.py")
-    job = call("job", {"vram": vram, "cmd": shlex.join(cmd)}, full=True)
+    prov = provenance()
+    job = call("job", {"vram": vram, "cmd": shlex.join(cmd), "prov": prov}, full=True)
     log, tmp = Path(job["log"]), Path(job["tmp"])
     log.parent.mkdir(parents=True, exist_ok=True)
-    log.touch()
+    log.write_text(f"loop run: provenance: {prov}\n")
     tmp.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "TMPDIR": str(tmp)}
     argv = [sys.executable, "-m", "agentloop.cli", "run", "--job", job["id"], "--vram", str(vram),

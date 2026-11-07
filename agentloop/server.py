@@ -348,7 +348,7 @@ def create_app(api_url: str) -> FastAPI:
         elif cmd == "ram-release":
             return engine.ram_release(caller, int(b.get("grant") or 0), bool(b.get("killed")), b.get("job"))
         elif cmd == "job":
-            return engine.job_register(caller, str(b.get("cmd", "")))
+            return engine.job_register(caller, str(b.get("cmd", "")), str(b.get("prov") or ""))
         elif cmd == "job-wait":
             return await engine.job_wait(caller, str(b.get("job", "")))
         elif cmd == "job-end":

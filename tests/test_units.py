@@ -295,13 +295,24 @@ def test_guard_blocks_polling(tmp_path):
     ev = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path / "wt/w-1")}
     for cmd in ('until ! pgrep -f "tools.score" >/dev/null; do sleep 5; done; cat out.err',
                 "while [ ! -f out.json ]\ndo\n  sleep 10\ndone", "bash -c 'while true; do sleep 1; done'",
-                "tail -f job.log", "timeout 60 tail -F job.log", "watch -n 5 nvidia-smi"):
+                "tail -f job.log", "timeout 60 tail -F job.log", "watch -n 5 nvidia-smi",
+                # A quoted "loop run: done" or "done" neither exempts nor ends the loop; nested loops count
+                'until grep -q "loop run: done\\|Traceback" j.log; do sleep 3; done; tail j.log',
+                "timeout 99 bash -c \"until grep -q 'loop run: done' j.log; do sleep 2; done\"",
+                'until for j in a b; do grep -q "done" $j.log || exit 1; done; do sleep 5; done',
+                "bash -c 'while [ ! -s '$F' ]; do sleep 5; done'", "while sleep 5; do check; done"):
         assert guard.check(ev(cmd), w) and guard.check(ev(cmd), m), cmd
+    # A worker does not sleep long, however it is written
+    for cmd in ("sleep 60; tail -3 j.log", "cd x && sleep 2m", "timeout -s KILL 99 sleep 90", "sleep 20 20",
+                'bash -c "sleep infinity"', "for i in $(seq 9); do kaggle x; sleep 60; done"):
+        assert "sleeping over 30 s" in guard.check(ev(cmd), w) and not guard.check(ev(cmd), m), cmd
     # Retries, short pauses, one-off reads and the loops of a `loop run` job pass
     for cmd in ("for i in 1 2 3; do kaggle datasets download x && break; sleep 30; done", "sleep 1; cat lvl.log",
                 "tail -n 40 job.log", "while read f; do wc -l $f; done < files.txt",
                 "loop run -- bash -c 'until test -f done; do sleep 5; done'", "git log --follow a.py",
-                "python - <<'EOF'\nwhile x:\n    time.sleep(1)\nEOF"):
+                "python - <<'EOF'\nwhile x:\n    time.sleep(1)\nEOF", "loop run -- sleep 300", "sleep $T",
+                'git commit -m "cut sleep 60 to 5"', 'python -c "import time; time.sleep(600)"',
+                "while true; do x; done; sleep 3", "echo while; sleep 5", 'grep -c "loop run: done" j.log'):
         assert not guard.check(ev(cmd), w), cmd
 
 

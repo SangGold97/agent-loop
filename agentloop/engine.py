@@ -921,6 +921,8 @@ class Engine:
         if g and g["sid"] == caller["id"]:
             peak = g.get("peak_gb")
             self.end_grant(key, killed)
+            if job and peak is not None:  # for the job's result, which its helper reports next
+                self.db.update("jobs", {"id": job}, peak_gb=peak)
         # A job stopped by the platform was not killed by the kernel; `loop run` says why
         stopped = self.stopped.get(key)
         text = self.stopped.pop(key)[1] if stopped and stopped[0] == caller["id"] else "released"
@@ -948,18 +950,18 @@ class Engine:
         return "; ".join(kernel + mem.get("over", []))
 
     # ---------- jobs (`loop run`) ----------
-    def job_register(self, caller: dict, cmd: str) -> dict:
-        """Record a job before its `loop run` helper starts outside the caller's turn. The job may outlive the
-        turn and a platform restart; its result goes back to the caller when it ends (`job_end`), unless its
-        `loop run` still shows it then (`job_wait`)."""
+    def job_register(self, caller: dict, cmd: str, prov: str = "") -> dict:
+        """Record a job before its `loop run` helper starts outside the caller's turn, with where it starts from
+        (`prov`: commit, worktree, start time). The job may outlive the turn and a platform restart; its result
+        goes back to the caller when it ends (`job_end`), unless its `loop run` still shows it then (`job_wait`)."""
         if caller["kind"] not in ("worker", "meta-work", "meta-advisor"):
             raise AgentError("`loop run` belongs to workers, the meta-work and the advisor")
         jid = f"j-{secrets.token_hex(3)}"
         log_path = self.gdir(caller["ws"], caller["goal"]) / "runs" / caller["id"] / "artifacts" / "jobs" / f"{jid}.log"
         unit = job_unit(jid) if systemd_available() else None
-        self.db.x("INSERT INTO jobs(id, session, ws, goal, cmd, log, unit, started, status) VALUES(?,?,?,?,?,?,?,?,?)",
-                  jid, caller["id"], caller["ws"], caller["goal"], cmd[:500], str(log_path), unit, time.time(),
-                  "running")
+        self.db.x("INSERT INTO jobs(id, session, ws, goal, cmd, log, unit, started, status, prov) "
+                  "VALUES(?,?,?,?,?,?,?,?,?,?)", jid, caller["id"], caller["ws"], caller["goal"], cmd[:500],
+                  str(log_path), unit, time.time(), "running", prov[:1000] or None)
         hours = workspace_config(self.wsp(caller["ws"]))["job_timeout_h"]
         return {"id": jid, "log": str(log_path), "tmp": str(jobs_tmp_root() / jid), "unit": unit,
                 "text": f"loop run: job {jid} is running in the background (output: {log_path}; stopped after "
@@ -996,11 +998,22 @@ class Engine:
             return
         self.db.update("jobs", {"id": jid}, status="done", ended=time.time(), rc=rc)
         shutil.rmtree(jobs_tmp_root() / jid, ignore_errors=True)
-        mins = (time.time() - j["started"]) / 60
-        took = f"{mins:.0f} min" if mins < 90 else f"{mins / 60:.1f} h"
-        # The result names the log rather than quoting it; the session reads what it needs from there
-        empty = not os.path.exists(j["log"]) or not os.path.getsize(j["log"])
-        output = f"Output: {j['log']}" + (" (empty)" if empty else "")
+        secs = time.time() - j["started"]
+        took = f"{secs:.0f} s" if secs < 90 else f"{secs / 60:.0f} min" if secs < 5400 else f"{secs / 3600:.1f} h"
+        # Its peak RAM as `loop run` released it, or as last sampled when its helper is gone without a report
+        peak = j["peak_gb"] if j["peak_gb"] is not None else next(
+            (g.get("peak_gb") for g in self.grants.values() if g.get("job") == jid and not g.get("within")), None)
+        took += f", peak RAM {peak:.1f} GB" if peak is not None else ""
+        # The result names the log rather than quoting it; the session reads what it needs from there. Empty
+        # means nothing past the provenance line `loop run` starts it with
+        try:
+            with open(j["log"], "rb") as fh:
+                first = fh.readline()
+                empty = not first or (first.startswith(b"loop run: provenance:") and not fh.read(1))
+        except OSError:
+            empty = True
+        output = (f"Started from {j['prov']}\n" if j["prov"] else "") + f"Output: {j['log']}" + \
+            (" (empty)" if empty else "")
         self.db.update("jobs", {"id": jid}, result=f"[Job {jid} ended] {how} after {took}: `{j['cmd']}`\n{output}")
         if jid not in self.job_watched:
             self.wake_for_jobs(j["session"])

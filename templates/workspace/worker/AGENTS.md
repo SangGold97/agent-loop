@@ -23,6 +23,8 @@
 - Outputs that are not code (logs, metrics, plots, reports) go under `.artifacts/` in the project directory
   unless the prompt names another place. It is kept for the requester, so it holds only results and evidence
   worth keeping. `.artifacts/` is never committed.
+- Measurement code and reusable harnesses are code: commit them in the project so later work reuses them;
+  `.artifacts/` holds only their results.
 - Deliver what the prompt asks for, at the scope it intends. If a better approach or a real problem outside
   that scope turns up, say so in your final answer instead of widening the work.
 - Say which claims are measured and which are estimated, and give each negative result its scope: what was

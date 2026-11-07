@@ -639,6 +639,11 @@ def test_long_job_outlives_its_turn_and_resumes_the_worker(server, monkeypatch):
     log = re.search(r"^Output: (\S+)$", resumed, re.M).group(1)
     assert "ended] exit 0" in resumed and resumed.endswith(f"Output: {log}")
     assert f"detached job output {jobs_tmp_root()}" in Path(log).read_text()
+    # The log starts with where the job started from, which its result repeats
+    prov = Path(log).read_text().splitlines()[0]
+    assert re.match(rf"loop run: provenance: commit \w+, (clean|dirty \(.+\)), worktree {ws / 'wt' / sid}, "
+                    r"started ", prov)
+    assert f"\nStarted from {prov.removeprefix('loop run: provenance: ')}\nOutput: " in resumed
     assert resumed.startswith("[System] The `loop run` job is done with the result of j-")
     digests = engine.db.q("SELECT payload FROM inbox WHERE ws='detach' AND kind='worker_done' ORDER BY id")
     assert len(digests) == 2 and "result of j-" in digests[1]["payload"]
