@@ -39,7 +39,7 @@ def budget_line(b: dict) -> str:
             f"meta turns {b['meta_turns']}/{lim(b['max_meta_turns'])} · active {b['hours']:.1f} h")
 
 
-BRIEF_FILES = ("spec.md", "goal.md", "goal.yaml")  # a human edit of one quotes spec and goal again
+BRIEF_FILES = ("spec.md", "goal.md")  # a human edit of one quotes spec and goal again; a config edit does not
 
 
 def envelope(items: list[dict], brief: str | None = None) -> str:

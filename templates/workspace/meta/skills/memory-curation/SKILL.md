@@ -1,6 +1,6 @@
 ---
 name: memory-curation
-description: Review, trim, merge and update the workspace's long-term memory (meta/memory, worker/memory) so each file is current, accurate, non-overlapping and worth reading - must be used whenever adding or revising memory, however small the change - when evidence drifts from what memory holds (a stored claim refuted, an insight found wrong, a new durable lesson) or when the human asks to review memory
+description: Add to, revise or prune long-term memory (meta/memory, worker/memory), or write a skill - use it when evidence clearly refutes an entry, a durable lesson emerges, a procedure has recurred enough to become a skill, or the human asks for a memory review
 ---
 
 # Curating long-term memory
@@ -17,8 +17,7 @@ session. Memory meets three standards:
 
 Before adding something, look for the file whose scope it fits and extend that one; a new
 file suits a scope no file covers yet, while a single fact or one goal's events usually fit
-an existing file. A new skill suits a procedure with commands that recurs across workers and
-that no skill covers yet; otherwise a line in memory or in the brief is usually enough.
+an existing file.
 
 ## Review file by file
 
@@ -31,15 +30,16 @@ Start from `README.md`, then take each file in turn and ask:
    lesson built on a wrong premise is rewritten from the facts or deleted.
 3. **Right place.** Choices the human makes themselves (model selection, submissions,
    budgets) stay out of memory. How a mode should behave belongs in `AGENTS.md`, which is
-   human-owned: propose wording there instead of writing a memory. A procedure with commands
-   that recurs across workers belongs in a skill (`skills/` or `../worker/skills/`, an existing
-   one when it fits); memory keeps only the lesson and names the skill.
+   human-owned: propose wording there instead of writing a memory. A recurring procedure with a
+   verifiable outcome belongs in a skill (see Skills); memory keeps only the lesson and names
+   the skill.
 4. **Overlap.** What `AGENTS.md`, a skill, `docs/`, the goal's own files or another memory
    already says can go.
    Files on the same scope can merge into one, renamed to fit what it now holds.
 5. **Form.** Guidance the agent reasons with, not hard rules, mandatory steps, fixed timers or
-   forced plan writes. Give a reason only where the lesson is not obvious without it, as a
-   clause rather than a "Why" section.
+   forced plan writes. Record what was observed and its evidence, not how to reason. Give a
+   reason only where the lesson is not obvious without it, as a clause rather than a "Why"
+   section.
 
 ## Shape
 
@@ -55,6 +55,14 @@ Start from `README.md`, then take each file in turn and ask:
 - Short sentences, no repetition, no ready-made prompt text.
 - `../worker/memory/` stays generic engineering guidance: never mention agent-loop,
   meta-agents or this platform there.
+
+## Skills
+
+Write a skill only for a procedure that has recurred, with clear steps and a verifiable
+outcome: `skills/<name>/SKILL.md` (or `../worker/skills/`), frontmatter `name` and a
+`description` of what it does and when to use it (all an agent sees until it applies), then
+the steps, commands and how to verify the result. Change one only on evidence it is wrong, and
+note the change in `plan.md` for the human. Worker skills stay generic.
 
 ## Applying
 

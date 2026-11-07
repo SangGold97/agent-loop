@@ -63,7 +63,7 @@ sessions, merges their work and closes the goal; the human steers from the web U
 - **Prompts sent to agents** live in code as well as templates: `Engine.kickoff_text`, `mode_text`,
   `language_rule`, the inbox messages pushed in `engine.py` (`[System]`, `[Budget exhausted]`, `[Handoff]`),
   `digest.envelope`, and the `loop` help text in `cli.py`. `Engine.brief_text` quotes spec.md and goal.md in the
-  kickoff, handoff, restart message and after a human edit of spec, goal or goal.yaml.
+  kickoff, handoff, restart message and after a human edit of spec or goal.
 
 ### Templates and live data
 

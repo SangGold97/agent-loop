@@ -212,6 +212,8 @@ def test_envelope_quotes_spec_and_goal_once_after_a_restart_or_human_edit():
                            ev("file_changed", name="spec.md"), ev("file_changed", name="goal.yaml")], brief=brief)
     assert out.endswith("[goal.yaml changed by the human]\n\n" + brief) and out.count("SPEC:") == 1
     assert digest.envelope([ev("file_changed", name="plan.md")], brief=brief) == "[plan.md changed by the human]"
+    # A config edit alone does not quote them
+    assert digest.envelope([ev("file_changed", name="goal.yaml")], brief=brief) == "[goal.yaml changed by the human]"
     # A kickoff or handoff already quotes them
     assert digest.envelope([ev("handoff", text="[Handoff] x"), ev("file_changed", name="goal.md")],
                            brief=brief) == "[Handoff] x\n\n[goal.md changed by the human]"

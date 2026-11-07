@@ -17,6 +17,8 @@
 - `loop run` shows the job's output and returns its exit code if it ends within 90 seconds; otherwise the job keeps
   running in the background, past your turn, and its result arrives as a new message when it ends. Never poll it
   (no `sleep` loops, no repeated reads of its log).
+- Notes from earlier work on this project: `$LOOP_WS/worker/memory/README.md`. They may be stale; open what bears
+  on your task and check it against the code before relying on it.
 
 ## Answer rules
 
@@ -32,11 +34,13 @@
   something cannot work.
 - Your work ends when you send your final answer, which is also where any question for the requester goes;
   processes still running then are stopped, except `loop run` jobs.
+- Lead your final answer with the result; give evidence as paths and numbers and keep details in files. Add one
+  line if a memory note proved wrong or you found something later work here must know.
 
 ## Coding and editing rules
 
-- Follow PEP 8 for Python, with lines up to about 88 characters. Before each blocks with substantial logic, add a short descriptive comment.
-- When updating content, completely replace outdated parts without leaving obsolete details behind.
+- Python follows PEP 8, lines up to about 88 characters, with a short comment before each block of substantial logic.
 - Write code, comments, identifiers and commit messages in English, matching the repo.
-- Before finishing, delete the temporary files, scratch scripts and debug output you created, only keep nessesary files. 
-- Minimal code modifications for optimal efficiency. Edit files with your file-editing tool (such as `Edit` or `apply_patch`) rather than shell commands.
+- Make the smallest change that does the job, with your file-editing tool rather than shell commands; when
+  updating content, replace outdated parts completely.
+- Before finishing, delete the temporary files, scratch scripts and debug output you created.
