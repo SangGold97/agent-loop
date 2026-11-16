@@ -37,7 +37,9 @@ DEFAULTS: dict = {
     # Minutes every agent of a running goal may stay idle, with nothing queued for the meta-work, before the
     # meta-work gets a check-in to look at the work in flight (0: never)
     "idle_checkin_min": 30,
-    "guard": {"deny_patterns": []},
+    # inverse_check_nudge: meta sessions get a one-time reminder to check the premise of `loop note|done|stop`
+    # and of unmarked verdicts they write into a plan or memory file
+    "guard": {"deny_patterns": [], "inverse_check_nudge": True},
     "mcp_servers": [],  # MCP server URLs Claude sessions may use; all others blocked
 }
 

@@ -5,7 +5,8 @@ Guards against mistakes, not adversaries: agents never push, never touch human-o
 the user's Python, workers stay inside their own worktree, and meta sessions change project code only in their
 goal's integration worktree (meta-chats not at all), and no session polls running work from inside its turn
 (nor does a worker sleep long). Messages shown to workers name no platform concepts, so a
-worker experiences these as ordinary limits of its environment.
+worker experiences these as ordinary limits of its environment. Meta sessions also get a one-time reminder
+(`nudge`) to check the premise of an outward `loop` step or of a verdict they record.
 """
 from __future__ import annotations
 
@@ -295,14 +296,20 @@ def check_command(cmd: str, env: dict, cwd: Path | None = None) -> str | None:
     return None
 
 
-def check(event: dict, env: dict) -> str | None:
-    if not env.get("LOOP_ROLE") or not env.get("LOOP_WS"):
-        return None
+def parse_call(event: dict) -> tuple[str, dict, Path]:
+    """The tool name, its input and the cwd it runs in."""
     tool, inp = event.get("tool_name", ""), event.get("tool_input") or {}
     cwd = Path(event.get("cwd") or os.getcwd())
     if "toolCall" in event:  # agy names the call differently and runs its hooks in the plugin dir, not the cwd
         tool, inp = event["toolCall"].get("name", ""), event["toolCall"].get("args") or {}
         cwd = Path(inp.get("Cwd") or (event.get("workspacePaths") or [cwd])[0])
+    return tool, inp, cwd
+
+
+def check(event: dict, env: dict) -> str | None:
+    if not env.get("LOOP_ROLE") or not env.get("LOOP_WS"):
+        return None
+    tool, inp, cwd = parse_call(event)
     # An advisor edit whose target cannot be read from the call is refused rather than let through
     if env.get("LOOP_ROLE") == "meta-advisor" and tool in EDIT_TOOLS | {"apply_patch"} and \
             not edit_paths(tool, inp):
@@ -317,16 +324,123 @@ def check(event: dict, env: dict) -> str | None:
     return None
 
 
+# Inverse-check nudge: a meta session's outward `loop` steps and the verdicts it records in a plan or
+# memory get one reminder per turn to observe the premise they rest on; repeating the call proceeds
+NUDGE_CMDS = {"note", "done", "stop"}
+NUDGE_FILES = re.compile(r"^(goals/[^/]+/plan\.md|(meta|worker)/memory/[^/]+\.md)$")
+VERDICT = re.compile(
+    r"\b(ruled? out|dead|killed|kills?|break-even|unreachable|infeasible|impossible|not worth|no route|"
+    r"refuted|rejected|cannot (reach|beat|work|be)|won'?t work|giving up|closed? (the|this|on)|"
+    r"(is|at|a|the|hard|design) (floor|ceiling))\b"
+    r"|không (thể|đáng)|→ không làm|không làm nữa|bác bỏ|loại bỏ|ngõ cụt|bất khả|hết đường", re.I)
+MARKED = re.compile(r"\[(measured|open)\b", re.I)
+NUDGE_STATE = ".inverse-check"
+
+
+def _strings(value) -> list[str]:
+    """Every string inside a tool input (agy and MultiEdit nest their new text)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
+def _patch_added(text: str) -> dict[str, list[str]]:
+    """The lines an apply_patch text adds, per file."""
+    out, path = {}, None
+    for line in text.splitlines():
+        if m := re.match(r"^\*\*\* (?:Add|Update) File: (.+)$|^\*\*\* Move to: (.+)$", line):
+            path = m.group(1) or m.group(2)
+        elif line.startswith("*** "):
+            path = None
+        elif path and line.startswith("+"):
+            out.setdefault(path, []).append(line[1:])
+    return out
+
+
+def added_lines(tool: str, inp: dict, cwd: Path, ws: Path) -> dict[Path, list[str]]:
+    """Per edited plan or memory file, the lines this call writes that the file does not hold yet."""
+    if tool == "apply_patch":
+        text = inp.get("command") or inp.get("patch") or inp.get("input") or ""
+        text = "\n".join(map(str, text)) if isinstance(text, list) else str(text)
+        new = {cwd / p: lines for p, lines in _patch_added(text).items()}
+    else:
+        paths = set(edit_paths(tool, inp))
+        lines = [ln for s in _strings(inp) if s not in paths for ln in s.splitlines()]
+        new = {cwd / os.path.expanduser(p): lines for p in paths}
+    out = {}
+    for path, lines in new.items():
+        path = path.resolve()
+        if not path.is_relative_to(ws) or not NUDGE_FILES.match(path.relative_to(ws).as_posix()):
+            continue
+        old = set(path.read_text(errors="replace").splitlines()) if path.is_file() else set()
+        out[path] = [ln for ln in lines if ln not in old]
+    return out
+
+
+def nudge(event: dict, env: dict) -> str | None:
+    """A one-time reminder before a meta session's `loop note|done|stop`, or before it records an unmarked
+    verdict in a plan or memory file. The key of each reminder is kept in the turn's TMPDIR, so the same call
+    made again proceeds; without a writable TMPDIR there is no reminder at all."""
+    if env.get("LOOP_NUDGE") != "1" or env.get("LOOP_ROLE") not in ("meta-work", "meta-chat") or \
+            not env.get("LOOP_WS") or not env.get("TMPDIR"):
+        return None
+    tool, inp, cwd = parse_call(event)
+    key = text = None
+    if tool in SHELL_TOOLS:
+        cmd = inp.get("command") or inp.get("cmd") or inp.get("CommandLine") or ""
+        cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        for _, words in simple_commands(strip_heredocs(cmd)):
+            if os.path.basename(words[0]) == "loop" and len(words) > 1 and words[1] in NUDGE_CMDS:
+                key = f"cmd:{words[1]}"
+                text = (f"Reminder, not a block: run the same command again to proceed. First name the "
+                        f"premise this `loop {words[1]}` rests on and whether a tool result from this "
+                        f"session shows it; if not, check it now or say in the text that it is unchecked "
+                        f"(inverse-check skill).")
+                break
+    elif tool in EDIT_TOOLS | {"apply_patch"}:
+        for path, lines in added_lines(tool, inp, cwd, Path(env["LOOP_WS"]).resolve()).items():
+            verdicts = [ln.strip() for ln in lines if VERDICT.search(ln) and not MARKED.search(ln)]
+            if verdicts:
+                key = f"edit:{path}"
+                more = f" (and {len(verdicts) - 1} more)" if len(verdicts) > 1 else ""
+                text = (f"Reminder, not a block: repeat the edit to proceed. This edit records a verdict: "
+                        f"\"{verdicts[0][:200]}\"{more}. Tag it [measured: what you ran or read] if you "
+                        f"observed what it rests on, or [open: the test that would settle it] if it rests "
+                        f"on arithmetic, a document or a summary, so later readers do not take it as "
+                        f"settled (inverse-check skill).")
+                break
+    if not key:
+        return None
+    # Remind once per key and turn; a state that cannot be read or written means no reminder
+    state = Path(env["TMPDIR"]) / NUDGE_STATE
+    try:
+        seen = state.read_text().splitlines() if state.exists() else []
+        if key in seen:
+            return None
+        state.parent.mkdir(parents=True, exist_ok=True)
+        with state.open("a") as f:
+            f.write(key + "\n")
+    except OSError:
+        return None
+    return text
+
+
 def main() -> None:
     try:
         event = json.loads(sys.stdin.read() or "{}")
-        reason = check(event, dict(os.environ))
+        env = dict(os.environ)
+        reason = check(event, env)
+        note = None if reason else nudge(event, env)
     except Exception:  # never break the agent because the guard itself failed
         return
-    if reason and "toolCall" in event:
-        print(json.dumps({"decision": "deny", "reason": reason}))
-    elif reason:
-        print(f"blocked: {reason}", file=sys.stderr)
+    if (reason or note) and "toolCall" in event:
+        print(json.dumps({"decision": "deny", "reason": reason or note}))
+    elif reason or note:
+        print(f"blocked: {reason}" if reason else note, file=sys.stderr)
         sys.exit(2)
 
 

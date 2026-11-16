@@ -350,6 +350,85 @@ def test_guard_agy_payload(tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["decision"] == "deny"
 
 
+def test_guard_nudge(tmp_path):
+    (tmp_path / "goals/m1").mkdir(parents=True)
+    (tmp_path / "meta/memory").mkdir(parents=True)
+    plan = tmp_path / "goals/m1/plan.md"
+    plan.write_text("# Plan\n- B is ruled out: break-even 30 T\n")
+
+    def env(role="meta-work", turn="t1", **extra):
+        return {**guard_env(tmp_path, role), "LOOP_NUDGE": "1", "TMPDIR": str(tmp_path / turn), **extra}
+
+    sh = lambda cmd: {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": str(tmp_path / "meta")}
+    edit = lambda path, old, new: {"tool_name": "Edit", "cwd": str(tmp_path / "meta"),
+                                   "tool_input": {"file_path": str(path), "old_string": old, "new_string": new}}
+    # Outward loop steps: one reminder per command and turn, then the same call proceeds
+    m = env()
+    note = guard.nudge(sh("loop note <<'EOF'\nthe job ends at 03:00\nEOF"), m)
+    assert note.startswith("Reminder, not a block") and "`loop note`" in note
+    assert guard.nudge(sh("loop note <<'EOF'\nthe job ends at 03:00\nEOF"), m) is None
+    assert "`loop done`" in guard.nudge(sh("cd .. && loop done --status partial <<'EOF'\nx\nEOF"), m)
+    assert "`loop stop`" in guard.nudge(sh("loop stop w-2"), m)
+    for cmd in ("loop ls", "loop send w-2 <<'EOF'\nloop note\nEOF", "echo loop note", "pytest -q"):
+        assert guard.nudge(sh(cmd), m) is None, cmd
+    assert guard.nudge(sh('loop note "x"'), env("meta-chat", "t2"))
+    # Only meta-work and meta-chat, only with the switch on and a turn scratch dir
+    for e in (env("worker", "t3"), env("meta-advisor", "t4"), env(turn="t5", LOOP_NUDGE=""),
+              {**env(turn="t6"), "TMPDIR": ""}):
+        assert guard.nudge(sh("loop note x"), e) is None
+    (tmp_path / "t7").write_text("not a dir")
+    assert guard.nudge(sh("loop note x"), {**env(), "TMPDIR": str(tmp_path / "t7/sub")}) is None
+    # A new unmarked verdict in a plan or memory file is quoted once per file and turn
+    added = "- B is ruled out: break-even 30 T\n- C cannot beat the floor"
+    text = guard.nudge(edit(plan, "- B is ruled out: break-even 30 T", added), env(turn="t8"))
+    assert '"- C cannot beat the floor"' in text and "[open:" in text
+    assert guard.nudge(edit(plan, "- B is ruled out: break-even 30 T", added), env(turn="t8")) is None
+    mem = tmp_path / "meta/memory/ledger.md"
+    vi = {"tool_name": "Write", "cwd": str(tmp_path), "tool_input": {"file_path": "meta/memory/ledger.md",
+                                                                      "content": "- SFT riêng → không làm"}}
+    assert "không làm" in guard.nudge(vi, env(turn="t9"))
+    # Marked verdicts, verdicts already in the file, other files and plain lines pass
+    for call in (edit(plan, "# Plan", "# Plan\n- C cannot beat the floor [open: run the 2k replay]"),
+                 edit(plan, "# Plan", "# Plan\n- C is dead [measured: replay +0.009 +- 0.005]"),
+                 edit(plan, "# Plan", "# Plan\n- [x] train the baseline"),
+                 {"tool_name": "Write", "cwd": str(tmp_path),
+                  "tool_input": {"file_path": str(plan), "content": plan.read_text() + "- [ ] next run\n"}},
+                 edit(tmp_path / "goals/m1/notes.md", "", "- C is ruled out"),
+                 edit(mem.with_name("x.txt"), "", "- C is ruled out"),
+                 sh("echo '- C is ruled out' >> goals/m1/plan.md")):
+        assert guard.nudge(call, env(turn="t10")) is None, call
+    # apply_patch (Codex) and agy calls carry their new text in other fields
+    patch = ("*** Begin Patch\n*** Update File: goals/m1/plan.md\n@@\n # Plan\n+- D is not worth it\n"
+             "*** Add File: wt/m1/x.py\n+print('ruled out')\n*** End Patch")
+    codex = {"tool_name": "apply_patch", "tool_input": {"command": patch}, "cwd": str(tmp_path)}
+    assert '"- D is not worth it"' in guard.nudge(codex, env(turn="t11"))
+    agy = {"toolCall": {"name": "write_to_file", "args": {"TargetFile": str(mem), "CodeContent": "E: dead end, giving up"}},
+           "workspacePaths": [str(tmp_path)]}
+    assert guard.nudge(agy, env(turn="t12"))
+    # The hook: a reminder exits 2 without the "blocked:" prefix and passes on repeat; agy gets a deny decision
+    run = lambda event, e: subprocess.run([guard.sys.executable, "-m", "agentloop.guard"], input=json.dumps(event),
+                                          capture_output=True, text=True, env={**os.environ, **e})
+    first, again = run(sh("loop done --status success"), env(turn="t13")), run(sh("loop done --status success"), env(turn="t13"))
+    assert first.returncode == 2 and first.stderr.startswith("Reminder, not a block") and again.returncode == 0
+    blocked = run(sh("git push"), env(turn="t13"))
+    assert blocked.returncode == 2 and blocked.stderr.startswith("blocked: pushing")
+    out = run({"toolCall": {"name": "run_command", "args": {"CommandLine": "loop note x"}},
+               "workspacePaths": [str(tmp_path)]}, env(turn="t14"))
+    assert out.returncode == 0 and json.loads(out.stdout)["decision"] == "deny"
+
+
+def test_inverse_check_skill_templates():
+    from agentloop import workspace
+    files = workspace._template_files()
+    meta, worker = files["meta/skills/inverse-check/SKILL.md"], files["worker/skills/inverse-check/SKILL.md"]
+    assert meta == worker  # one skill for every layer and CLI
+    import re
+    import yaml
+    front = yaml.safe_load(re.match(r"---\n(.*?)\n---", meta, re.S).group(1))
+    assert front["name"] == "inverse-check" and len(front["description"]) <= 1024
+    assert not re.search(r"\bloop\b|agent-loop|platform|meta-|advisor", worker, re.I)
+
+
 def test_agy_plugin_and_worker_text(tmp_path, monkeypatch):
     from agentloop import workspace
     monkeypatch.setattr(workspace, "AGY_PLUGIN", tmp_path / "plugin")
