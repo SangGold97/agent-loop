@@ -290,6 +290,7 @@ const CHROME_TIP = 'Claude meta-work only: it gets the Claude in Chrome tools an
 // Shares its row with mid-turn, so the side grid keeps its rows while the Chrome option is hidden
 const chromeHidden = agent => (agent || 'claude') === 'claude' ? '' : 'style="display:none"';
 const MID_TURN_TIP = 'Every agent of the goal: a message to an agent that is working reaches it after its current tool call instead of waiting for its turn to end (worker reports, advice and notes to the meta-work, loop send to a worker, follow-ups to the advisor, your chat messages). Off: messages wait for the turn to end. Takes effect at once.';
+const INVERSE_CHECK_TIP = 'Meta-work and meta-chat: one reminder per turn, before loop note, done or stop and before an untagged verdict (ruled out, not worth it, ...) is written into the plan or memory, to check the premise it rests on; repeating the call proceeds. The inverse-check skill stays available either way. Applies from each session\'s next turn.';
 function configForm(conf, footer = '') {
   const b = conf.budget || {}, mw = conf.meta_work || {}, wk = conf.workers || {};
   const num = (k, v, title, tip) => `<label class="f" title="${tip}">${title}<input type="number" min="0" step="1" data-b="${k}" value="${v ?? ''}" placeholder="∞"></label>`;
@@ -306,7 +307,8 @@ function configForm(conf, footer = '') {
       ${tokInput('data-rotate title="start a fresh meta-work session when its context exceeds this many thousand tokens; empty = off"', mw.rotate_at_tokens, 'off (e.g. 1200)')}
       <div class="k">options</div>
       <div class="opt-row"><label class="inline chrome-opt" title="${CHROME_TIP}" ${chromeHidden(mw.agent)}><input type="checkbox" data-chrome ${mw.chrome ? 'checked' : ''}> meta-work uses Claude in Chrome</label>
-        <label class="inline" title="${MID_TURN_TIP}"><input type="checkbox" data-mid-turn ${conf.mid_turn ? 'checked' : ''}> mid-turn</label></div>
+        <label class="inline" title="${MID_TURN_TIP}"><input type="checkbox" data-mid-turn ${conf.mid_turn ? 'checked' : ''}> mid-turn</label>
+        <label class="inline" title="${INVERSE_CHECK_TIP}"><input type="checkbox" data-inverse-check ${(conf.inverse_check ?? true) ? 'checked' : ''}> inverse-check</label></div>
       <div class="k">budget</div><div class="budget-row">${num('max_concurrent_workers', b.max_concurrent_workers, 'workers', 'concurrent workers')}
         ${num('max_worker_turns', b.max_worker_turns, 'worker turns', 'worker turns in total')}${num('max_meta_turns', b.max_meta_turns, 'meta turns', 'meta-work + advisor turns in total')}</div>
       <div class="k">language</div><select data-lang title="for plan, report, advice and chat replies to you; meta-work and workers talk to each other in English">${['English', 'Vietnamese'].concat(
@@ -332,7 +334,8 @@ function readConfigForm(root) {
   $$('[data-b]', root).forEach(i => { budget[i.dataset.b] = i.value.trim() === '' ? null : Number(i.value); });
   return { meta_work: metaWork, meta_advisor: readAgentRow(rows.find(r => r.dataset.key === 'meta_advisor')),
     workers, budget, language: $('[data-lang]', root).value,
-    base_branch: $('[data-base]', root).value.trim() || null, mid_turn: $('[data-mid-turn]', root).checked };
+    base_branch: $('[data-base]', root).value.trim() || null, mid_turn: $('[data-mid-turn]', root).checked,
+    inverse_check: $('[data-inverse-check]', root).checked };
 }
 
 // ---------- sidebar & routing ----------

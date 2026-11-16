@@ -49,7 +49,8 @@ To run it on another machine and use the UI from this one, see [remote/README.md
   (or a meta-chat turn that changes the integration worktree) raises an alert.
 - The same guard nudges meta sessions once per turn before `loop note|done|stop` and before they write an untagged
   verdict ("ruled out", "not worth it", ...) into a plan or memory file, to check the premise it rests on (the
-  `inverse-check` skill every layer has); repeating the call proceeds. `loop.yaml → guard.inverse_check_nudge` turns it off.
+  `inverse-check` skill every layer has); repeating the call proceeds. The goal option `inverse_check` (config tab,
+  default from `loop.yaml → defaults`) turns it off.
 - Claude sessions connect only the MCP servers in `loop.yaml → mcp_servers` (URLs; default none).
 - Git hooks in the project repo block agent commits to protected branches and any agent push.
 - Agents never touch the base branch. Accepting a goal removes its worktrees and keeps

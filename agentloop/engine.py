@@ -1345,7 +1345,7 @@ class Engine:
                "LOOP_API": self.api_url, "LOOP_TOKEN": token,
                "LOOP_WS": p, "LOOP_GOAL": gid, "LOOP_GOAL_DIR": gdir, "LOOP_SESSION": sid,
                "LOOP_GUARD_PATTERNS": json.dumps(cfg["guard"]["deny_patterns"] or []),
-               "LOOP_NUDGE": "1" if cfg["guard"].get("inverse_check_nudge") else ""}
+               "LOOP_NUDGE": "1" if cfg["goal"].get("inverse_check") else ""}
         if sess["kind"] != "meta-chat":  # a GPU is handed to one job at a time, by `loop run --vram`
             env["CUDA_VISIBLE_DEVICES"] = ""
         if not ADAPTERS[sess["agent"]].live:  # its mailbox hook runs while this flag exists (mid-turn delivery)

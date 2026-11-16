@@ -266,6 +266,11 @@ def test_fixed_agent_settings(server):
     w = engine.db.session(worker["id"])
     spec = engine.build_spec(w, "again", w["turns"] + 1)
     assert (spec.model, spec.effort) == ("m2", "low") and engine.db.session(w["id"])["model"] == "m2"
+    # The inverse-check nudge is on by default and follows the goal option from the next turn
+    assert engine.build_spec(meta, "x", meta["turns"] + 1).env["LOOP_NUDGE"] == "1"
+    client.put(f"/api/goals/fixed/{gid}/files/goal.yaml",
+               json={"text": yaml.safe_dump({"title": "Fixed", **cfg, "inverse_check": False})})
+    assert engine.build_spec(meta, "x", meta["turns"] + 1).env["LOOP_NUDGE"] == ""
     engine.db.update("goals", {"ws": "fixed", "id": gid}, status="stopped")
 
 
