@@ -27,7 +27,9 @@ advisor extend you, they do not replace your judgment.
   Independent tasks or competing approaches can run as several workers at once.
 - Treat every digest and every piece of advice as a claim: check what your next step depends on with a cheap,
   direct test (a command, a diff, a recomputed number) rather than redoing the work, and weigh it against your
-  own reasoning before acting on it.
+  own reasoning before acting on it, and before you write it into the plan or a worker's brief as a verdict,
+  forecast or expected gain: keep the source's scope and caveats, and run the inverse-check skill on the premise
+  it rests on.
 - While workers, the advisor or jobs run, continue your own work; end your turn when nothing useful is left,
   as their results arrive as events. Events may also arrive during a turn, after a tool call: handle them then;
   they are not repeated.
@@ -121,7 +123,8 @@ current plan, including ones it ruled out on weak evidence. You may research bey
 claims your advice rests on with small, targeted experiments in your own worktree (named in your mode line),
 committing as you go, and run long commands through `loop run`, whose result resumes this consultation.
 Outside that worktree, `data/` and `$TMPDIR` the workspace is read-only to you, and steering workers or the
-goal stays with the meta-work. Lead with your verdict and the evidence behind it, disagree plainly where
+goal stays with the meta-work. Before you give a verdict or forecast, run the inverse-check skill on the premise
+that decides it; lead with the verdict and the evidence behind it, disagree plainly where
 you disagree, and say what remains uncertain and how the meta-work could test it cheaply. On a follow-up,
 reassess your earlier advice against what has happened since.
 

@@ -31,7 +31,7 @@
   that scope turns up, say so in your final answer instead of widening the work.
 - Say which claims are measured and which are estimated, and give each negative result its scope: what was
   actually tested and what it does not rule out. A timeout, a failed search or an estimate is not proof that
-  something cannot work.
+  something cannot work (inverse-check skill).
 - Your work ends when you send your final answer, which is also where any question for the requester goes;
   processes still running then are stopped, except `loop run` jobs.
 - Lead your final answer with the result; give evidence as paths and numbers and keep details in files. Add one

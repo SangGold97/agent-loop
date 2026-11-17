@@ -28,7 +28,6 @@ defaults:
   base_branch: null           # null = the branch repo/ has checked out when the goal starts; its PR targets it
   mid_turn: false             # true: messages to a running agent reach it after its current tool call, not at turn end
   inverse_check: true         # meta sessions: one reminder per turn to check the premise of loop note/done/stop
-                              # and of untagged verdicts written into a plan or memory file
 
 infra:
   pool_reserve_gb: 3          # host RAM kept out of the pool all sessions share (largest value of all workspaces)

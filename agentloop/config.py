@@ -30,8 +30,7 @@ DEFAULTS: dict = {
         "base_branch": None,
         # Messages to a session in a turn reach it after its current tool call instead of waiting for the turn to end
         "mid_turn": False,
-        # Meta sessions get a one-time reminder to check the premise of `loop note|done|stop` and of untagged
-        # verdicts they write into a plan or memory file (guard.nudge)
+        # Meta sessions get a one-time reminder per turn to check the premise of `loop note|done|stop` (guard.nudge)
         "inverse_check": True,
     },
     "infra": {"pool_reserve_gb": 3, "worker_memory_max_gb": None, "vram_reserve_gb": 1},

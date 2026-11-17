@@ -378,33 +378,12 @@ def test_guard_nudge(tmp_path):
         assert guard.nudge(sh("loop note x"), e) is None
     (tmp_path / "t7").write_text("not a dir")
     assert guard.nudge(sh("loop note x"), {**env(), "TMPDIR": str(tmp_path / "t7/sub")}) is None
-    # A new unmarked verdict in a plan or memory file is quoted once per file and turn
-    added = "- B is ruled out: break-even 30 T\n- C cannot beat the floor"
-    text = guard.nudge(edit(plan, "- B is ruled out: break-even 30 T", added), env(turn="t8"))
-    assert '"- C cannot beat the floor"' in text and "[open:" in text
-    assert guard.nudge(edit(plan, "- B is ruled out: break-even 30 T", added), env(turn="t8")) is None
-    mem = tmp_path / "meta/memory/ledger.md"
-    vi = {"tool_name": "Write", "cwd": str(tmp_path), "tool_input": {"file_path": "meta/memory/ledger.md",
-                                                                      "content": "- SFT riêng → không làm"}}
-    assert "không làm" in guard.nudge(vi, env(turn="t9"))
-    # Marked verdicts, verdicts already in the file, other files and plain lines pass
-    for call in (edit(plan, "# Plan", "# Plan\n- C cannot beat the floor [open: run the 2k replay]"),
-                 edit(plan, "# Plan", "# Plan\n- C is dead [measured: replay +0.009 +- 0.005]"),
-                 edit(plan, "# Plan", "# Plan\n- [x] train the baseline"),
+    # Plan and memory writes carry no reminder, whatever they say and whichever tool makes them
+    for call in (edit(plan, "# Plan", "# Plan\n- C cannot beat the floor"),
                  {"tool_name": "Write", "cwd": str(tmp_path),
-                  "tool_input": {"file_path": str(plan), "content": plan.read_text() + "- [ ] next run\n"}},
-                 edit(tmp_path / "goals/m1/notes.md", "", "- C is ruled out"),
-                 edit(mem.with_name("x.txt"), "", "- C is ruled out"),
-                 sh("echo '- C is ruled out' >> goals/m1/plan.md")):
-        assert guard.nudge(call, env(turn="t10")) is None, call
-    # apply_patch (Codex) and agy calls carry their new text in other fields
-    patch = ("*** Begin Patch\n*** Update File: goals/m1/plan.md\n@@\n # Plan\n+- D is not worth it\n"
-             "*** Add File: wt/m1/x.py\n+print('ruled out')\n*** End Patch")
-    codex = {"tool_name": "apply_patch", "tool_input": {"command": patch}, "cwd": str(tmp_path)}
-    assert '"- D is not worth it"' in guard.nudge(codex, env(turn="t11"))
-    agy = {"toolCall": {"name": "write_to_file", "args": {"TargetFile": str(mem), "CodeContent": "E: dead end, giving up"}},
-           "workspacePaths": [str(tmp_path)]}
-    assert guard.nudge(agy, env(turn="t12"))
+                  "tool_input": {"file_path": "meta/memory/ledger.md", "content": "- SFT riêng → không làm"}},
+                 sh("python3 - <<'EOF'\nopen('goals/m1/plan.md', 'a').write('- C is ruled out')\nEOF")):
+        assert guard.nudge(call, env(turn="t8")) is None, call
     # The hook: a reminder exits 2 without the "blocked:" prefix and passes on repeat; agy gets a deny decision
     run = lambda event, e: subprocess.run([guard.sys.executable, "-m", "agentloop.guard"], input=json.dumps(event),
                                           capture_output=True, text=True, env={**os.environ, **e})

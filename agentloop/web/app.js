@@ -290,7 +290,7 @@ const CHROME_TIP = 'Claude meta-work only: it gets the Claude in Chrome tools an
 // Shares its row with mid-turn, so the side grid keeps its rows while the Chrome option is hidden
 const chromeHidden = agent => (agent || 'claude') === 'claude' ? '' : 'style="display:none"';
 const MID_TURN_TIP = 'Every agent of the goal: a message to an agent that is working reaches it after its current tool call instead of waiting for its turn to end (worker reports, advice and notes to the meta-work, loop send to a worker, follow-ups to the advisor, your chat messages). Off: messages wait for the turn to end. Takes effect at once.';
-const INVERSE_CHECK_TIP = 'Meta-work and meta-chat: one reminder per turn, before loop note, done or stop and before an untagged verdict (ruled out, not worth it, ...) is written into the plan or memory, to check the premise it rests on; repeating the call proceeds. The inverse-check skill stays available either way. Applies from each session\'s next turn.';
+const INVERSE_CHECK_TIP = 'Meta-work and meta-chat: one reminder per turn, before loop note, done or stop, to check the premise the step rests on; repeating the call proceeds. The inverse-check skill stays available either way. Applies from each session\'s next turn.';
 function configForm(conf, footer = '') {
   const b = conf.budget || {}, mw = conf.meta_work || {}, wk = conf.workers || {};
   const num = (k, v, title, tip) => `<label class="f" title="${tip}">${title}<input type="number" min="0" step="1" data-b="${k}" value="${v ?? ''}" placeholder="∞"></label>`;

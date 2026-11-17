@@ -1,6 +1,6 @@
 ---
 name: inverse-check
-description: Test a conclusion by trying to prove its opposite, then observe the one premise that decides between them. Use it before you state, record or act on a conclusion that you or others will rely on, even when it seems obvious - a verdict that something works, fails, is ruled out or is not worth doing; a forecast of time, cost, score or odds; a claimed cause; a comparison that keeps or drops an option; a recommendation or an outward step such as a message, merge, stop, submission or closing report - and whenever someone asks whether you are sure. Skip it for routine progress, numbers you are only restating, and small steps that are easy to undo.
+description: Test a conclusion by trying to prove its opposite, then observe the one premise that decides between them. Use it before you state, record or act on a conclusion that you or others will rely on, even when it seems obvious - a verdict that something works, fails, is clean, is ruled out or is not worth doing; a forecast of time, cost, score or odds; a claimed cause; a comparison that keeps or drops an option; a recommendation or an outward step such as a message, merge, stop, submission or closing report - and whenever someone asks whether you are sure. Skip it for routine progress, numbers you are only restating, and small steps that are easy to undo.
 ---
 
 # Inverse check
@@ -29,10 +29,10 @@ if it needs a long run, start it and treat the claim as open until the result re
 you continue the work that does not depend on it. The check needs nobody's approval: run it,
 then act on what it showed.
 
-When the claim goes into a plan, a memory entry or a report, say how it stands:
-`[measured: <what you ran or read>]` when you observed it, `[open: <the test that would settle
-it>]` when you did not. A verdict that rests on arithmetic, a paper or a document stays open
-until its premises are observed. In a chat reply, say the same in plain words.
+When the claim goes into a plan, a memory entry, a brief or a report, say how it stands: what
+you observed and how, or that it is still open and the test that would settle it. A verdict
+that rests on arithmetic, a paper, a document or someone's summary stays open until its
+premises are observed, and a result you pass on keeps the scope and caveats its source gave.
 
 ## Where each kind of claim usually breaks
 
@@ -42,13 +42,15 @@ reads its pace, because a correct pace carried past a limit gives a confident wr
 They compare with how long similar work actually took, and ask what would make the estimate
 wrong by half or double. Give a range and the observation that would show it wrong.
 
-**Negative verdicts** (fails, ruled out, floor, not worth it, not needed). An experimental
+**Negative verdicts** (fails, ruled out, floor, not worth it, not needed, clean). An experimental
 scientist knows that a failed attempt closes that attempt, not the direction, and that a bound
 closes a direction only when every premise behind it has been observed. Before rejecting an
 idea, build its strongest version; where others got past the limit, find what they did
 differently. Ask what a solution beyond the floor would have to do that none of the tried ones
-does - that is a new hypothesis, not a reason to stop. A wrong negative ends all later work on
-the direction, so it is the most expensive mistake and the one that most needs this check.
+does - that is a new hypothesis, not a reason to stop. A check that finds nothing ("clean",
+"none left", "passed") is only as good as the tool that ran it: before trusting the zero, show
+that the tool finds a case known to be there. A wrong negative ends all later work on the
+direction, so it is the most expensive mistake and the one that most needs this check.
 
 **Diagnoses** (X causes Y). A physician or incident investigator keeps at least two causes in
 mind and looks for the observation that tells them apart, because a signal that matches a
